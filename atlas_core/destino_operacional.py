@@ -142,10 +142,10 @@ def calcular_ruta_operacional(fila: Mapping[str, object], direccion: str, comuna
     carpeta = Path(carpeta_catalogos)
     planta_id = str(fila.get("planta_origen_id") or "").strip()
     try:
-        planta = next((p for p in CatalogoPlantas(carpeta / "plantas.json").listar() if p.planta_id == planta_id),
-                      None) if planta_id else None
+        plantas = tuple(CatalogoPlantas(carpeta / "plantas.json").listar())
     except (OSError, ValueError):
-        planta = None
+        plantas = ()
+    planta = next((p for p in plantas if p.planta_id == planta_id), None) if planta_id else None
     if planta is None:
         return {"estado_ruta": "PENDIENTE", "motivo": "PLANTA_ORIGEN_DESCONOCIDA"}
     if proveedor_rutas is None:
@@ -166,7 +166,7 @@ def calcular_ruta_operacional(fila: Mapping[str, object], direccion: str, comuna
             evidencia_origen=str(fila.get("evidencia_origen") or ""),
             proveedor_geocodificacion_fallback=proveedor_rutas_fallback,
             comuna_territorial_conocida=comuna, comuna_confirmada_humano=comuna,
-            base_geografica_local=base_local,
+            base_geografica_local=base_local, plantas_conocidas=plantas,
         )
     except Exception as error:  # noqa: BLE001 -- un fallo del proveedor deja la ruta pendiente
         return {"estado_ruta": "PENDIENTE", "motivo": f"ERROR_PROVEEDOR: {type(error).__name__}"}

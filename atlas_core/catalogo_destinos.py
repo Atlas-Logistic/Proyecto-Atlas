@@ -271,7 +271,21 @@ def _numeracion_mixta_como_maestro(calle: str, texto: str, comuna_confirmada: st
         equivalente = token.translate(_LETRAS_OCR_COMO_DIGITO)
         return equivalente if equivalente in numeros else token
 
-    return _TOKEN_NUMERACION_MIXTA.sub(reemplazo, texto)
+    texto = _TOKEN_NUMERACION_MIXTA.sub(reemplazo, texto)
+    # Caso real 488392 ("PARAMERICANA NORTE 1850O ... COLINA"): la O leída
+    # en lugar de 0 puede quedar al FINAL de la numeración, posición que
+    # la regla mixta excluye (una letra final suele ser numeración real).
+    # La regla O->0 de siempre ya la acepta en cualquier posición; aquí se
+    # aplica sólo cuando equivale EXACTAMENTE al número confirmado y con la
+    # comuna confirmada presente (exigida arriba), para que la tolerancia
+    # de un carácter en el nombre de la vía pueda componerse con ella.
+
+    def reemplazo_o(coincidencia: re.Match) -> str:
+        token = coincidencia.group(0)
+        equivalente = token.replace("O", "0")
+        return equivalente if equivalente in numeros else token
+
+    return _NUMERACION_CON_O_INICIAL.sub(reemplazo_o, texto)
 
 
 def _coincide_con_numeracion_mixta(calle: str, texto: str, comuna_confirmada: str) -> bool:
@@ -381,6 +395,37 @@ def forma_comparable_direccion(texto: str) -> str:
             continue
         salida.append(_ABREVIATURAS_VIA.get(token, token))
     return " ".join(salida)
+
+
+# Caso real 488392 (AZA COLINA): la misma vía nacional tiene un nombre
+# oficial y uno de uso común. La Ruta 5 Norte, en su tramo urbano/periurbano
+# de Santiago, se llama oficialmente "Avenida Presidente Eduardo Frei
+# Montalva" (así la registran el INE y el catálogo de plantas: "AV. PDTE.
+# EDUARDO FREI MONTALVA 18500, COLINA"), pero las guías la imprimen como
+# "PANAMERICANA NORTE 18500" y ningún geocodificador la ubica con ese
+# nombre (sólo devuelve el centro de la comuna). Sólo se usa para comparar
+# un texto documental contra una dirección YA conocida, con número y
+# comuna como anclas exactas; nunca se envía al geocodificador ni cambia
+# números.
+_NOMBRES_EQUIVALENTES_VIA = (
+    ("PRESIDENTE EDUARDO FREI MONTALVA", "PANAMERICANA NORTE"),
+)
+
+
+def variantes_nombre_via(calle: str) -> tuple[str, ...]:
+    """Otras escrituras de la misma vía (nombre oficial <-> de uso común),
+    en forma comparable, conservando el resto de la dirección intacto.
+    Vacío si la calle no corresponde a una vía con nombre equivalente."""
+    tokens = forma_comparable_direccion(calle).split()
+    while tokens and tokens[0] in _TOKENS_ESTRUCTURALES_DIRECCION:
+        tokens = tokens[1:]
+    sin_via = " ".join(tokens)
+    variantes = []
+    for oficial, comun in _NOMBRES_EQUIVALENTES_VIA:
+        for desde, hacia in ((oficial, comun), (comun, oficial)):
+            if sin_via == desde or sin_via.startswith(desde + " "):
+                variantes.append(hacia + sin_via[len(desde):])
+    return tuple(variantes)
 
 
 def separar_numero_comuna(texto: str) -> str:

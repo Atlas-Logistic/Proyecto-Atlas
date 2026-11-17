@@ -3970,6 +3970,7 @@ def procesar_archivo(
                                     punto_gps_destino=resultado_gps.punto_gps_destino,
                                     contexto_obra=str(datos.get("obra destino", "")),
                                     destinos_relacion_confirmada=destinos_relacion_ruteo,
+                                    plantas_conocidas=plantas_catalogo,
                                 )
                                 resultado_entrega.update({
                                     "direccion_entrega": ruta_recalculada.direccion_entrega_geocodificada,
@@ -4095,6 +4096,7 @@ def procesar_archivo(
                                 punto_gps_destino=resultado_gps.punto_gps_destino,
                                 contexto_obra=str(datos.get("obra destino", "")),
                                 destinos_relacion_confirmada=destinos_relacion_ruteo,
+                                plantas_conocidas=plantas_catalogo,
                             )
                             if ruta_desambiguada.estado_ruta:
                                 resultado_entrega.update({

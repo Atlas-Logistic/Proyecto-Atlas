@@ -50,6 +50,7 @@ from atlas_core.catalogo_destinos import (
     direccion_confirmada_coincide,
     normalizar_nombre_destino,
     numeracion_con_ruido_ocr,
+    variantes_nombre_via,
 )
 from atlas_core.geografia import EstadoNormalizacion, cargar_geografia
 from atlas_core.geografia.base_local import (
@@ -2046,6 +2047,7 @@ def calcular_ruta_con_planta_conocida(
     comuna_confirmada_humano: str = "",
     base_geografica_local: "BaseGeograficaLocal | None" = None,
     destinos_relacion_confirmada: Iterable[Destino] = (),
+    plantas_conocidas: Iterable[Planta] = (),
 ) -> ResultadoRutaEntrega:
     """Bloque OPERACIÓN REAL R1 -- calcula PLANTA ORIGEN -> DESPACHAR A
     cuando la planta YA se conoce con certeza (p. ej. confirmada por GPS)
@@ -2071,6 +2073,8 @@ def calcular_ruta_con_planta_conocida(
     # cuya coordenada ya está confirmada en catálogo (dirección o alias).
     entrega = _entrega_desde_conocimiento_confirmado(
         despachar_a_crudo, destinos_confirmados, destinos_relacion_confirmada,
+        plantas_conocidas, comuna_confirmada_humano=comuna_confirmada_humano,
+        planta_origen_id=planta.planta_id,
     )
     if entrega is None:
         entrega = resolver_destino_entrega_validado(
@@ -2273,22 +2277,123 @@ def destino_por_relacion_confirmada(
     return destino
 
 
+METODO_PLANTA_CONOCIDA_CATALOGO = "PLANTA_CONOCIDA_CATALOGO"
+
+
+def _planta_confirmada_vigente(planta: Planta) -> bool:
+    return (
+        str(planta.estado_calidad).upper() in {"CONFIRMADA", "CONFIRMADO", "CONFIRMADO_DOCUMENTAL"}
+        and str(planta.estado_vigencia).upper() in {"ACTIVA", "ACTIVO"}
+    )
+
+
+def planta_conocida_como_destino(
+    despachar_a_crudo: str,
+    plantas: Iterable[Planta],
+    *,
+    comuna_confirmada_humano: str = "",
+    planta_origen_id: str = "",
+) -> Planta | None:
+    """Caso real 488392 -- el DESPACHAR A es una planta YA conocida.
+
+    "PARAMERICANA NORTE 1850O SANTIAGO COLINA" es AZA COLINA, registrada
+    y confirmada en el catálogo de plantas como "AV. PDTE. EDUARDO FREI
+    MONTALVA 18500, COLINA", con un punto de ruteo validado con GPS real.
+    El geocodificador no puede ubicar esa escritura (sólo devuelve el
+    centro de Colina, a ~18 km del recinto), así que el reconocimiento del
+    destino no puede depender de él.
+
+    Usa la misma corroboración conservadora que los destinos confirmados
+    (`direccion_confirmada_coincide`: número exacto o con O/B de OCR que
+    equivale exactamente, un solo carácter distinto en un token largo) más
+    el nombre oficial/de uso común de la vía (`variantes_nombre_via`). Por
+    no pasar por el geocodificador, exige SIEMPRE la comuna de la planta
+    como palabra completa en el texto documental o confirmada por un
+    humano para esta guía.
+
+    Se abstiene (`None`) ante: texto degradado, ninguna o varias plantas
+    coincidentes, una comuna explícita incompatible, planta sin punto de
+    ruteo, o la propia planta de origen (un despacho hacia su mismo origen
+    revela un origen o destino equivocado; decide el pipeline normal)."""
+    texto_documental = normalizar_nombre_destino(despachar_a_crudo)
+    if not texto_documental or texto_destino_degradado(despachar_a_crudo):
+        return None
+    comuna_humana = normalizar_nombre_destino(comuna_confirmada_humano)
+    texto_comparable = f"{texto_documental} {comuna_humana}".strip()
+    coincidentes: dict[str, Planta] = {}
+    for planta in plantas:
+        if not _planta_confirmada_vigente(planta) or coordenada_ruteo_planta(planta) is None:
+            continue
+        calle = normalizar_nombre_destino(str(planta.direccion or "").split(",", 1)[0])
+        comuna = normalizar_nombre_destino(planta.comuna)
+        if not calle or not comuna or not re.search(r"\d", calle):
+            continue
+        if not re.search(rf"(?<![A-Z0-9]){re.escape(comuna)}(?![A-Z0-9])", texto_comparable):
+            continue
+        if any(
+            direccion_confirmada_coincide(variante, texto_comparable, comuna_confirmada=planta.comuna)
+            for variante in (calle, *variantes_nombre_via(calle))
+        ):
+            coincidentes[planta.planta_id] = planta
+    if len(coincidentes) != 1:
+        return None
+    planta = next(iter(coincidentes.values()))
+    if planta_origen_id and planta.planta_id == planta_origen_id:
+        return None
+    if any(
+        not _comunas_territorialmente_compatibles(comuna, planta.comuna)
+        for comuna in _comunas_explicitas(despachar_a_crudo)
+    ):
+        return None
+    return planta
+
+
 def _entrega_desde_conocimiento_confirmado(
     despachar_a_crudo: str,
     destinos_confirmados: Iterable[Destino],
     destinos_relacion_confirmada: Iterable[Destino],
+    plantas_conocidas: Iterable[Planta] = (),
+    *,
+    comuna_confirmada_humano: str = "",
+    planta_origen_id: str = "",
 ) -> ResultadoDestinoEntrega | None:
     """Autoridad interna previa al geocodificador: primero la coordenada
     canónica por dirección/alias exacto; luego la relación obra->destino
-    confirmada (`destino_por_relacion_confirmada`). `despachar_a_crudo`
-    se conserva siempre como evidencia documental."""
+    confirmada (`destino_por_relacion_confirmada`); luego una planta
+    confirmada del catálogo (`planta_conocida_como_destino`), con su punto
+    de ruteo. `despachar_a_crudo` se conserva siempre como evidencia
+    documental. Reconocer el destino es independiente de que el proveedor
+    de rutas esté disponible: la ruta se calcula después."""
     metodo = "COORDENADA_CANONICA_CATALOGO"
     destino = _destino_con_coordenada_canonica_para(despachar_a_crudo, destinos_confirmados)
     if destino is None:
         metodo = METODO_RELACION_OBRA_DESTINO_CONFIRMADA
         destino = destino_por_relacion_confirmada(despachar_a_crudo, destinos_relacion_confirmada)
     if destino is None:
-        return None
+        planta = planta_conocida_como_destino(
+            despachar_a_crudo, plantas_conocidas,
+            comuna_confirmada_humano=comuna_confirmada_humano, planta_origen_id=planta_origen_id,
+        )
+        coordenada = coordenada_ruteo_planta(planta) if planta is not None else None
+        if coordenada is None:
+            return None
+        # Identidad territorial con la misma geografía oficial que usa el
+        # resto del dataset ("Colina", "Metropolitana", código 13301).
+        geografia = cargar_geografia("CL")
+        normalizada = geografia.normalizar(planta.comuna)
+        unidad = normalizada.unidad if normalizada.estado == EstadoNormalizacion.EXACTA else None
+        contexto = geografia.parametros_geocodificacion(unidad) if unidad is not None else None
+        return ResultadoDestinoEntrega(
+            despachar_a_crudo=despachar_a_crudo, coordenadas=coordenada,
+            etiqueta_geocodificada=f"{planta.direccion}, {planta.comuna}", confianza=1.0,
+            estado=ESTADO_RESUELTO,
+            localidad=contexto.nombre_unidad if contexto is not None else planta.comuna,
+            region=contexto.nombre_contexto if contexto is not None else planta.region,
+            codigo_pais=contexto.codigo_pais if contexto is not None else "",
+            codigo_unidad=contexto.codigo_unidad if contexto is not None else "",
+            codigo_contexto=contexto.codigo_contexto if contexto is not None else "",
+            metodo_confirmacion=METODO_PLANTA_CONOCIDA_CATALOGO,
+        )
     return ResultadoDestinoEntrega(
         despachar_a_crudo=despachar_a_crudo,
         coordenadas=Coordenadas(longitud=float(destino.longitud), latitud=float(destino.latitud)),
@@ -2405,6 +2510,7 @@ def calcular_ruta_entrega_para_viaje(
     # obra ya identificada (ver `destino_por_relacion_confirmada`).
     entrega = _entrega_desde_conocimiento_confirmado(
         despachar_a_crudo, destinos_confirmados, destinos_relacion_confirmada,
+        plantas, planta_origen_id=planta.planta_id,
     )
     if entrega is None:
         entrega = resolver_destino_entrega_validado(

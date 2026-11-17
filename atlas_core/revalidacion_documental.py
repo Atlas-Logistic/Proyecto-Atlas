@@ -4279,6 +4279,7 @@ def revalidar_ruta_sin_destino_calculado_sin_ocr(
                     # auto-resuelta del nombre de obra sólo sesga la query.
                     comuna_confirmada_humano=comuna_confirmada_humano,
                     base_geografica_local=base_geografica_local_ine,
+                    plantas_conocidas=tuple(plantas_por_id.values()),
                 )
             except (OSError, ValueError):
                 continue
@@ -4730,6 +4731,7 @@ def revalidar_ruta_con_destino_confirmado_en_catalogo_sin_ocr(
                     perfil=perfil, destinos_confirmados=destinos_confirmados_obra,
                     proveedor_geocodificacion_fallback=proveedor_rutas_fallback,
                     base_geografica_local=base_geografica_local_ine,
+                    plantas_conocidas=tuple(plantas_por_id.values()),
                 )
                 if resultado.estado_ruta != EstadoRuta.RUTA_CALCULADA.value:
                     continue
