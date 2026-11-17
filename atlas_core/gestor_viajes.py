@@ -337,6 +337,7 @@ class DocumentoViaje:
     fecha_ingesta_utc: str
     evidencia: dict[str, str]
     destino_operacional_confirmado: bool = False
+    identidad_entrega_confirmada: tuple[str, str, str] | None = None
 
 
 # Bloque ORIGEN DE VIAJE: jerarquía de confianza de la fuente que determinó
@@ -633,6 +634,13 @@ class Viaje:
         valores = _valores_unicos(getattr(d, campo) for d in documentos)
         return valores[0] if len(valores) == 1 else ""
 
+    def _entregas_para_ruta(self):
+        # La confirmaci?n de cat?logo s?lo agrupa paradas; no cambia el
+        # c?lculo hist?rico de rutas ni estados de los documentos.
+        from dataclasses import replace
+        from atlas_core.entregas import derivar_entregas
+        return derivar_entregas([replace(d, identidad_entrega_confirmada=None) for d in self.documentos])
+
     def _campo_destino_consolidado(self, campo: str) -> str:
         """Bloque COHERENCIA DE DESTINO CONSOLIDADO -- caso real 0000351135
         (464264 con destino ya resuelto + 464265 bloqueado por
@@ -658,7 +666,7 @@ class Viaje:
         consolidado`. Ningún dato por documento se toca -- `despachar_a_
         crudo`/las decisiones humanas existentes siguen intactas; esto
         sólo decide qué se PRESENTA como destino consolidado del viaje."""
-        if any(d.destino_operacional_confirmado for d in self.documentos) and len(self.entregas) == 1:
+        if any(d.destino_operacional_confirmado for d in self.documentos) and len(self._entregas_para_ruta()) == 1:
             # La identidad humana no depende de haber calculado una ruta;
             # una hermana documental reunida con ella no la contradice.
             return self._campo_ruta_consolidado(campo, self._documentos_destino())
@@ -669,7 +677,7 @@ class Viaje:
     def _documentos_destino(self) -> list[DocumentoViaje]:
         """Con una sola entrega, los mismos documentos que fijan su destino
         y ruta (`entregas.documentos_de_destino`); si no, todos."""
-        if len(self.entregas) == 1:
+        if len(self._entregas_para_ruta()) == 1:
             from atlas_core.entregas import documentos_de_destino
 
             return documentos_de_destino(self.documentos)
@@ -697,7 +705,7 @@ class Viaje:
 
         # Las rutas de entregas distintas no representan una ruta del viaje.
         # Un fallo unico sigue siendo un diagnostico real, sin km ni tiempos.
-        if len(self.entregas) > 1:
+        if len(self._entregas_para_ruta()) > 1:
             fallos = {(b["estado_ruta"], b["motivo_ruta"]) for b in informados
                       if b["estado_ruta"] and _clave_normalizada(b["estado_ruta"]) != "ruta_calculada"}
             salida = {campo: "" for campo in campos}
@@ -1052,7 +1060,8 @@ def _documento_desde_fila(
 ) -> DocumentoViaje:
     original = fila.get("_evidencia_documental_original")
     evidencia_fila = original if isinstance(original, Mapping) else fila
-    evidencia = {str(clave): str(valor or "") for clave, valor in evidencia_fila.items()}
+    evidencia = {str(clave): str(valor or "") for clave, valor in evidencia_fila.items()
+                 if clave != "_identidad_entrega_confirmada"}
     chofer_original = str(fila.get("chofer", "")).strip()
     chofer = (
         normalizador_chofer(chofer_original)
@@ -1147,6 +1156,7 @@ def _documento_desde_fila(
         fecha_ingesta_utc=str(fila.get("fecha_ingesta_utc", "")).strip(),
         evidencia=evidencia,
         destino_operacional_confirmado=isinstance(original, Mapping),
+        identidad_entrega_confirmada=fila.get("_identidad_entrega_confirmada"),
     )
 
 
@@ -1157,7 +1167,7 @@ def _deduplicar_filas(
     unicas: dict[tuple[tuple[str, str], ...], Mapping[str, object]] = {}
     for fila in filas:
         huella = tuple(
-            sorted((str(k), str(v or "")) for k, v in fila.items())
+            sorted((str(k), str(v or "")) for k, v in fila.items() if k != "_identidad_entrega_confirmada")
         )
         unicas.setdefault(huella, fila)
     return [unicas[huella] for huella in sorted(unicas)]
