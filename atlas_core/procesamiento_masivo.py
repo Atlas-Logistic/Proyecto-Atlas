@@ -851,7 +851,15 @@ def extraer_descripcion_material(textos: Iterable[str]) -> str:
         # El largo también puede venir pegado al diámetro ("HORMIGON10MM6M",
         # casos 483897/483812): basta con que tras MM no siga otra letra.
         limpia = re.sub(r"^B(?=HORMIGON)", "B ", limpia, flags=re.IGNORECASE)
-        limpia = re.sub(r"\b(HORMIGON)(?=\d{1,2}\s*MM(?![A-Z]))", r"\1 ", limpia, flags=re.IGNORECASE)
+        # Casos reales 484834 ("3HORMIGON25MM9MA630-420HS(N)") y 484838
+        # ("ALAMBRON6MMSAE1005（I)"): con la designación pegada delante no
+        # hay límite de palabra antes de la familia, y el alambrón trae la
+        # calidad SAE pegada al diámetro. Misma separación familia/diámetro
+        # (también para ALAMBRON) y, sólo en alambrón, diámetro/SAE.
+        limpia = re.sub(
+            r"(?<![A-Z])(HORMIGON|ALAMBRON)(?=\d{1,2}\s*MM(?:(?![A-Z])|SAE\d))", r"\1 ", limpia, flags=re.IGNORECASE,
+        )
+        limpia = re.sub(r"(?<=\bALAMBRON )(\d{1,2}\s*MM)(?=SAE\d)", r"\1 ", limpia, flags=re.IGNORECASE)
         normalizada = _normalizar(limpia)
         if _es_fragmento_estampado_no_material(normalizada):
             continue
@@ -881,6 +889,10 @@ def extraer_descripcion_material(textos: Iterable[str]) -> str:
             # hacer que se descarte una partida que sí fue leída.
             limpia = re.sub(r"^[D3]\s*(?=HORMIGON\b)", "B ", limpia, flags=re.IGNORECASE)
             limpia = re.sub(r"(?<=HORMIGON\s)B(?=MM\b)", "8", limpia, flags=re.IGNORECASE)
+            # Misma confusión 8/B en la posición del largo de la barra, entre
+            # el diámetro y la calidad (caso real 484834: "25MM BMA630-420HS"
+            # impreso "25MM 8M A630-420HS"). Ese hueco sólo admite un número.
+            limpia = re.sub(r"(?<=\dMM\s)B(?=M\s?A[\dO]{3})", "8", limpia, flags=re.IGNORECASE)
             items = _dividir_items_material_fusionados(limpia)
             if contaminada:
                 items = _depurar_items_linea_contaminada(items)

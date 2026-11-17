@@ -16,7 +16,8 @@ motivos de material de ``motivos_revision_documento``; nunca rutas,
 destinos, identidad, estados, ledger ni bandeja.
 
 Nunca pisa un material correcto: sólo recupera uno ausente, mejora uno
-degradado/genérico de la misma familia o completa uno al que le faltaban
+degradado/genérico o con OCR no confiable de la misma familia (éste sólo
+por una lectura sin señales) o completa uno al que le faltaban
 ítems (todos los actuales deben seguir presentes). Cualquier decisión del
 ledger sobre material o tipo de carga del documento lo deja intacto.
 """
@@ -124,6 +125,12 @@ def _degradado(texto: str) -> bool:
             or evaluar_credibilidad_material(texto).nivel != NivelCredibilidad.CONFIABLE)
 
 
+def _no_confiable(texto: str) -> bool:
+    """Material presente con señales de OCR no confiable (mismas señales que
+    publican MATERIAL_OCR_NO_CONFIABLE en la ingesta)."""
+    return any(item.no_confiable for item in analizar_items_material(texto))
+
+
 def _misma_familia(actual: str, nuevo: str) -> bool:
     palabras = {p for p in re.findall(r"[A-ZÑ]{4,}", unicodedata.normalize("NFKC", actual).upper())
                 if p not in {"DETALLE", "ILEGIBLE"}}
@@ -187,6 +194,13 @@ def evaluar_recuperacion(
     elif set(claves_actuales) < set(claves_nuevas):
         veredicto = COMPLETAR
     elif _degradado(actual) and _misma_familia(actual, nuevo):
+        veredicto = MEJORAR
+    elif (_no_confiable(actual) and MotivoRevisionDocumento.MATERIAL_OCR_NO_CONFIABLE.value not in lectura.motivos
+          and _misma_familia(actual, nuevo)):
+        # Caso real 484834: "B HORMIGON 25MM BMA630-420HS (N)" (largo
+        # ilegible, MATERIAL_OCR_NO_CONFIABLE) pasaba la credibilidad y se
+        # conservaba aunque la relectura trajera los dos ítems legibles.
+        # Sólo se reemplaza por una lectura SIN señales de OCR no confiable.
         veredicto = MEJORAR
     else:
         return SE_CONSERVA, {}
