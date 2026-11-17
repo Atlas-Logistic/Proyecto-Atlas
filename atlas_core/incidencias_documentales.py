@@ -23,7 +23,7 @@ from __future__ import annotations
 
 import hashlib
 import json
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, replace
 from datetime import datetime, timezone
 from enum import Enum
 from pathlib import Path
@@ -228,6 +228,30 @@ class AlmacenIncidenciasDocumentales:
                 self._escribir(incidencias)
                 return incidencia
             return existente  # idempotente: la misma incidencia no se duplica
+
+    def descartar_no_vigentes(
+        self, *, tipo_incidencia: str, numeros_guia: Iterable[str], vigentes: Iterable[str],
+    ) -> int:
+        """Marca DESCARTADA cada incidencia DETECTADA de `tipo_incidencia` de
+        esas guías cuyo id ya no está en `vigentes` (la detección automática
+        dejó de aplicar, p. ej. por una decisión humana posterior). Nunca toca
+        una CONFIRMADA ni otras guías o tipos; sin cambios no escribe."""
+        guias = {str(g) for g in numeros_guia}
+        ids = set(vigentes)
+        if not guias or not self.ruta.exists():
+            return 0
+        with bloqueo_sesion(self.ruta.parent, "incidencias_documentales"):
+            incidencias = self._leer()
+            descartadas = 0
+            for indice, incidencia in enumerate(incidencias):
+                if (incidencia.tipo_incidencia == tipo_incidencia and incidencia.numero_guia in guias
+                        and incidencia.estado == EstadoIncidencia.DETECTADA.value
+                        and incidencia.incidencia_id not in ids):
+                    incidencias[indice] = replace(incidencia, estado=EstadoIncidencia.DESCARTADA.value)
+                    descartadas += 1
+            if descartadas:
+                self._escribir(incidencias)
+        return descartadas
 
     def _leer(self) -> list[IncidenciaDocumental]:
         if not self.ruta.exists():

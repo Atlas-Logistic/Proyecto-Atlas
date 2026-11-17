@@ -2010,6 +2010,26 @@ def reconciliar_estado_derivado(
             )
             _persistir_pendientes(registros_despues)
 
+            # P0 patentes por asignación vigente: cada sustitución automática
+            # de patente (guía con otra patente o sin ella) queda visible como
+            # incidencia DETECTADA -- sólo en las guías de esta reconciliación.
+            # Nunca toca dataset, ledger, bandeja ni catálogo de vehículos.
+            try:
+                from atlas_core.equipo_operacional import (
+                    ResolutorEquipoOperacional, proyectar_incidencias_equipo_por_asignacion,
+                )
+                with dataset.open(encoding="utf-8-sig", newline="") as _archivo_equipo:
+                    _filas_equipo = [f for f in csv.DictReader(_archivo_equipo, delimiter=";")
+                                     if guias_objetivo is None
+                                     or str(f.get("numero_guia", "")).strip() in {str(g).strip() for g in guias_objetivo}]
+                incidencias_equipo = proyectar_incidencias_equipo_por_asignacion(
+                    filas=_filas_equipo,
+                    resolutor=ResolutorEquipoOperacional(carpeta_catalogos=catalogos, ruta_ledger=actual / LEDGER),
+                    ruta_incidencias=catalogos / "incidencias_documentales.json", reloj=lambda: instante,
+                )
+            except (OSError, ValueError) as error:
+                incidencias_equipo = {"error": str(error)}
+
             # Bloque CONSISTENCIA OPERACIONAL, Sección 3 -- publicación
             # VERSIONADA: se captura la huella del dataset YA
             # RECONCILIADO (fresca, después de las revalidaciones de
@@ -2078,6 +2098,7 @@ def reconciliar_estado_derivado(
         "version": VERSION_ESTADO_DERIVADO,
         "respaldo": str(respaldo),
         "reporte_vigente": str(reporte),
+        "incidencias_equipo_por_asignacion": incidencias_equipo,
         "guias_actualizadas": sorted(
             set(limpieza["guias_actualizadas"])
             | set(coherencia_comuna["guias_actualizadas"])

@@ -2538,6 +2538,13 @@ def procesar_archivo(
         if carpeta_catalogos is not None
         else extraer_datos(textos)
     )
+    # P0 patentes por asignación vigente: la lectura OCR de las patentes se
+    # guarda ANTES de cualquier sustitución (geometría, homologación,
+    # reubicación o asignación) y se persiste en métricas si cambió.
+    patentes_ocr_leidas = {
+        "patente_tracto": str(datos.get("patente del tracto", "No encontrado")),
+        "patente_rampla": str(datos.get("patente del carro", "No encontrado")),
+    }
     fin_extraccion = time.perf_counter()
     comprobante = extraer_comprobante_pesaje_aza(textos)
     if comprobante is not None:
@@ -4198,6 +4205,9 @@ def procesar_archivo(
         metricas["resoluciones_convergentes"] = resoluciones_convergentes
     if patentes_por_asignacion:
         metricas["patentes_por_asignacion_chofer"] = patentes_por_asignacion
+    if (patentes_ocr_leidas["patente_tracto"] != str(datos.get("patente del tracto", "No encontrado"))
+            or patentes_ocr_leidas["patente_rampla"] != str(datos.get("patente del carro", "No encontrado"))):
+        metricas["patentes_ocr_leidas"] = patentes_ocr_leidas
     if desempates_vehiculo:
         # Observabilidad del desempate de VEHÍCULO (Bloque E3): candidatos
         # considerados, evidencias/fuentes independientes por candidato,

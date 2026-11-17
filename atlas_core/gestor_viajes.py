@@ -1091,14 +1091,18 @@ def _documento_desde_fila(
     numero_guia_doc = str(fila.get("numero_guia", "")).strip()
     patente_tracto_doc = str(fila.get("patente_tracto", "")).strip()
     patente_rampla_doc = str(fila.get("patente_rampla", "")).strip()
+    # P0 patentes por asignación vigente: un resolver que declara
+    # `resuelve_ausentes` también completa una patente que la guía no trae
+    # (sólo con la asignación vigente del chofer de ese documento).
+    resuelve_ausentes = bool(getattr(resolver_patente, "resuelve_ausentes", False))
     patente_tracto = (
         resolver_patente(numero_guia_doc, "patente_tracto", patente_tracto_doc)
-        if resolver_patente and _valor_presente(patente_tracto_doc)
+        if resolver_patente and (resuelve_ausentes or _valor_presente(patente_tracto_doc))
         else patente_tracto_doc
     )
     patente_rampla = (
         resolver_patente(numero_guia_doc, "patente_rampla", patente_rampla_doc)
-        if resolver_patente and _valor_presente(patente_rampla_doc)
+        if resolver_patente and (resuelve_ausentes or _valor_presente(patente_rampla_doc))
         else patente_rampla_doc
     )
     # Bloque ORIGEN DE VIAJE: antes leía columnas "origen"/"planta_origen",

@@ -6048,9 +6048,12 @@ def _revalidar_y_regenerar_reporte(
         ruta_incidencias=catalogos / "incidencias_documentales.json",
         reloj=reloj or (lambda: datetime.now(timezone.utc)),
     ) if guias_en_alcance(dataset) is None else {'omitido':'MANTENIMIENTO_GLOBAL'})
-    # Patentes impresas distintas de la asignación vigente única de un chofer
-    # inequívoco: incidencia DETECTADA (las confirmadas ya se registraron).
-    if guias_en_alcance(dataset) is None:
+    # Patentes sustituidas automáticamente por la asignación vigente única de
+    # un chofer inequívoco (distinta o ausente en la guía): incidencia
+    # DETECTADA visible en Desktop (las confirmadas ya se registraron). En un
+    # flujo focal (PULL, B1, ingreso) sólo las guías en alcance.
+    alcance_incidencias_equipo = guias_en_alcance(dataset)
+    if alcance_incidencias_equipo is None or alcance_incidencias_equipo:
         from atlas_core.equipo_operacional import (
             ResolutorEquipoOperacional, proyectar_incidencias_equipo_por_asignacion,
         )
@@ -6058,7 +6061,8 @@ def _revalidar_y_regenerar_reporte(
             resultado_incidencias_confirmadas = {
                 **resultado_incidencias_confirmadas,
                 "equipo_por_asignacion": proyectar_incidencias_equipo_por_asignacion(
-                    filas=_leer_filas(dataset),
+                    filas=[f for f in _leer_filas(dataset) if alcance_incidencias_equipo is None
+                           or str(f.get("numero_guia", "")).strip() in alcance_incidencias_equipo],
                     resolutor=ResolutorEquipoOperacional(
                         carpeta_catalogos=catalogos, ruta_ledger=actual / "decisiones_aplicadas.json"),
                     ruta_incidencias=catalogos / "incidencias_documentales.json",

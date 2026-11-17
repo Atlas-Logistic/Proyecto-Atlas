@@ -441,16 +441,28 @@ def _resolver_patente_contextual(
     from atlas_core.atlas_ia.evidencia_dominios import convergencia_vehiculo
 
     por_clave: dict[tuple[str, str, str], Mapping[str, object]] = {}
+    repetidas: set[tuple[str, str, str]] = set()
     for fila in filas:
         guia = str(fila.get("numero_guia", "")).strip()
         for campo in ("patente_tracto", "patente_rampla"):
             valor = str(fila.get(campo, "")).strip()
+            if (guia, campo, valor) in por_clave:
+                repetidas.add((guia, campo, valor))
             por_clave.setdefault((guia, campo, valor), fila)
     cache: dict[tuple[str, str, str], str] = {}
 
     def resolver(numero_guia: str, campo: str, valor_documental: str) -> str:
         clave = (numero_guia, campo, valor_documental)
         if clave in cache:
+            return cache[clave]
+        if not _valor_patente_presente(valor_documental):
+            # P0 patentes por asignación vigente: una patente ausente sólo se
+            # completa con la asignación vigente del chofer de ESE documento
+            # (nunca por convergencia ni con un documento homónimo).
+            fila = por_clave.get(clave) if clave not in repetidas else None
+            operacional = (resolutor_equipo.patente_operacional(fila, campo)
+                           if fila is not None and resolutor_equipo is not None else None)
+            cache[clave] = operacional or valor_documental
             return cache[clave]
         if canonica_ledger := ledger_patentes.get(clave):
             cache[clave] = canonica_ledger
@@ -480,7 +492,13 @@ def _resolver_patente_contextual(
         cache[clave] = valor
         return valor
 
+    resolver.resuelve_ausentes = True  # gestor_viajes también le pide las patentes ausentes
     return resolver
+
+
+def _valor_patente_presente(valor: object) -> bool:
+    texto = str(valor or "").strip()
+    return bool(texto) and texto.casefold() not in {"no encontrado", "no encontrada", "revisar", "ilegible"}
 
 
 def _resumen_markdown(

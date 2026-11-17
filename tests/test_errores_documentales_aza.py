@@ -187,11 +187,15 @@ def _regla(e, fila):
 def test_regla_general_exige_identidad_y_asignacion_unica(varas):
     fila = {"archivo": "x.jpeg", "chofer": "LUIS VARAS", "rut_chofer": RUT_VARAS, "patente_tracto": "DD2494",
             "patente_rampla": "JC4173", "fecha": "21-10-2026"}
-    assert _regla(varas, fila) == {"patente_rampla": {"valor_documental": "JC4173", "valor_operacional": "JB8529"}}
+    assert _regla(varas, fila) == {"patente_rampla": {"valor_documental": "JC4173", "valor_operacional": "JB8529",
+                                                      "motivo": "PATENTE_DISTINTA"}}
     assert _regla(varas, {**fila, "rut_chofer": RUT_IMPRESO}) == {}          # RUT contradictorio
     assert _regla(varas, {**fila, "chofer": "OTRO NOMBRE"}) == {}            # identidad no corroborada
-    assert _regla(varas, {**fila, "patente_rampla": "No encontrado"}) == {}  # nunca completa
-    assert _regla(varas, {**fila, "patente_rampla": "JK2501"}) == {}         # patente conocida
+    # P0 17/11: la guía sin patente o con otra patente conocida usa la asignación vigente.
+    assert _regla(varas, {**fila, "patente_rampla": "No encontrado"}) == {"patente_rampla": {
+        "valor_documental": "", "valor_operacional": "JB8529", "motivo": "PATENTE_AUSENTE"}}
+    assert _regla(varas, {**fila, "patente_rampla": "JK2501"}) == {"patente_rampla": {
+        "valor_documental": "JK2501", "valor_operacional": "JB8529", "motivo": "PATENTE_DISTINTA"}}
     assert _regla(varas, {**fila, "fecha": "20-09-2026"}) == {}              # antes de la asignación
     vehiculos = json.loads((varas["cat"] / "vehiculos.json").read_text(encoding="utf-8"))
     vehiculos["vehiculos"].append(_asignado("JB9999", "CARRO", "142938162"))
@@ -199,7 +203,9 @@ def test_regla_general_exige_identidad_y_asignacion_unica(varas):
     assert _regla(varas, fila) == {}                                         # dos carros vigentes
 
 
-def test_lectura_ocr_cercana_no_es_incidencia(varas):
+def test_lectura_ocr_cercana_queda_visible_con_su_motivo(varas):
+    # P0 17/11: toda sustitución automática queda registrada (leída, aplicada,
+    # motivo); la lectura cercana no se presenta como error de emisión.
     assert es_discrepancia_documental("JC4173", "JB8529")
     assert not es_discrepancia_documental("JB8S29", "JB8529")
     assert not es_discrepancia_documental("JF9557", "JF9575")
@@ -209,12 +215,16 @@ def test_lectura_ocr_cercana_no_es_incidencia(varas):
     proyectar_incidencias_equipo_por_asignacion(
         filas=filas, resolutor=_resolutor(varas), ruta_incidencias=varas["cat"] / "incidencias_documentales.json",
         reloj=lambda: datetime.now(timezone.utc))
-    assert not _incidencias(varas)
+    assert [(i.campo, i.valor_documental, i.valor_canonico, i.estado, i.tipo_incidencia, i.evidencia[0])
+            for i in _incidencias(varas)] == [("patente_rampla", "JB8528", "JB8529", "DETECTADA",
+                                               "PATENTE_CORREGIDA_POR_ASIGNACION", "MOTIVO:LECTURA_OCR_CERCANA")]
     filas[0]["patente_rampla"] = "JC4173"
     proyectar_incidencias_equipo_por_asignacion(
         filas=filas, resolutor=_resolutor(varas), ruta_incidencias=varas["cat"] / "incidencias_documentales.json",
         reloj=lambda: datetime.now(timezone.utc))
-    assert [(i.campo, i.estado) for i in _incidencias(varas)] == [("patente_rampla", "DETECTADA")]
+    # La sustitución anterior dejó de aplicar (otra lectura vigente): DESCARTADA.
+    assert [(i.valor_documental, i.estado, i.evidencia[0]) for i in _incidencias(varas)] == [
+        ("JB8528", "DESCARTADA", "MOTIVO:LECTURA_OCR_CERCANA"), ("JC4173", "DETECTADA", "MOTIVO:PATENTE_DISTINTA")]
 
 
 # ------------------------------------------------------------ comuna de destino
