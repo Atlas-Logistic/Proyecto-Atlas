@@ -96,10 +96,21 @@ def proyectar_destino(fila: Mapping[str, object], ledger: Mapping[str, object]) 
         direccion = str(destino.get("direccion") or "").strip()
         comuna = str(destino.get("comuna") or "").strip()
         if direccion and comuna:
-            vigente = direccion, comuna, entrada.get("ruta_operacional"), bool(entrada.get("conservar_estado_operacional"))
+            vigente = (direccion, comuna, entrada.get("ruta_operacional"),
+                       bool(entrada.get("conservar_estado_operacional")), str(entrada.get("decision_id") or ""))
             break
     if vigente:
-        direccion, comuna, ruta, conservar = vigente
+        direccion, comuna, ruta, conservar, decision_id = vigente
+        # Caso real 488100: la ruta calculada al confirmar quedó PENDIENTE
+        # porque el geocodificador no ubicaba AZA COLINA. Un recálculo
+        # explícito posterior (`recalculo_ruta_planta`) para ESTA misma
+        # decisión, dirección y comuna la reemplaza; la decisión no cambia.
+        if not conservar:
+            from atlas_core.recalculo_ruta_planta import ruta_operacional_recalculada
+            recalculada = ruta_operacional_recalculada(fila, decision_id=decision_id, direccion=direccion,
+                                                       comuna=comuna)
+            if ruta_valida(recalculada, comuna):
+                ruta = recalculada
         if conservar:
             salida["direccion_entrega"], salida["localidad_entrega"] = direccion, comuna
             salida["estado_ruta_historica"] = salida.get("estado_ruta", "")

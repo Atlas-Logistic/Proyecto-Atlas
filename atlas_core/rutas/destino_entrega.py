@@ -3040,6 +3040,27 @@ def motivo_incoherencia_destino_documental(
     if not documental:
         return ""
     comuna_doc = _comuna_documental_inequivoca(documental)
+    # Casos reales 488392/477043 (AZA COLINA): el destino resuelto es la
+    # dirección oficial de una planta conocida ("AV. PDTE. EDUARDO FREI
+    # MONTALVA 18500, COLINA") y el documento la escribe con su nombre de
+    # uso común y ruido OCR ("PARAMERICANA NORTE 1850O ... COLINA"). Si el
+    # documento corrobora la dirección resuelta con la misma regla
+    # conservadora de siempre (número exacto o con O/B de OCR equivalente,
+    # comuna presente como palabra completa, un carácter en un token largo,
+    # nombre oficial/común de la vía), no hay incoherencia que rechazar.
+    partes_etiqueta = [p.strip() for p in etiqueta.split(",")]
+    calle_resuelta = partes_etiqueta[0]
+    comuna_etiqueta = partes_etiqueta[1] if len(partes_etiqueta) > 1 else ""
+    comuna_resuelta = normalizar_nombre_destino(comuna_etiqueta or str(localidad or "").strip() or comuna_doc)
+    if comuna_etiqueta and localidad and not _comunas_territorialmente_compatibles(comuna_etiqueta, localidad):
+        comuna_resuelta = ""
+    if calle_resuelta and comuna_resuelta and re.search(r"\d", calle_resuelta) and re.search(
+        rf"(?<![A-Z0-9]){re.escape(comuna_resuelta)}(?![A-Z0-9])", normalizar_nombre_destino(documental),
+    ) and any(
+        direccion_confirmada_coincide(variante, documental, comuna_confirmada=comuna_resuelta)
+        for variante in (calle_resuelta, *variantes_nombre_via(calle_resuelta))
+    ):
+        return ""
     num_doc = _numero_calle(documental)
     num_geo = _numero_calle(etiqueta)
     if _numero_casa_incoherente(num_doc, num_geo):

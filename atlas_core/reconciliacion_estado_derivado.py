@@ -6,6 +6,8 @@ son proyecciones regenerables de esas fuentes.
 """
 from __future__ import annotations
 
+from typing import Collection
+
 import csv
 import hashlib
 import json
@@ -955,8 +957,17 @@ def reconciliar_estado_derivado(
     guias_excluir_reintento_ruta: set[str] | None = None,
     guias_objetivo: set[str] | None = None,
     omitir_coordenadas_catalogo: bool = False,
+    recalcular_rutas_archivos: Collection[str] | None = None,
 ) -> dict[str, object]:
     """Actualiza una operación antigua una sola vez por RULESET_VERSION.
+
+    `recalcular_rutas_archivos` (aditivo, opt-in -- `None` conserva el
+    comportamiento de siempre): documentos, identificados por `archivo`,
+    cuya ruta se recalcula explícitamente hacia una planta confirmada aunque
+    ya tengan una ruta calculada o un destino humano (casos 477043, 477449,
+    477355.jpeg, 488100 -- ver `atlas_core.recalculo_ruta_planta`, que
+    decide la elegibilidad y se abstiene ante cualquier duda). Exige una
+    reconciliación focal (`guias_objetivo`); nunca recalcula otras rutas.
 
     `omitir_coordenadas_catalogo` (aditivo, opt-in -- `False` conserva el
     comportamiento de siempre): no ejecuta el paso compartido
@@ -1003,6 +1014,8 @@ def reconciliar_estado_derivado(
     la guía procesada queda visible sin depender de una reconciliación
     global posterior."""
     raiz = Path(raiz_atlas)
+    if recalcular_rutas_archivos is not None and guias_objetivo is None:
+        raise ValueError("recalcular_rutas_archivos exige una reconciliación focal (guias_objetivo).")
     actual = raiz / "operacion" / "actual"
     dataset = actual / "analisis_completo_guias.csv"
     catalogos = raiz / "catalogos_privados"
@@ -1196,7 +1209,7 @@ def reconciliar_estado_derivado(
     if (
         not migracion and not por_reintentar and not reporte_desactualizado
         and not estado_derivado_incoherente and not falta_tarjeta_destino
-        and not capacidades_a_reevaluar
+        and not capacidades_a_reevaluar and not recalcular_rutas_archivos
     ):
         return {
             "reconciliado": False, "motivo": "VERSION_VIGENTE_SIN_REINTENTO_PENDIENTE",
@@ -1294,7 +1307,20 @@ def reconciliar_estado_derivado(
             # ver `_reconciliacion_global_reciente_identica`.
             "alcance": "GLOBAL" if guias_objetivo is None else "FOCAL",
             "huella_idempotencia": huella_idempotencia_actual,
+            **({"recalcular_rutas_archivos": sorted(recalcular_rutas_archivos)}
+               if recalcular_rutas_archivos else {}),
         }, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+
+        # Recálculo explícito de rutas hacia planta confirmada (opt-in):
+        # antes de la batería, para que la proyección y el reporte de esta
+        # misma pasada ya lo reflejen.
+        recalculo_rutas_planta = {"recalculadas": [], "abstenciones": [], "guias_actualizadas": []}
+        if recalcular_rutas_archivos:
+            from atlas_core.recalculo_ruta_planta import recalcular_rutas_hacia_planta_conocida
+            recalculo_rutas_planta = recalcular_rutas_hacia_planta_conocida(
+                raiz_atlas=raiz, archivos=recalcular_rutas_archivos,
+                proveedor_rutas=proveedor_rutas, reloj=reloj,
+            )
 
         # Bloque P1 ELIMINAR DOBLE RECONCILIACIÓN -- si `revalidar_y_
         # regenerar_reporte` (Fase 1, disparada por `aplicar_decision_
@@ -2068,7 +2094,9 @@ def reconciliar_estado_derivado(
             | set(recuperacion_material_traza["guias_actualizadas"])
             | set(recuperacion_material_focal["recuperados"])
             | set(sincronizacion_tipo_carga["guias_actualizadas"])
+            | set(recalculo_rutas_planta["guias_actualizadas"])
         ),
+        "rutas_recalculadas_planta": recalculo_rutas_planta,
         "destino_vacio_confirmado_desde_ledger": destino_vacio_confirmado["guias_actualizadas"],
         "destinos_historial_recuperados": recuperacion_historial_destino,
         "destinos_historial_revertidos": reversion_historial_destino,
