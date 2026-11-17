@@ -598,11 +598,16 @@ def generar_reporte_viajes(
         raise RuntimeError("No se puede leer el ledger; no se publica el reporte") from error
     # La decision humana es una proyeccion operacional, nunca una edicion del CSV documental.
     from atlas_core.destino_operacional import proyectar_destino
+    from atlas_core.identidad_entrega_confirmada import identidades_confirmadas
+    identidades_entrega = identidades_confirmadas(filas, ledger_decisiones, catalogos)
     filas_operacionales = []
     for fila in filas:
         proyectada = proyectar_destino(fila, ledger_decisiones)
         if proyectada != fila:
             proyectada["_evidencia_documental_original"] = dict(fila)
+        clave_entrega = tuple(str(fila.get(c) or "").strip() for c in ("archivo", "numero_guia", "numero_transporte"))
+        if clave_entrega in identidades_entrega and proyectada == fila:
+            proyectada["_identidad_entrega_confirmada"] = identidades_entrega[clave_entrega]
         filas_operacionales.append(proyectada)
     viajes, sin_transporte = agrupar_viajes(
         filas_operacionales, normalizador_chofer=normalizador, resolver_patente=resolver_patente,

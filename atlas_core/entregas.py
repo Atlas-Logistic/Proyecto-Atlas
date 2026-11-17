@@ -309,6 +309,20 @@ def _destino_compatible(a: "DocumentoViaje", b: "DocumentoViaje") -> bool:
     para direccion_entrega/despachar_a -- ver bloques arriba) en el más
     fuerte de esos niveles compartidos. Sin ningún nivel compartido -> NO
     compatible (nunca se agrupa "por descarte")."""
+    # La identidad del cat?logo s?lo participa en comparaci?n, nunca en ruta.
+    identidad_a = getattr(a, "identidad_entrega_confirmada", None)
+    identidad_b = getattr(b, "identidad_entrega_confirmada", None)
+    if identidad_a or identidad_b:
+        def destino_confirmado(d, identidad):
+            if identidad:
+                return _clave(identidad[0]), _clave(identidad[1])
+            if getattr(d, "destino_operacional_confirmado", False):
+                return _clave(d.direccion_entrega), _clave(d.localidad_entrega)
+            return None
+        da, db = destino_confirmado(a, identidad_a), destino_confirmado(b, identidad_b)
+        if da and db:
+            return bool(all(da) and da == db)
+        # Sin segunda confirmaci?n se conserva la regla documental anterior.
     # Un destino humano no hereda ni comparte ruta con un documento que
     # no tenga su propia confirmacion operacional. Dos confirmaciones solo
     # coinciden si direccion y comuna declaradas son exactamente iguales.
@@ -378,6 +392,13 @@ def _misma_entrega(a: "DocumentoViaje", b: "DocumentoViaje") -> bool:
     if _comparar_clientes(a, b) is False:
         return False
     obra_a, obra_b = _obra_identidad(a), _obra_identidad(b)
+    identidad_a = getattr(a, "identidad_entrega_confirmada", None)
+    identidad_b = getattr(b, "identidad_entrega_confirmada", None)
+    ambas_confirmadas = (identidad_a or getattr(a, "destino_operacional_confirmado", False)) and (identidad_b or getattr(b, "destino_operacional_confirmado", False))
+    if ambas_confirmadas and identidad_a:
+        obra_a = _clave(identidad_a[2])
+    if ambas_confirmadas and identidad_b:
+        obra_b = _clave(identidad_b[2])
     if _contradice(obra_a, obra_b) and not _obras_equivalentes_por_ocr(obra_a, obra_b):
         return False
     return True
@@ -512,7 +533,7 @@ def documentos_de_destino(documentos) -> list:
 
 def _entrega_a_dict(documentos) -> dict[str, object]:
     destino = documentos_de_destino(documentos)
-    routing = _routing_consolidado(destino)
+    routing = _routing_consolidado(documentos if any(getattr(d, "identidad_entrega_confirmada", None) for d in documentos) else destino)
     return {
         "numeros_guia": sorted(
             {d.numero_guia.strip() for d in documentos if _presente(d.numero_guia)}
