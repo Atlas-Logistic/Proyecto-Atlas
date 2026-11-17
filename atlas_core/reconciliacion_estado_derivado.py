@@ -954,8 +954,17 @@ def reconciliar_estado_derivado(
     proveedor_rutas=None, proveedor_rutas_fallback=None,
     guias_excluir_reintento_ruta: set[str] | None = None,
     guias_objetivo: set[str] | None = None,
+    omitir_coordenadas_catalogo: bool = False,
 ) -> dict[str, object]:
     """Actualiza una operación antigua una sola vez por RULESET_VERSION.
+
+    `omitir_coordenadas_catalogo` (aditivo, opt-in -- `False` conserva el
+    comportamiento de siempre): no ejecuta el paso compartido
+    `revalidar_destinos_confirmados_sin_coordenadas_sin_ocr`, que recorre
+    TODO el catálogo y completa coordenadas de destinos ajenos al alcance
+    focal (caso 484907: completaba Vicuña Mackenna 825 y Vista Panorámica
+    10901). Sirve para una reconciliación focal que no debe tocar el
+    catálogo; no cambia ninguna regla de resolución.
 
     `migracion` (más abajo) sólo se dispara si `version_previa <
     RULESET_VERSION` -- CUALQUIER cambio a las reglas de alguno de los
@@ -1668,7 +1677,8 @@ def reconciliar_estado_derivado(
         # completadas. Nunca completa un destino con texto degradado por
         # OCR (`texto_destino_degradado`, caso 464715).
         limpieza_destino_coords = (
-            {"destinos_actualizados": []} if _bateria_compartida_sigue_fresca()
+            {"destinos_actualizados": []}
+            if omitir_coordenadas_catalogo or _bateria_compartida_sigue_fresca()
             else revalidar_destinos_confirmados_sin_coordenadas_sin_ocr(
                 carpeta_catalogos=catalogos, proveedor_rutas=proveedor_rutas,
             )
