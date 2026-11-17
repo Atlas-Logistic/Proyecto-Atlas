@@ -383,6 +383,21 @@ def forma_comparable_direccion(texto: str) -> str:
     return " ".join(salida)
 
 
+def separar_numero_comuna(texto: str) -> str:
+    """Separa sólo un sufijo que sea una comuna chilena exacta.
+
+    No modifica el original ni interpreta letras de una numeración como
+    comuna por similitud. Se usa la misma autoridad territorial de Atlas.
+    """
+    from atlas_core.territorio_chile import _INDICE_COMUNAS
+
+    def separar(m: re.Match) -> str:
+        sufijo = m.group(2)
+        return m.group(1) + " " + sufijo if sufijo in _INDICE_COMUNAS else m.group(0)
+
+    return re.sub(r"(\d)([A-ZÁÉÍÓÚÜÑ]{3,})(?![A-ZÁÉÍÓÚÜÑ])", separar, texto)
+
+
 def _numeracion_como_maestro(texto: str, numeros: set[str], comuna_confirmada: str) -> str:
     """Numeración partida por separador de miles ("2 901") o con I/L final
     leída por OCR ("290I"), sólo si equivale EXACTAMENTE a un número de la
@@ -510,7 +525,11 @@ def direccion_confirmada_coincide(
     responsabilidad del llamador: m?s de una coincidencia debe abstenerse.
     """
     calle = forma_comparable_direccion(calle_confirmada)
-    texto = forma_comparable_direccion(texto_documental)
+    texto_original = forma_comparable_direccion(texto_documental)
+    texto = separar_numero_comuna(texto_original)
+    if (texto != texto_original and comuna_confirmada
+            and not _comuna_confirmada_en_texto(comuna_confirmada, texto)):
+        return False
     if not calle or not texto:
         return False
     # Secuencia completa, nunca parte de otro número ("2901" no está en "29011").
