@@ -1157,6 +1157,10 @@ def reconciliar_estado_derivado(
     # el ÚLTIMO `reporte_vigente` publicado registró es la señal general,
     # sin polling: se evalúa en la misma oportunidad de reconciliación
     # natural que ya dispara cada carga de Desktop.
+    from atlas_core.coherencia_comuna_derivada import revalidar_comunas_confirmadas
+    previa_comuna = revalidar_comunas_confirmadas(
+        ruta_dataset=dataset, carpeta_catalogos=catalogos, guias_objetivo=guias_objetivo, aplicar=False,
+    )
     huella_dataset_actual = _sha256_archivo(dataset)
     reporte_desactualizado = huella_dataset_actual != estado_previo.get("dataset_sha256")
     # Bloque P0 INGESTA FOCAL -- ELIMINAR RECONCILIACIÓN DUPLICADA (ver
@@ -1210,12 +1214,13 @@ def reconciliar_estado_derivado(
         not migracion and not por_reintentar and not reporte_desactualizado
         and not estado_derivado_incoherente and not falta_tarjeta_destino
         and not capacidades_a_reevaluar and not recalcular_rutas_archivos
+        and not previa_comuna["guias_actualizadas"]
     ):
         return {
             "reconciliado": False, "motivo": "VERSION_VIGENTE_SIN_REINTENTO_PENDIENTE",
             "version": version_previa, "pendientes_tecnicos": len(registros),
         }
-    if reconciliacion_global_redundante is not None:
+    if reconciliacion_global_redundante is not None and not previa_comuna["guias_actualizadas"]:
         # Bloque P0 INGESTA FOCAL -- ELIMINAR RECONCILIACIÓN DUPLICADA: a
         # diferencia del corte de arriba, éste SÍ puede haber entrado con
         # `por_reintentar` no vacío (backlog con cooldown vencido) -- pero
@@ -1835,6 +1840,9 @@ def reconciliar_estado_derivado(
         # probado (Fases 1-4), incluida su auto-resolución acotada
         # (`MAX_ITERACIONES_AUTO_RESOLUCION`) para los tipos de decisión
         # donde la evidencia YA alcanza el nivel más alto sin ambigüedad.
+        coherencia_comuna = revalidar_comunas_confirmadas(
+            ruta_dataset=dataset, carpeta_catalogos=catalogos, guias_objetivo=guias_objetivo,
+        )
         evidencia_decisiones = reconciliar_bandeja_decisiones(
             raiz_atlas=raiz, reloj=lambda: instante, cache_memoizacion=_cache_regenerar_decisiones,
             guias_objetivo=guias_objetivo,
@@ -2072,6 +2080,7 @@ def reconciliar_estado_derivado(
         "reporte_vigente": str(reporte),
         "guias_actualizadas": sorted(
             set(limpieza["guias_actualizadas"])
+            | set(coherencia_comuna["guias_actualizadas"])
             | set(convergencia_destino["guias_actualizadas"])
             | set(limpieza_sufijo_destino["guias_actualizadas"])
             | set(limpieza_material["guias_actualizadas"])

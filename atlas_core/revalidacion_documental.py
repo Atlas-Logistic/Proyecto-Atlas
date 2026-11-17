@@ -6402,8 +6402,13 @@ def _revalidar_y_regenerar_reporte(
     # hace que los tres campos deriven, siempre, de esa misma fuente ya
     # canónica.
     resultado_indicadores = revalidar_indicadores_documentales_sin_ocr(ruta_dataset=dataset)
+    from atlas_core.coherencia_comuna_derivada import revalidar_comunas_confirmadas
+    resultado_comuna_confirmada = revalidar_comunas_confirmadas(
+        ruta_dataset=dataset, carpeta_catalogos=catalogos, guias_objetivo=guias_en_alcance(dataset),
+    )
     guias_actualizadas = sorted(
-        set(resultado_obra_destino["guias_actualizadas"])
+        set(resultado_comuna_confirmada["guias_actualizadas"])
+        | set(resultado_obra_destino["guias_actualizadas"])
         | set(resultado_convergencia_destino["guias_actualizadas"])
         | set(resultado_patente["guias_actualizadas"])
         | set(resultado_chofer_operacional["guias_actualizadas"])
