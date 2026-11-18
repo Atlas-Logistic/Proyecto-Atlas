@@ -112,6 +112,9 @@ from atlas_core.extractor import (
 # recién en la primera llamada real (costo pagado una sola vez por
 # proceso, cacheado por `sys.modules` -- nunca en un proceso que jamás
 # procesa una imagen).
+from atlas_core.perfiles_documentales import PERFIL_AZA, ejecutar_perfil_explicito
+
+
 def leer_texto_imagen(*args, **kwargs):
     from atlas_core.ocr import leer_texto_imagen as _f
     return _f(*args, **kwargs)
@@ -2388,7 +2391,7 @@ def _reconciliar_patentes_por_asignacion(
     }
 
 
-def procesar_archivo(
+def _procesar_archivo_aza(
     ruta: Path,
     lector_ocr: object = None,
     fecha_desde: date | None = None,
@@ -4354,6 +4357,48 @@ def procesar_archivo(
                 exc,
             )
     return resultado
+
+
+def procesar_archivo(
+    ruta: Path,
+    lector_ocr: object = None,
+    fecha_desde: date | None = None,
+    fecha_hasta: date | None = None,
+    proveedor: object = None,
+    carpeta_catalogos: str | Path | None = None,
+    proveedor_rutas: object = None,
+    proveedor_geocodificacion_fallback: object = None,
+    pais_operacion: str = PAIS_OPERACION_PREDETERMINADO,
+    recolector_decisiones: Callable[[list[dict[str, object]]], None] | None = None,
+    servicio_telemetria: object = None,
+    planta_origen_informada: str | None = None,
+    directorio_trazas_ocr: str | Path | None = None,
+    directorio_orientacion: str | Path | None = None,
+    referencia_imagen_traza: str | None = None,
+    reloj: Callable[[], datetime] = lambda: datetime.now(timezone.utc),
+    *,
+    perfil_documental: object = PERFIL_AZA,
+) -> dict[str, str]:
+    """Procesa con AZA por defecto; otros perfiles requieren inyeccion explicita.
+
+    ``None`` representa un formato desconocido: se rechaza antes de leer el
+    documento o ejecutar reglas AZA. No hay deteccion automatica de emisor.
+    """
+    contexto = dict(
+        ruta=ruta, lector_ocr=lector_ocr, fecha_desde=fecha_desde,
+        fecha_hasta=fecha_hasta, proveedor=proveedor,
+        carpeta_catalogos=carpeta_catalogos, proveedor_rutas=proveedor_rutas,
+        proveedor_geocodificacion_fallback=proveedor_geocodificacion_fallback,
+        pais_operacion=pais_operacion, recolector_decisiones=recolector_decisiones,
+        servicio_telemetria=servicio_telemetria,
+        planta_origen_informada=planta_origen_informada,
+        directorio_trazas_ocr=directorio_trazas_ocr,
+        directorio_orientacion=directorio_orientacion,
+        referencia_imagen_traza=referencia_imagen_traza, reloj=reloj,
+    )
+    if perfil_documental is PERFIL_AZA:
+        return _procesar_archivo_aza(**contexto)
+    return ejecutar_perfil_explicito(perfil_documental, contexto)
 
 
 def _archivos_ya_procesados(ruta_csv: Path) -> set[str]:
