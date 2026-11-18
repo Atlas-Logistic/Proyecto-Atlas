@@ -969,6 +969,77 @@ def _aplicar_obra_consolidar_duplicada(ctx: _Contexto, p: dict, plan: Plan, acto
             "reconciliar": True}
 
 
+def _plan_destino_consolidar_duplicado(ctx: _Contexto, p: dict) -> Plan:
+    from atlas_core.catalogo_destinos import (
+        ErrorCatalogoDestinos, destino_consolidado_en, motivo_destinos_no_consolidables,
+    )
+    catalogo = ctx.catalogo_destinos()
+    try:
+        canonico = catalogo.obtener(str(p["destino_canonico_id"]))
+        duplicado = catalogo.obtener(str(p["destino_duplicado_id"]))
+    except ErrorCatalogoDestinos as error:
+        raise ErrorAccionOperacional("ENTIDAD_NO_ENCONTRADA", "destino inexistente") from error
+    ya_consolidado = destino_consolidado_en(duplicado) == canonico.destino_id
+    motivo = "" if ya_consolidado else motivo_destinos_no_consolidables(canonico, duplicado)
+    if motivo in {"MISMO_DESTINO", "CANONICO_NO_CONFIRMADO_ACTIVO", "DUPLICADO_NO_ACTIVO"}:
+        raise ErrorAccionOperacional("PRECONDICION_FALLIDA", f"destinos no consolidables: {motivo}")
+    if motivo:
+        raise ErrorAccionOperacional("AMBIGUEDAD_REQUIERE_HUMANO",
+                                     f"no está acreditado que sean el mismo punto físico: {motivo}")
+    ids = {canonico.destino_id, duplicado.destino_id}
+    relaciones = [r for r in ctx.catalogo_obras().listar_relaciones() if r.destino_id in ids]
+    instantanea = ctx.instantanea_documental()
+    decisiones = [e for e in instantanea["ledger"].get("aplicaciones", [])
+                  if isinstance(e, dict) and str(e.get("destino_id") or "") in ids]
+    guias = {str((e.get("documento") or {}).get("numero_guia") or "") for e in decisiones}
+    for fila in instantanea["filas"]:
+        try:
+            convergencia = json.loads(fila.get("metricas_procesamiento_json") or "{}").get("convergencia_destino_confirmado")
+        except (ValueError, AttributeError):
+            continue
+        if isinstance(convergencia, dict) and convergencia.get("destino_id") in ids:
+            guias.add(str(fila.get("numero_guia") or ""))
+    guias.discard("")
+    return Plan(
+        entidad={"tipo": "CONSOLIDACION_DESTINO", "id": f"{canonico.destino_id}:{duplicado.destino_id}",
+                 "destino_canonico_id": canonico.destino_id, "destino_duplicado_id": duplicado.destino_id},
+        valor_actual={"canonico": canonico.a_dict(), "duplicado": duplicado.a_dict()},
+        valor_propuesto={"conservar_destino_id": canonico.destino_id, "inactivar_destino_id": duplicado.destino_id,
+                         "relaciones_conservadas": sorted(r.relacion_id for r in relaciones),
+                         "decisiones_conservadas": sorted(str(e.get("decision_id") or "") for e in decisiones)},
+        estado_base={"canonico": canonico.a_dict(), "duplicado": duplicado.a_dict(),
+                     "relaciones": [r.a_dict() for r in relaciones]},
+        sin_cambios=ya_consolidado,
+        afectados={**_afectados_por_guias(ctx, guias),
+                   "relaciones": [{"relacion_id": r.relacion_id, "obra_id": r.obra_id, "destino_id": r.destino_id,
+                                   "estado": r.estado} for r in relaciones],
+                   "decisiones": [{"decision_id": e.get("decision_id"), "tipo": e.get("tipo"),
+                                   "numero_guia": (e.get("documento") or {}).get("numero_guia"),
+                                   "destino_id": e.get("destino_id")} for e in decisiones]},
+        consecuencias=[
+            "Conserva el destino canónico CONFIRMADO sin cambios y marca el duplicado INACTIVO; no borra destinos, "
+            "relaciones, decisiones ni evidencias.",
+            "Las relaciones y decisiones que citan el ID histórico se conservan tal cual (trazabilidad); "
+            "las resoluciones vigentes dejan de verlo como alternativa.",
+            "Una dirección idéntica a la del duplicado se reutiliza en el destino canónico: nunca se recrea.",
+            "No recalcula rutas ni modifica el dataset documental.",
+        ],
+        revalidaciones=["RECONCILIAR_BANDEJA_SIN_OCR"], archivos=("destinos_maestros", "bandeja"),
+    )
+
+
+def _aplicar_destino_consolidar_duplicado(ctx: _Contexto, p: dict, plan: Plan, actor: str) -> dict:
+    resultado = ctx.catalogo_destinos().consolidar_destino_duplicado(
+        str(p["destino_canonico_id"]), str(p["destino_duplicado_id"]),
+        actor=f"{actor}/{ctx.confirmado_por}",
+        referencia=f"ACCION_OPERACIONAL:{ctx.token}" + (f" {p['referencia']}" if p.get("referencia") else ""),
+    )
+    return {"despues": {"destino_canonico_id": resultado["canonico"].destino_id,
+                        "destino_duplicado_id": resultado["duplicado"].destino_id,
+                        "vigencia_duplicado": resultado["duplicado"].estado_vigencia},
+            "reconciliar": True, "servicio": "CatalogoDestinos.consolidar_destino_duplicado"}
+
+
 def _plan_destino_registrar(ctx: _Contexto, p: dict) -> Plan:
     from atlas_core.catalogo_destinos import EstadoBusquedaDestino
     if ("latitud" in p) != ("longitud" in p):
@@ -2924,6 +2995,11 @@ ACCIONES: dict[str, DefinicionAccion] = {d.nombre: d for d in (
                      "Conserva una obra CONFIRMADA e inactiva un duplicado OBSERVADO/CANDIDATO del mismo cliente.",
                      {"obra_principal_id": _P("id", True), "obra_duplicada_id": _P("id", True), "referencia": _REF},
                      _plan_obra_consolidar_duplicada, _aplicar_obra_consolidar_duplicada,
+                     escritor_global=True),
+    DefinicionAccion("DESTINO_CONSOLIDAR_DUPLICADO", OPERACIONAL_REVERSIBLE,
+                     "Conserva un destino CONFIRMADO e inactiva un duplicado del mismo punto físico (sin borrar historial).",
+                     {"destino_canonico_id": _P("id", True), "destino_duplicado_id": _P("id", True), "referencia": _REF},
+                     _plan_destino_consolidar_duplicado, _aplicar_destino_consolidar_duplicado,
                      escritor_global=True),
     DefinicionAccion("DESTINO_REGISTRAR", OPERACIONAL_REVERSIBLE, "Registra (o reutiliza y confirma) un destino global.",
                      {"direccion": _P("texto", True), "comuna": _P("texto", max_largo=80),

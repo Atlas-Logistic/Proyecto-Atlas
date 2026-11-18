@@ -558,6 +558,66 @@ def consolidar_destinos_equivalentes(destinos: Iterable) -> list:
     return [con_coordenadas[0][0] if con_coordenadas else destinos[0]]
 
 
+# Consolidación explícita de un destino duplicado: mismo convenio que
+# `migracion_destinos_globales` (el duplicado queda INACTIVO, conserva su ID,
+# fuente y fecha de creación, y su observación nombra la identidad canónica).
+# Las relaciones, el ledger y las métricas que lo citan no se reescriben.
+MARCA_CONSOLIDACION_DESTINO = "CONSOLIDACION_DESTINO_DUPLICADO"
+_PATRON_CONSOLIDACION_DESTINO = re.compile(
+    rf"{MARCA_CONSOLIDACION_DESTINO}: identidad canónica ([0-9A-Fa-f-]{{36}})"
+)
+
+
+def destino_consolidado_en(destino) -> str:
+    """ID canónico al que una consolidación explícita retiró este destino
+    ('' si sigue vigente o si se inactivó por otra razón)."""
+    if getattr(destino, "estado_vigencia", "") != EstadoVigenciaDestino.INACTIVO.value:
+        return ""
+    marcas = _PATRON_CONSOLIDACION_DESTINO.findall(str(getattr(destino, "observacion", "") or ""))
+    return marcas[-1] if marcas else ""
+
+
+def motivo_destinos_no_consolidables(canonico, duplicado) -> str:
+    """'' si ambos registros son, sin ambigüedad, el MISMO punto físico.
+
+    Exige: misma calle y numeración; coordenadas de ambos a <=150 m; y la
+    misma comuna, o bien que la dirección del duplicado nombre
+    explícitamente (y sólo) la comuna del canónico -- un campo comuna
+    contradicho por la propia dirección confirmada no es otra ubicación.
+    Cualquier otra diferencia es un destino legítimamente distinto."""
+    from atlas_core.rutas.destino_entrega import _comunas_explicitas
+    from atlas_core.territorio_chile import ESTADO_COMUNA_EXACTA, normalizar_comuna
+
+    if canonico.destino_id == duplicado.destino_id:
+        return "MISMO_DESTINO"
+    if canonico.estado_vigencia != EstadoVigenciaDestino.ACTIVO.value \
+            or canonico.estado_calidad != EstadoCalidadDestino.CONFIRMADO.value:
+        return "CANONICO_NO_CONFIRMADO_ACTIVO"
+    if duplicado.estado_vigencia != EstadoVigenciaDestino.ACTIVO.value:
+        return "DUPLICADO_NO_ACTIVO"
+    calle_c, calle_d = _clave_fisica_destino(canonico)[0], _clave_fisica_destino(duplicado)[0]
+    if not calle_c or calle_c != calle_d or not any(t.isdigit() for t in calle_c):
+        return "DIRECCION_DISTINTA"
+    try:
+        punto_c = (float(canonico.latitud), float(canonico.longitud))
+        punto_d = (float(duplicado.latitud), float(duplicado.longitud))
+    except (TypeError, ValueError):
+        return "SIN_COORDENADAS"
+    if _distancia_metros(punto_c, punto_d) > DISTANCIA_MAXIMA_DESTINOS_EQUIVALENTES_M:
+        return "COORDENADAS_DISTANTES"
+
+    def comuna(texto: str) -> str:
+        resultado = normalizar_comuna(str(texto or ""))
+        return resultado.comuna if resultado.estado == ESTADO_COMUNA_EXACTA and resultado.comuna else ""
+
+    comuna_c = comuna(canonico.comuna)
+    if not comuna_c or set(_comunas_explicitas(canonico.direccion)) - {comuna_c}:
+        return "COMUNA_CANONICA_INCIERTA"
+    if comuna(duplicado.comuna) != comuna_c and _comunas_explicitas(duplicado.direccion) != (comuna_c,):
+        return "COMUNA_DISTINTA"
+    return ""
+
+
 def direccion_confirmada_coincide(
     calle_confirmada: str, texto_documental: str, *, comuna_confirmada: str = "",
 ) -> bool:
@@ -896,7 +956,31 @@ class CatalogoDestinos:
                 resuelto = ResultadoBusquedaDestino(EstadoBusquedaDestino.COINCIDENCIA, compatibles[0], 1)
             elif len(compatibles) > 1:
                 resuelto = ResultadoBusquedaDestino(EstadoBusquedaDestino.AMBIGUA, None, len(compatibles))
+        if resuelto.estado == EstadoBusquedaDestino.SIN_COINCIDENCIA:
+            # La misma dirección de un destino ya consolidado se reutiliza en
+            # su identidad canónica: nunca se recrea el duplicado retirado.
+            resuelto = self._sucesor_consolidado(direccion, comuna=comuna, region=region)
         return resuelto
+
+    def _sucesor_consolidado(self, direccion: str, *, comuna: str, region: str) -> ResultadoBusquedaDestino:
+        destinos = self.listar()
+        por_id = {d.destino_id: d for d in destinos}
+        direccion_n, comuna_n, _ = clave_fisica_destino(direccion, comuna, region)
+        canonicos = set()
+        for retirado in destinos:
+            canonico = por_id.get(destino_consolidado_en(retirado))
+            if canonico is None or _texto_direccion_normalizado(retirado.direccion) != direccion_n:
+                continue
+            if comuna_n and comuna_n not in {normalizar_nombre_destino(retirado.comuna),
+                                             normalizar_nombre_destino(canonico.comuna)}:
+                continue
+            if canonico.estado_vigencia == EstadoVigenciaDestino.ACTIVO.value:
+                canonicos.add(canonico.destino_id)
+        if len(canonicos) == 1:
+            return ResultadoBusquedaDestino(EstadoBusquedaDestino.COINCIDENCIA, por_id[canonicos.pop()], 1)
+        if len(canonicos) > 1:
+            return ResultadoBusquedaDestino(EstadoBusquedaDestino.AMBIGUA, None, len(canonicos))
+        return ResultadoBusquedaDestino(EstadoBusquedaDestino.SIN_COINCIDENCIA)
 
     def crear(
         self,
@@ -1097,6 +1181,44 @@ class CatalogoDestinos:
             destinos[indice] = editado
             self._escribir(destinos)
             return editado
+
+    def consolidar_destino_duplicado(
+        self, canonico_id: str, duplicado_id: str, *, actor: str, referencia: str,
+    ) -> dict[str, object]:
+        """Retira un duplicado del MISMO punto físico hacia su identidad canónica.
+
+        Nunca borra: el duplicado queda INACTIVO con su ID, fuente, fechas y
+        coordenadas; su observación registra la identidad canónica, el actor,
+        la referencia y la vigencia previa. El canónico no se modifica. Las
+        relaciones obra-destino, decisiones y métricas que citan el ID
+        histórico siguen intactas (las lecturas de destinos vigentes ya omiten
+        los inactivos). Idempotente para la misma pareja."""
+        actor = _obligatorio(actor, "actor")
+        referencia = _obligatorio(referencia, "referencia")
+        with bloqueo_sesion(self.ruta.parent, NOMBRE_LOCK_CATALOGO_DESTINOS):
+            destinos = self._leer()
+            canonico = destinos[self._indice(destinos, canonico_id)]
+            indice = self._indice(destinos, duplicado_id)
+            duplicado = destinos[indice]
+            if destino_consolidado_en(duplicado) == canonico.destino_id:
+                return {"canonico": canonico, "duplicado": duplicado, "idempotente": True}
+            motivo = motivo_destinos_no_consolidables(canonico, duplicado)
+            if motivo:
+                raise ErrorCatalogoDestinos(f"destinos no consolidables: {motivo}")
+            nota = (f"{MARCA_CONSOLIDACION_DESTINO}: identidad canónica {canonico.destino_id}; "
+                    f"vigencia previa {duplicado.estado_vigencia}; comuna registrada {duplicado.comuna}; "
+                    f"actor={actor}; referencia={referencia}; ID histórico preservado.")
+            previa = str(duplicado.observacion or "").strip()
+            retirado = replace(
+                duplicado,
+                estado_vigencia=EstadoVigenciaDestino.INACTIVO.value,
+                observacion=f"{previa} | {nota}" if previa else nota,
+                fecha_modificacion=self._instante_iso(),
+            )
+            _validar_destino(retirado)
+            destinos[indice] = retirado
+            self._escribir(destinos)
+        return {"canonico": canonico, "duplicado": retirado, "idempotente": False}
 
     def _validar_cliente_activo(self, cliente_id: str) -> str:
         buscado = _obligatorio(cliente_id, "cliente_id")
