@@ -18,7 +18,7 @@ from atlas_core.catalogo_clientes import (
     EstadoBusquedaCliente, EstadoCalidadCliente, normalizar_nombre_cliente, normalizar_rut_cliente,
 )
 from atlas_core.catalogo_destinos import (
-    CatalogoDestinos, DestinoDuplicadoError, ErrorCatalogoDestinos, EstadoCalidadDestino,
+    CatalogoDestinos, DestinoDuplicadoError, ErrorCatalogoDestinos, EstadoBusquedaDestino, EstadoCalidadDestino,
 )
 from atlas_core.catalogo_obras_destinos import (
     CatalogoObrasDestinos, ErrorCatalogoObrasDestinos, EstadoVigencia,
@@ -461,6 +461,71 @@ def _reconciliar_bandeja_legacy_publicada(
     )
 
 
+def _destinos_confirmados_de_obra(
+    *, catalogos: Path, catalogo_obras_ruta: Path, catalogo_destinos_ruta: Path, obra_canonica: str,
+) -> tuple[str, ...]:
+    """IDs de destino con relación CONFIRMADA hacia la obra (contexto de obra
+    para reutilizar un destino equivalente). Vacío si la obra no existe o es
+    ambigua -- nunca bloquea la decisión."""
+    if not str(obra_canonica or "").strip():
+        return ()
+    try:
+        catalogo_obras = CatalogoObrasDestinos(
+            ruta=catalogo_obras_ruta, ruta_clientes=catalogos / "clientes.json",
+            ruta_destinos=catalogo_destinos_ruta,
+        )
+        return tuple(d.destino_id for d in catalogo_obras.listar_destinos_confirmados_para_obra(nombre_obra=obra_canonica))
+    except (OSError, ValueError, ErrorCatalogoObrasDestinos):
+        return ()
+
+
+def _identidad_destino_para_obra(
+    *, catalogos: Path, catalogo_obras_ruta: Path, catalogo_destinos_ruta: Path, dataset: Path,
+    numero_guia: str, obra_canonica: str, comuna: str, region: str,
+) -> tuple[str, str, tuple[str, ...]]:
+    """Comuna/región validadas y contexto de obra con que se busca o crea el
+    destino de una obra -- la misma identidad en la verificación previa y en
+    la escritura."""
+    # Una comuna declarada mal escrita (variante OCR/tipeo) no se aprende si
+    # la evidencia documental de ESTA guía trae la comuna válida; la región
+    # se deriva siempre de una comuna válida (caso real 475484).
+    from atlas_core.registro_obra_destino import comuna_region_validadas
+    comuna_destino, region_destino = comuna_region_validadas(
+        dataset=dataset, numero_guia=numero_guia, comuna=comuna, region=region,
+    )
+    destinos_obra = _destinos_confirmados_de_obra(
+        catalogos=catalogos, catalogo_obras_ruta=catalogo_obras_ruta,
+        catalogo_destinos_ruta=catalogo_destinos_ruta, obra_canonica=obra_canonica,
+    )
+    return comuna_destino, region_destino, destinos_obra
+
+
+def _exigir_destino_no_ambiguo(
+    *, catalogos: Path, catalogo_obras_ruta: Path, catalogo_destinos_ruta: Path, dataset: Path,
+    numero_guia: str, obra_canonica: str, destino_texto: str, comuna: str, region: str,
+    latitud: float | None, longitud: float | None,
+) -> None:
+    """Verificación previa SIN escrituras: si crear/reutilizar el destino
+    va a abstenerse (varios equivalentes, comuna incierta, coordenada no
+    verificable), la decisión se rechaza ANTES de tocar el dataset y la
+    tarjeta queda pendiente. Nunca elige un destino."""
+    comuna_destino, region_destino, destinos_obra = _identidad_destino_para_obra(
+        catalogos=catalogos, catalogo_obras_ruta=catalogo_obras_ruta,
+        catalogo_destinos_ruta=catalogo_destinos_ruta, dataset=dataset, numero_guia=numero_guia,
+        obra_canonica=obra_canonica, comuna=comuna, region=region,
+    )
+    busqueda = CatalogoDestinos(catalogo_destinos_ruta, ruta_clientes=catalogos / "clientes.json").buscar_reutilizable_global(
+        destino_texto, comuna=comuna_destino, region=region_destino,
+        latitud=latitud, longitud=longitud, destinos_obra=destinos_obra,
+    )
+    if busqueda.estado == EstadoBusquedaDestino.AMBIGUA:
+        raise ErrorAplicacionDecision(
+            "La dirección corresponde a más de un destino del catálogo, o a uno cuya comuna o coordenada no "
+            f"puede verificarse ({busqueda.motivo or 'AMBIGUA'}). No se crea otro destino: requiere revisión "
+            "o consolidación del catálogo antes de confirmar."
+        )
+
+
 def _confirmar_destino_para_obra(
     *, catalogos: Path, catalogo_obras_ruta: Path, catalogo_destinos_ruta: Path, dataset: Path,
     decision_id: str, documento: dict, cliente_id: str, cliente_canonico: str,
@@ -475,12 +540,10 @@ def _confirmar_destino_para_obra(
     `REGISTRAR` con `confirmar_destino_conjunto`), así ambas vías aplican
     exactamente las mismas validaciones geográficas."""
     numero_guia = str(documento.get("numero_guia") or "")
-    # Una comuna declarada mal escrita (variante OCR/tipeo) no se aprende si
-    # la evidencia documental de ESTA guía trae la comuna válida; la región
-    # se deriva siempre de una comuna válida (caso real 475484).
-    from atlas_core.registro_obra_destino import comuna_region_validadas
-    comuna_destino, region_destino = comuna_region_validadas(
-        dataset=dataset, numero_guia=numero_guia, comuna=comuna, region=region,
+    comuna_destino, region_destino, destinos_obra = _identidad_destino_para_obra(
+        catalogos=catalogos, catalogo_obras_ruta=catalogo_obras_ruta,
+        catalogo_destinos_ruta=catalogo_destinos_ruta, dataset=dataset, numero_guia=numero_guia,
+        obra_canonica=obra_canonica, comuna=comuna, region=region,
     )
     destino = CatalogoDestinos(catalogo_destinos_ruta, ruta_clientes=catalogos/"clientes.json").crear_o_reutilizar_global(
         nombre_destino=destino_texto, direccion=destino_texto, fuente=fuente,
@@ -488,6 +551,7 @@ def _confirmar_destino_para_obra(
         region=region_destino,
         latitud=latitud, longitud=longitud,
         estado_calidad=EstadoCalidadDestino.CONFIRMADO,
+        destinos_obra=destinos_obra,
     )
     # Reutiliza la obra global existente (por nombre canónico, nunca crea una
     # segunda) y crea/reutiliza la relación obra<->destino, dejándola
@@ -911,7 +975,24 @@ def aplicar_decision_obra(*, raiz_atlas: str | Path, decision_id: str, accion: s
                     # tal cual.
                     destino_texto_obra = str(contexto.get("destino_documental", "")).strip()
                     destino_id_resuelto = None
+                    destino_automatico_ambiguo = False
                     if candidato_obra_resuelta is not None and destino_texto_obra and destino_texto_obra != "No encontrado":
+                        # Bloque P0 DESTINO EQUIVALENTE -- este aprendizaje
+                        # es automático: si el destino sería ambiguo (varios
+                        # equivalentes, comuna incierta, coordenada no
+                        # verificable) no se elige ni se crea otro; la obra
+                        # se registra igual y el destino queda como pregunta
+                        # (R3.4.2, más abajo).
+                        destino_automatico_ambiguo = CatalogoDestinos(
+                            catalogo_destinos_ruta, ruta_clientes=catalogos / "clientes.json",
+                        ).buscar_reutilizable_global(
+                            destino_texto_obra,
+                            comuna=str((candidato_obra_resuelta.get("metadatos") or {}).get("comuna") or ""),
+                        ).estado == EstadoBusquedaDestino.AMBIGUA
+                    if (
+                        candidato_obra_resuelta is not None and destino_texto_obra
+                        and destino_texto_obra != "No encontrado" and not destino_automatico_ambiguo
+                    ):
                         metadatos_evidencia = candidato_obra_resuelta.get("metadatos") or {}
                         destino_obj = CatalogoDestinos(catalogo_destinos_ruta, ruta_clientes=catalogos / "clientes.json").crear_o_reutilizar_global(
                             nombre_destino=destino_texto_obra, direccion=destino_texto_obra,
@@ -1073,6 +1154,18 @@ def aplicar_decision_obra(*, raiz_atlas: str | Path, decision_id: str, accion: s
                                 lat_fila = lon_fila = None
                             comuna_fila = str(_fila_dest.get("localidad_entrega") or "").strip()
                             region_fila = str(_fila_dest.get("region_entrega") or "").strip()
+                    # Bloque P0 DESTINO EQUIVALENTE -- si la escritura de
+                    # abajo va a abstenerse (dirección equivalente a varios
+                    # destinos, comuna incierta o coordenada no verificable),
+                    # se rechaza AHORA, antes de corregir el dataset: nunca
+                    # queda una aplicación a medias ni se crea otro destino.
+                    _exigir_destino_no_ambiguo(
+                        catalogos=catalogos, catalogo_obras_ruta=catalogo_obras_ruta,
+                        catalogo_destinos_ruta=catalogo_destinos_ruta, dataset=dataset,
+                        numero_guia=numero_guia, obra_canonica=obra_canonica, destino_texto=destino_texto,
+                        comuna=comuna_correccion or comuna_fila, region=region_fila,
+                        latitud=lat_fila, longitud=lon_fila,
+                    )
                     # Bloque CONFIRMACIÓN/CORRECCIÓN DE DESTINO -- si el
                     # texto leído se corrigió, el dato SUCIO no debe
                     # sobrevivir en la fila: se reemplaza `despachar_a_
@@ -1704,6 +1797,12 @@ def aplicar_decision_obra(*, raiz_atlas: str | Path, decision_id: str, accion: s
                                 latitud=latitud_confirmada, longitud=longitud_confirmada,
                                 fuente=f"DECISION_HUMANA_R6:{decision_id}",
                                 estado_calidad=EstadoCalidadDestino.CONFIRMADO,
+                                # Contexto de obra: entre destinos equivalentes
+                                # desempata sólo una relación ya CONFIRMADA.
+                                destinos_obra=tuple(
+                                    d.destino_id for d in
+                                    catalogo_obras.listar_destinos_confirmados_para_obra(nombre_obra=obra_canonica)
+                                ),
                             )
                             evidencia_destino = Evidencia(
                                 tipo=TipoEvidencia.GUIA.value,

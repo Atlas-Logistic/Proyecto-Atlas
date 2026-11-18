@@ -1044,20 +1044,30 @@ def _plan_destino_registrar(ctx: _Contexto, p: dict) -> Plan:
     from atlas_core.catalogo_destinos import EstadoBusquedaDestino
     if ("latitud" in p) != ("longitud" in p):
         raise ErrorAccionOperacional("PARAMETRO_INVALIDO", "latitud y longitud van juntas")
-    resuelto = ctx.catalogo_destinos().resolver_direccion_global(
-        str(p["direccion"]), comuna=str(p.get("comuna", "")), region=str(p.get("region", "")))
+    # Misma búsqueda que hará la aplicación (`crear_o_reutilizar_global`):
+    # la vista previa nunca promete crear lo que luego se reutiliza.
+    resuelto = ctx.catalogo_destinos().buscar_reutilizable_global(
+        str(p["direccion"]), comuna=str(p.get("comuna", "")), region=str(p.get("region", "")),
+        latitud=p.get("latitud"), longitud=p.get("longitud"))
     if resuelto.estado == EstadoBusquedaDestino.AMBIGUA:
-        raise ErrorAccionOperacional("ENTIDAD_AMBIGUA", "la dirección coincide con más de un destino activo")
+        raise ErrorAccionOperacional(
+            "ENTIDAD_AMBIGUA", "la dirección coincide con más de un destino activo"
+            + (f" o con uno no verificable ({resuelto.motivo})" if resuelto.motivo else ""))
     existente = resuelto.destino
+    # Un destino EQUIVALENTE (no exacto) se reutiliza sin recibir coordenadas.
+    equivalente = existente is not None and bool(resuelto.motivo)
     sin_cambios = existente is not None and existente.estado_calidad == "CONFIRMADO" and (
-        "latitud" not in p or existente.latitud is not None)
+        "latitud" not in p or existente.latitud is not None or equivalente)
     return Plan(
         entidad={"tipo": "DESTINO", "id": existente.destino_id if existente else "", "direccion": p["direccion"]},
         valor_actual=(existente.a_dict() if existente else None),
         valor_propuesto={k: p[k] for k in ("direccion", "comuna", "region", "latitud", "longitud") if k in p}
         | {"estado_calidad": "CONFIRMADO"},
         estado_base={"destino": existente.a_dict() if existente else None}, sin_cambios=sin_cambios,
-        consecuencias=[("Promueve el destino existente a CONFIRMADO (nunca degrada ni sobrescribe coordenadas)."
+        consecuencias=[(f"Reutiliza el destino equivalente {existente.direccion} ({resuelto.motivo}); "
+                        "sólo puede promoverse a CONFIRMADO, sin recibir coordenadas."
+                        if equivalente else
+                        "Promueve el destino existente a CONFIRMADO (nunca degrada ni sobrescribe coordenadas)."
                         if existente else "Crea un destino global CONFIRMADO por el operador.")],
         revalidaciones=["REVALIDACION_REACTIVA_DESTINO", "RECONCILIAR_BANDEJA"],
         archivos=("destinos_maestros", "bandeja"),

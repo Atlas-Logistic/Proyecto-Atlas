@@ -532,6 +532,57 @@ class BaseGeograficaLocalSQLite:
             motivo="CALLE_CONOCIDA_NUMERO_NO_EN_BASE", codigo_comuna=codigo_comuna,
         )
 
+    def comuna_cubre_punto(
+        self, *, comuna: str, latitud: float, longitud: float, radio_m: float,
+    ) -> bool | None:
+        """Sólo lectura -- ¿hay alguna dirección registrada de `comuna` a
+        `radio_m` metros o menos del punto?
+
+        `None` si no se puede afirmar nada: base ausente o ilegible, comuna
+        no reconocida, o comuna sin ninguna dirección con coordenadas en la
+        base (fuera de cobertura). `False` sólo cuando la comuna SÍ está
+        cubierta y ninguna de sus direcciones queda cerca del punto. Nunca
+        lanza y nunca decide nada por sí misma: es evidencia."""
+        from math import asin, cos, radians, sin, sqrt
+
+        try:
+            latitud, longitud, radio_m = float(latitud), float(longitud), float(radio_m)
+        except (TypeError, ValueError):
+            return None
+        if not self.ruta.exists():
+            return None
+        try:
+            resuelta = self._resolver_comuna(comuna)
+        except Exception:  # noqa: BLE001 -- evidencia opcional, nunca bloquea por error propio
+            return None
+        if resuelta is None:
+            return None
+        codigo_comuna = resuelta[0]
+        delta_lat = radio_m / 111_000.0
+        delta_lon = radio_m / (111_000.0 * max(cos(radians(latitud)), 0.01))
+        try:
+            conn = self._conexion_lectura()
+            cubierta = conn.execute(
+                "SELECT 1 FROM direcciones WHERE codigo_comuna = ? AND lat IS NOT NULL LIMIT 1",
+                (codigo_comuna,),
+            ).fetchone()
+            if cubierta is None:
+                return None
+            filas = conn.execute(
+                "SELECT lat, lon FROM direcciones WHERE codigo_comuna = ? AND lat BETWEEN ? AND ? "
+                "AND lon BETWEEN ? AND ?",
+                (codigo_comuna, latitud - delta_lat, latitud + delta_lat,
+                 longitud - delta_lon, longitud + delta_lon),
+            ).fetchall()
+        except sqlite3.Error:
+            return None
+        for lat, lon in filas:
+            la1, lo1, la2, lo2 = map(radians, (latitud, longitud, float(lat), float(lon)))
+            h = sin((la2 - la1) / 2) ** 2 + cos(la1) * cos(la2) * sin((lo2 - lo1) / 2) ** 2
+            if 2 * 6_371_000 * asin(sqrt(h)) <= radio_m:
+                return True
+        return False
+
     def consultar_sin_comuna(self, *, calle: str, numero: str = "") -> EvidenciaGeoLocal:
         """GEOGRAFÍA 3 -- resolución REGIÓN-WIDE: el documento NO fija
         comuna y ninguna evidencia confiable la aporta (patrón real de una

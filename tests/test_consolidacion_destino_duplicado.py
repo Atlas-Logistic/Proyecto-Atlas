@@ -86,8 +86,17 @@ def test_reutilizacion_por_sucesor_no_cruza_comunas_distintas(tmp_path):
     catalogo = _catalogo(tmp_path)
     canonico, duplicado = _crear(catalogo, **CANONICO), _crear(catalogo, **DUPLICADO)
     catalogo.consolidar_destino_duplicado(canonico.destino_id, duplicado.destino_id, actor="T", referencia="R")
+    # La dirección nombra Cerrillos y el campo dice Maipú: evidencia
+    # contradictoria. Nunca se redirige a la identidad de Cerrillos; desde el
+    # bloque P0 DESTINO EQUIVALENTE tampoco se crea un tercer destino: abstención.
+    with pytest.raises(ErrorCatalogoDestinos, match="ambigua"):
+        catalogo.crear_o_reutilizar_global(
+            nombre_destino="VISTA CLARA 2351, CERRILLOS", direccion="VISTA CLARA 2351, CERRILLOS", comuna="MAIPU",
+            fuente="T", estado_calidad=EstadoCalidadDestino.CONFIRMADO)
+    assert {d.destino_id for d in catalogo.listar()} == {canonico.destino_id, duplicado.destino_id}
+    # Con una comuna real distinta y sin contradicción, es otro lugar: se crea.
     otro = catalogo.crear_o_reutilizar_global(
-        nombre_destino="VISTA CLARA 2351, CERRILLOS", direccion="VISTA CLARA 2351, CERRILLOS", comuna="MAIPU",
+        nombre_destino="VISTA CLARA 2351", direccion="VISTA CLARA 2351", comuna="MAIPU",
         fuente="T", estado_calidad=EstadoCalidadDestino.CONFIRMADO)
     assert otro.destino_id not in {canonico.destino_id, duplicado.destino_id}
 
@@ -99,7 +108,11 @@ def test_sin_consolidacion_un_destino_inactivo_no_redirige(tmp_path):
     assert destino_consolidado_en(inactivo) == ""
     nuevo = catalogo.crear_o_reutilizar_global(
         nombre_destino="X", direccion="VISTA CLARA 2351, CERRILLOS", comuna="Santiago", fuente="T")
-    assert nuevo.destino_id != inactivo.destino_id and len(catalogo.listar()) == 3
+    # El inactivo no redirige; desde el bloque P0 DESTINO EQUIVALENTE la misma
+    # dirección se reutiliza en el único destino ACTIVO equivalente (Cerrillos)
+    # en vez de crear un tercero.
+    assert nuevo.destino_id != inactivo.destino_id and len(catalogo.listar()) == 2
+    assert nuevo.comuna == "CERRILLOS"
 
 
 @pytest.mark.parametrize("cambios, motivo", [

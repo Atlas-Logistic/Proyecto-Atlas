@@ -83,6 +83,10 @@ class ResultadoBusquedaDestino:
     estado: EstadoBusquedaDestino
     destino: "Destino | None" = None
     cantidad_coincidencias: int = 0
+    # Vacío para las vías exactas de siempre; con la reutilización de un
+    # destino equivalente (ver `CatalogoDestinos._equivalente_en_catalogo`)
+    # explica por qué se reutilizó o por qué se abstuvo.
+    motivo: str = ""
 
 
 def normalizar_nombre_destino(nombre: str) -> str:
@@ -568,6 +572,110 @@ _PATRON_CONSOLIDACION_DESTINO = re.compile(
 )
 
 
+# Bloque P0 DESTINO EQUIVALENTE (auditoría 18/11/2026) -- R6, R3_4 y el
+# registro conjunto creaban un destino nuevo cada vez que la dirección
+# confirmada no coincidía LITERALMENTE con uno existente ("CAMINO LO RUIZ
+# 2901" / "..., RENCA" / "..., RENCA, CHILE" fueron tres destinos
+# confirmados; VISTA CLARA 2351 con comuna "Santiago" frente a Cerrillos),
+# aunque la detección de la tarjeta ya usaba la comparación tolerante
+# `direccion_confirmada_coincide`. Antes de crear se busca ahora en TODO el
+# catálogo un destino del mismo punto: misma calle y numeración (núcleo sin
+# la cola territorial, comparado con la tolerancia ya vigente en ambos
+# sentidos) y misma comuna. Uno -> se reutiliza; varios, o comuna incierta,
+# o una coordenada no verificable -> abstención (nunca se elige). La obra de
+# la decisión desempata sólo con sus relaciones CONFIRMADAS.
+MOTIVO_EQUIVALENTE_UNICO = "EQUIVALENTE_UNICO"
+MOTIVO_EQUIVALENTE_DE_LA_OBRA = "EQUIVALENTE_DE_LA_OBRA"
+MOTIVO_EQUIVALENTES_MULTIPLES = "EQUIVALENTES_MULTIPLES"
+MOTIVO_EQUIVALENTE_COMUNA_INCIERTA = "EQUIVALENTE_COMUNA_INCIERTA"
+MOTIVO_EQUIVALENTE_COORDENADA_NO_VERIFICABLE = "EQUIVALENTE_COORDENADA_NO_VERIFICABLE"
+MOTIVO_EQUIVALENTE_COORDENADA_FUERA_DE_COMUNA = "EQUIVALENTE_COORDENADA_FUERA_DE_COMUNA"
+MOTIVO_EQUIVALENTE_COORDENADA_CONTRADICTORIA = "EQUIVALENTE_COORDENADA_CONTRADICTORIA"
+# Un PENDIENTE con coordenada sólo se reutiliza (y así se promueve) si esa
+# coordenada cae en su comuna: alguna dirección de la comuna a <=1 km (mismo
+# umbral que la coherencia territorial de `registro_obra_destino`).
+DISTANCIA_COORDENADA_EN_COMUNA_M = 1000.0
+_COLA_TERRITORIAL_NO_COMUNA = frozenset({
+    "CHILE", "REGION", "REG", "METROPOLITANA", "RM", "DE", "DEL", "SANTIAGO",
+})
+
+
+def nucleo_direccion_equivalente(direccion: str) -> str:
+    """Calle + numeración sin la cola territorial ("..., RENCA, CHILE",
+    "... SANTIAGO NUNOA"). '' si, quitada esa cola, la dirección no termina
+    en su numeración (p. ej. "9890 B", "55 SECTOR LA ESPERANZA", "S/N"): un
+    calificador tras el número puede ser otro punto, así que no se iguala."""
+    from atlas_core.territorio_chile import ESTADO_COMUNA_EXACTA, normalizar_comuna
+
+    tokens = separar_numero_comuna(forma_comparable_direccion(direccion)).split()
+    while tokens:
+        if tokens[-1] in _COLA_TERRITORIAL_NO_COMUNA:
+            tokens.pop()
+            continue
+        for largo in range(min(5, len(tokens) - 1), 0, -1):
+            resultado = normalizar_comuna(" ".join(tokens[-largo:]))
+            if resultado.estado == ESTADO_COMUNA_EXACTA and resultado.comuna:
+                del tokens[-largo:]
+                break
+        else:
+            break
+    if tokens and tokens[0] == "CALLE":
+        tokens = tokens[1:]
+    if (
+        len(tokens) < 2
+        or not any(ch.isdigit() for ch in tokens[-1])
+        or not any(not any(ch.isdigit() for ch in t) for t in tokens[:-1])
+    ):
+        return ""
+    return " ".join(tokens)
+
+
+def _comuna_de_destino(direccion: str, comuna_campo: str) -> tuple[str, bool]:
+    """(comuna, cierta). Cierta = campo comuna exacto (no la etiqueta de
+    ciudad "Santiago") sin contradicción con la que nombra la dirección, o
+    la comuna inequívoca que nombra la dirección. ("", False) si se
+    desconoce o es contradictoria; ("Santiago", False) para la etiqueta."""
+    from atlas_core.rutas.destino_entrega import _comuna_documental_inequivoca, _comunas_explicitas
+    from atlas_core.territorio_chile import ESTADO_COMUNA_EXACTA, normalizar_comuna
+
+    resultado = normalizar_comuna(str(comuna_campo or ""))
+    campo = resultado.comuna if resultado.estado == ESTADO_COMUNA_EXACTA and resultado.comuna else ""
+    nombradas = _comunas_explicitas(direccion or "")
+    nombrada = _comuna_documental_inequivoca(direccion or "") if nombradas else None
+    if nombrada == "":
+        return "", False  # la dirección nombra comunas en conflicto
+    if campo and campo != "Santiago":
+        if nombrada and nombrada not in (campo, "Santiago"):
+            return "", False
+        return campo, True
+    if nombrada and nombrada != "Santiago":
+        return nombrada, True
+    if campo or nombrada:
+        return "Santiago", False
+    return "", False
+
+
+def _relacion_comunas(a: tuple[str, bool], b: tuple[str, bool]) -> str:
+    """MISMA, DISTINTA o INCIERTA (falta comuna, o sólo la etiqueta Santiago)."""
+    from atlas_core.rutas.destino_entrega import _comunas_territorialmente_compatibles
+
+    (comuna_a, cierta_a), (comuna_b, cierta_b) = a, b
+    if cierta_a and cierta_b:
+        return "MISMA" if comuna_a == comuna_b else "DISTINTA"
+    if comuna_a and comuna_b and comuna_a != comuna_b and not _comunas_territorialmente_compatibles(comuna_a, comuna_b):
+        return "DISTINTA"
+    return "INCIERTA"
+
+
+def _nucleos_equivalentes(nucleo_a: str, nucleo_b: str) -> bool:
+    """Misma calle y numeración con la tolerancia OCR ya vigente, exigida
+    en AMBOS sentidos (nunca contención de una calle dentro de otra)."""
+    return bool(nucleo_a and nucleo_b) and (
+        direccion_confirmada_coincide(nucleo_a, nucleo_b)
+        and direccion_confirmada_coincide(nucleo_b, nucleo_a)
+    )
+
+
 def destino_consolidado_en(destino) -> str:
     """ID canónico al que una consolidación explícita retiró este destino
     ('' si sigue vigente o si se inactivó por otra razón)."""
@@ -902,10 +1010,19 @@ class CatalogoDestinos:
         self, *, nombre_destino: str, direccion: str, comuna: str = "", region: str = "",
         pais: str = "CHILE", fuente: str, latitud: float | None = None, longitud: float | None = None,
         estado_calidad: EstadoCalidadDestino | str = EstadoCalidadDestino.PENDIENTE,
+        destinos_obra: Iterable[str] = (),
     ) -> Destino:
-        resuelto = self.buscar_reutilizable_global(direccion, comuna=comuna, region=region)
+        resuelto = self.buscar_reutilizable_global(
+            direccion, comuna=comuna, region=region,
+            latitud=latitud, longitud=longitud, destinos_obra=destinos_obra,
+        )
         if resuelto.estado == EstadoBusquedaDestino.COINCIDENCIA:
             destino = resuelto.destino
+            if resuelto.motivo:
+                # Destino equivalente (no exacto): se reutiliza tal cual --
+                # sólo puede promoverse a CONFIRMADO; nunca recibe
+                # coordenadas nuevas por esta vía.
+                latitud = longitud = None
             # Bloque RESOLUCIÓN R16 -- una dirección global ya existente
             # (misma clave física) que un llamador confirma ahora con
             # evidencia humana/externa nueva debe promoverse a CONFIRMADO
@@ -935,7 +1052,9 @@ class CatalogoDestinos:
                 )
             return destino
         if resuelto.estado == EstadoBusquedaDestino.AMBIGUA:
-            raise ErrorCatalogoDestinos("dirección global ambigua")
+            raise ErrorCatalogoDestinos(
+                "dirección global ambigua" + (f": {resuelto.motivo}" if resuelto.motivo else "")
+            )
         return self.crear(
             cliente_id="", nombre_destino=nombre_destino, direccion=direccion, comuna=comuna,
             region=region, pais=pais, fuente=fuente, latitud=latitud, longitud=longitud,
@@ -944,6 +1063,8 @@ class CatalogoDestinos:
 
     def buscar_reutilizable_global(
         self, direccion: str, *, comuna: str = "", region: str = "",
+        latitud: float | None = None, longitud: float | None = None,
+        destinos_obra: Iterable[str] = (),
     ) -> ResultadoBusquedaDestino:
         """Sólo lectura: qué destino global reutilizaría
         `crear_o_reutilizar_global` para esta dirección (COINCIDENCIA),
@@ -973,7 +1094,90 @@ class CatalogoDestinos:
             # La misma dirección de un destino ya consolidado se reutiliza en
             # su identidad canónica: nunca se recrea el duplicado retirado.
             resuelto = self._sucesor_consolidado(direccion, comuna=comuna, region=region)
+        if resuelto.estado == EstadoBusquedaDestino.SIN_COINCIDENCIA:
+            # Sólo cuando ninguna vía exacta encontró nada (su conducta no
+            # cambia): antes de crear, un destino equivalente del catálogo.
+            resuelto = self._equivalente_en_catalogo(
+                direccion, comuna=comuna, latitud=latitud, longitud=longitud,
+                destinos_obra=destinos_obra,
+            )
         return resuelto
+
+    def _equivalente_en_catalogo(
+        self, direccion: str, *, comuna: str, latitud: float | None, longitud: float | None,
+        destinos_obra: Iterable[str],
+    ) -> ResultadoBusquedaDestino:
+        """Ver bloque P0 DESTINO EQUIVALENTE. Sólo lectura."""
+        nucleo = nucleo_direccion_equivalente(direccion)
+        if not nucleo:
+            return ResultadoBusquedaDestino(EstadoBusquedaDestino.SIN_COINCIDENCIA)
+        comuna_nueva = _comuna_de_destino(direccion, comuna)
+        candidatos: list[tuple[Destino, str]] = []
+        for destino in self.listar():
+            if destino.estado_vigencia != EstadoVigenciaDestino.ACTIVO.value:
+                continue
+            if not _nucleos_equivalentes(nucleo, nucleo_direccion_equivalente(destino.direccion)):
+                continue
+            relacion = _relacion_comunas(comuna_nueva, _comuna_de_destino(destino.direccion, destino.comuna))
+            if relacion != "DISTINTA":
+                candidatos.append((destino, relacion))
+        if not candidatos:
+            return ResultadoBusquedaDestino(EstadoBusquedaDestino.SIN_COINCIDENCIA)
+        ids_obra = {str(i) for i in destinos_obra or ()}
+        de_la_obra = [d for d, _ in candidatos if d.destino_id in ids_obra]
+        if len(de_la_obra) == 1:
+            elegido, motivo = de_la_obra[0], MOTIVO_EQUIVALENTE_DE_LA_OBRA
+        elif len(candidatos) > 1 or len(de_la_obra) > 1:
+            return ResultadoBusquedaDestino(
+                EstadoBusquedaDestino.AMBIGUA, None, len(candidatos), MOTIVO_EQUIVALENTES_MULTIPLES,
+            )
+        elif candidatos[0][1] != "MISMA":
+            return ResultadoBusquedaDestino(
+                EstadoBusquedaDestino.AMBIGUA, None, 1, MOTIVO_EQUIVALENTE_COMUNA_INCIERTA,
+            )
+        else:
+            elegido, motivo = candidatos[0][0], MOTIVO_EQUIVALENTE_UNICO
+        motivo_abstencion = self._motivo_coordenada_no_reutilizable(
+            elegido, comuna_nueva=comuna_nueva, latitud=latitud, longitud=longitud,
+        )
+        if motivo_abstencion:
+            return ResultadoBusquedaDestino(EstadoBusquedaDestino.AMBIGUA, None, 1, motivo_abstencion)
+        return ResultadoBusquedaDestino(EstadoBusquedaDestino.COINCIDENCIA, elegido, 1, motivo)
+
+    def _motivo_coordenada_no_reutilizable(
+        self, destino: Destino, *, comuna_nueva: tuple[str, bool],
+        latitud: float | None, longitud: float | None,
+    ) -> str:
+        """'' si reutilizar `destino` no da autoridad a una coordenada dudosa."""
+        if destino.latitud is None or destino.longitud is None:
+            return ""
+        punto = (float(destino.latitud), float(destino.longitud))
+        if latitud is not None and longitud is not None and _distancia_metros(
+            punto, (float(latitud), float(longitud)),
+        ) > DISTANCIA_MAXIMA_DESTINOS_EQUIVALENTES_M:
+            return MOTIVO_EQUIVALENTE_COORDENADA_CONTRADICTORIA
+        if destino.estado_calidad == EstadoCalidadDestino.CONFIRMADO.value:
+            return ""
+        # PENDIENTE con coordenada: reutilizarlo la promovería a CONFIRMADA
+        # (decisión de Javier 18/11/2026: sólo si cae en su comuna).
+        comuna_destino = _comuna_de_destino(destino.direccion, destino.comuna)
+        comuna = next((c for c, cierta in (comuna_destino, comuna_nueva) if cierta and c), "")
+        if not comuna:
+            return MOTIVO_EQUIVALENTE_COORDENADA_NO_VERIFICABLE
+        from atlas_core.geografia.base_local import NOMBRE_ARCHIVO_PREDETERMINADO, BaseGeograficaLocalSQLite
+
+        base = BaseGeograficaLocalSQLite(
+            self.ruta.parent.parent / "datos_privados" / "geografia" / NOMBRE_ARCHIVO_PREDETERMINADO
+        )
+        try:
+            cubre = base.comuna_cubre_punto(
+                comuna=comuna, latitud=punto[0], longitud=punto[1], radio_m=DISTANCIA_COORDENADA_EN_COMUNA_M,
+            )
+        finally:
+            base._cerrar_lectura()
+        if cubre is None:
+            return MOTIVO_EQUIVALENTE_COORDENADA_NO_VERIFICABLE
+        return "" if cubre else MOTIVO_EQUIVALENTE_COORDENADA_FUERA_DE_COMUNA
 
     def _sucesor_consolidado(self, direccion: str, *, comuna: str, region: str) -> ResultadoBusquedaDestino:
         destinos = self.listar()

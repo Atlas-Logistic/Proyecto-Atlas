@@ -1,0 +1,705 @@
+{
+ "origen": "Auditoría catálogo de destinos CASA 18/11/2026: pares activos legítimamente distintos (misma obra con otra dirección, coordenada no puntual compartida o misma calle en otra comuna).",
+ "pares": [
+  {
+   "a": {
+    "direccion": "CAMINO LO RUIZ 2901, RENCA, CHILE",
+    "comuna": "RENCA",
+    "region": "RM",
+    "latitud": -33.402531,
+    "longitud": -70.686461,
+    "estado_calidad": "CONFIRMADO"
+   },
+   "b": {
+    "direccion": "CAMINO LO RUIZ 3099, RENCA, CHILE",
+    "comuna": "RENCA",
+    "region": "RM",
+    "latitud": -33.402531,
+    "longitud": -70.686461,
+    "estado_calidad": "PENDIENTE"
+   },
+   "mismo_obra": false,
+   "coordenada_identica": true
+  },
+  {
+   "a": {
+    "direccion": "CAMINO LO RUIZ 2901, RENCA, CHILE",
+    "comuna": "RENCA",
+    "region": "RM",
+    "latitud": -33.402531,
+    "longitud": -70.686461,
+    "estado_calidad": "CONFIRMADO"
+   },
+   "b": {
+    "direccion": "CAMINO LO RUIZ 3099",
+    "comuna": "RENCA",
+    "region": "Metropolitana",
+    "latitud": -33.402531,
+    "longitud": -70.686461,
+    "estado_calidad": "CONFIRMADO"
+   },
+   "mismo_obra": false,
+   "coordenada_identica": true
+  },
+  {
+   "a": {
+    "direccion": "PANAMERICANANA NORTE 18500, COLINA, CHILE",
+    "comuna": "COLINA",
+    "region": "RM",
+    "latitud": -33.137558,
+    "longitud": -70.665977,
+    "estado_calidad": "PENDIENTE"
+   },
+   "b": {
+    "direccion": "CALLE CONQUIMBO S/N, COLINA, CHILE",
+    "comuna": "COLINA",
+    "region": "RM",
+    "latitud": -33.137558,
+    "longitud": -70.665977,
+    "estado_calidad": "PENDIENTE"
+   },
+   "mismo_obra": false,
+   "coordenada_identica": true
+  },
+  {
+   "a": {
+    "direccion": "CAMINO LOS PINOS 3394, SAN BERNARDO, CHILE",
+    "comuna": "SAN BERNARDO",
+    "region": "RM",
+    "latitud": -33.570174,
+    "longitud": -70.705649,
+    "estado_calidad": "PENDIENTE"
+   },
+   "b": {
+    "direccion": "CAMINO LOS PINOS 3396, SAN BERNARDO, CHILE",
+    "comuna": "SAN BERNARDO",
+    "region": "RM",
+    "latitud": -33.570174,
+    "longitud": -70.705649,
+    "estado_calidad": "PENDIENTE"
+   },
+   "mismo_obra": false,
+   "coordenada_identica": true
+  },
+  {
+   "a": {
+    "direccion": "MARURI 1492, RENCA, CHILE",
+    "comuna": "RENCA",
+    "region": "RM",
+    "latitud": -33.407558,
+    "longitud": -70.695261,
+    "estado_calidad": "PENDIENTE"
+   },
+   "b": {
+    "direccion": "MARURI 1942, RENCA, CHILE",
+    "comuna": "RENCA",
+    "region": "RM",
+    "latitud": -33.407558,
+    "longitud": -70.695261,
+    "estado_calidad": "PENDIENTE"
+   },
+   "mismo_obra": false,
+   "coordenada_identica": true
+  },
+  {
+   "a": {
+    "direccion": "PAN NORTE CAMINO VIEJO LA MONTANA S/N, SANTIAGO, CHILE",
+    "comuna": "SANTIAGO",
+    "region": "RM",
+    "latitud": -33.428532,
+    "longitud": -70.630133,
+    "estado_calidad": "PENDIENTE"
+   },
+   "b": {
+    "direccion": "SAN IGNACIO DE LOYOLA 2170, SANTIAGO, CHILE",
+    "comuna": "SANTIAGO",
+    "region": "RM",
+    "latitud": -33.428532,
+    "longitud": -70.630133,
+    "estado_calidad": "PENDIENTE"
+   },
+   "mismo_obra": false,
+   "coordenada_identica": true
+  },
+  {
+   "a": {
+    "direccion": "RUTA 5 KM 40 S/N, PAINE, CHILE",
+    "comuna": "PAINE",
+    "region": "RM",
+    "latitud": -33.803869,
+    "longitud": -70.730303,
+    "estado_calidad": "PENDIENTE"
+   },
+   "b": {
+    "direccion": "CAM LONGITUDINAL RUTA 5 SUR 3383, BUIN, CHILE",
+    "comuna": "BUIN",
+    "region": "RM",
+    "latitud": -33.731568,
+    "longitud": -70.728772,
+    "estado_calidad": "PENDIENTE"
+   },
+   "mismo_obra": false,
+   "coordenada_identica": false
+  },
+  {
+   "a": {
+    "direccion": "CARMEN MENA 529, SAN MIGUEL, CHILE",
+    "comuna": "SAN MIGUEL",
+    "region": "RM",
+    "latitud": -30.81432,
+    "longitud": -70.60342,
+    "estado_calidad": "PENDIENTE"
+   },
+   "b": {
+    "direccion": "MURCIA 4650, SAN MIGUEL, CHILE",
+    "comuna": "SAN MIGUEL",
+    "region": "RM",
+    "latitud": -30.81432,
+    "longitud": -70.60342,
+    "estado_calidad": "PENDIENTE"
+   },
+   "mismo_obra": false,
+   "coordenada_identica": true
+  },
+  {
+   "a": {
+    "direccion": "CARMEN MENA 529, SAN MIGUEL, CHILE",
+    "comuna": "SAN MIGUEL",
+    "region": "RM",
+    "latitud": -30.81432,
+    "longitud": -70.60342,
+    "estado_calidad": "PENDIENTE"
+   },
+   "b": {
+    "direccion": "CARLOS VALDOVINOS 1553, SAN MIGUEL, CHILE",
+    "comuna": "SAN MIGUEL",
+    "region": "RM",
+    "latitud": -30.81432,
+    "longitud": -70.60342,
+    "estado_calidad": "PENDIENTE"
+   },
+   "mismo_obra": false,
+   "coordenada_identica": true
+  },
+  {
+   "a": {
+    "direccion": "CARMEN MENA 529, SAN MIGUEL, CHILE",
+    "comuna": "SAN MIGUEL",
+    "region": "RM",
+    "latitud": -30.81432,
+    "longitud": -70.60342,
+    "estado_calidad": "PENDIENTE"
+   },
+   "b": {
+    "direccion": "CARMEN MENA 531, SAN MIGUEL, CHILE",
+    "comuna": "SAN MIGUEL",
+    "region": "RM",
+    "latitud": -30.81432,
+    "longitud": -70.60342,
+    "estado_calidad": "PENDIENTE"
+   },
+   "mismo_obra": false,
+   "coordenada_identica": true
+  },
+  {
+   "a": {
+    "direccion": "CAMINO LO RUIZ 3099, RENCA, CHILE",
+    "comuna": "RENCA",
+    "region": "RM",
+    "latitud": -33.402531,
+    "longitud": -70.686461,
+    "estado_calidad": "PENDIENTE"
+   },
+   "b": {
+    "direccion": "CAMINO LO RUIZ 2901",
+    "comuna": "RENCA",
+    "region": "Metropolitana",
+    "latitud": -33.402531,
+    "longitud": -70.686461,
+    "estado_calidad": "CONFIRMADO"
+   },
+   "mismo_obra": false,
+   "coordenada_identica": true
+  },
+  {
+   "a": {
+    "direccion": "CAMINO LO RUIZ 3099, RENCA, CHILE",
+    "comuna": "RENCA",
+    "region": "RM",
+    "latitud": -33.402531,
+    "longitud": -70.686461,
+    "estado_calidad": "PENDIENTE"
+   },
+   "b": {
+    "direccion": "CAMINO LO RUIZ 2901, RENCA",
+    "comuna": "Renca",
+    "region": "Metropolitana",
+    "latitud": -33.402531,
+    "longitud": -70.686461,
+    "estado_calidad": "CONFIRMADO"
+   },
+   "mismo_obra": false,
+   "coordenada_identica": true
+  },
+  {
+   "a": {
+    "direccion": "MURCIA 4650, SAN MIGUEL, CHILE",
+    "comuna": "SAN MIGUEL",
+    "region": "RM",
+    "latitud": -30.81432,
+    "longitud": -70.60342,
+    "estado_calidad": "PENDIENTE"
+   },
+   "b": {
+    "direccion": "CARLOS VALDOVINOS 1553, SAN MIGUEL, CHILE",
+    "comuna": "SAN MIGUEL",
+    "region": "RM",
+    "latitud": -30.81432,
+    "longitud": -70.60342,
+    "estado_calidad": "PENDIENTE"
+   },
+   "mismo_obra": false,
+   "coordenada_identica": true
+  },
+  {
+   "a": {
+    "direccion": "MURCIA 4650, SAN MIGUEL, CHILE",
+    "comuna": "SAN MIGUEL",
+    "region": "RM",
+    "latitud": -30.81432,
+    "longitud": -70.60342,
+    "estado_calidad": "PENDIENTE"
+   },
+   "b": {
+    "direccion": "CARMEN MENA 531, SAN MIGUEL, CHILE",
+    "comuna": "SAN MIGUEL",
+    "region": "RM",
+    "latitud": -30.81432,
+    "longitud": -70.60342,
+    "estado_calidad": "PENDIENTE"
+   },
+   "mismo_obra": false,
+   "coordenada_identica": true
+  },
+  {
+   "a": {
+    "direccion": "CALLE CONQUIMBO S/N, COLINA, CHILE",
+    "comuna": "COLINA",
+    "region": "RM",
+    "latitud": -33.137558,
+    "longitud": -70.665977,
+    "estado_calidad": "PENDIENTE"
+   },
+   "b": {
+    "direccion": "PANAMERCANA NORTE 18500, COLINA, CHILE",
+    "comuna": "COLINA",
+    "region": "RM",
+    "latitud": -33.137558,
+    "longitud": -70.665977,
+    "estado_calidad": "PENDIENTE"
+   },
+   "mismo_obra": false,
+   "coordenada_identica": true
+  },
+  {
+   "a": {
+    "direccion": "CALLE CONQUIMBO S/N, COLINA, CHILE",
+    "comuna": "COLINA",
+    "region": "RM",
+    "latitud": -33.137558,
+    "longitud": -70.665977,
+    "estado_calidad": "PENDIENTE"
+   },
+   "b": {
+    "direccion": "PANAMERICANA NORTE 18500, COLINA, CHILE",
+    "comuna": "COLINA",
+    "region": "RM",
+    "latitud": -33.137558,
+    "longitud": -70.665977,
+    "estado_calidad": "PENDIENTE"
+   },
+   "mismo_obra": false,
+   "coordenada_identica": true
+  },
+  {
+   "a": {
+    "direccion": "CARLOS VALDOVINOS 1553, SAN MIGUEL, CHILE",
+    "comuna": "SAN MIGUEL",
+    "region": "RM",
+    "latitud": -30.81432,
+    "longitud": -70.60342,
+    "estado_calidad": "PENDIENTE"
+   },
+   "b": {
+    "direccion": "CARMEN MENA 531, SAN MIGUEL, CHILE",
+    "comuna": "SAN MIGUEL",
+    "region": "RM",
+    "latitud": -30.81432,
+    "longitud": -70.60342,
+    "estado_calidad": "PENDIENTE"
+   },
+   "mismo_obra": false,
+   "coordenada_identica": true
+  },
+  {
+   "a": {
+    "direccion": "AV. 4 NORTE 1565, SAN PEDRO DE LA PAZ, CHILE",
+    "comuna": "SAN PEDRO DE LA PAZ",
+    "region": "BI",
+    "latitud": -33.993473,
+    "longitud": -71.438599,
+    "estado_calidad": "CONFIRMADO"
+   },
+   "b": {
+    "direccion": "CALLE COQUIMBO S/N",
+    "comuna": "COLINA",
+    "region": "",
+    "latitud": null,
+    "longitud": null,
+    "estado_calidad": "CONFIRMADO"
+   },
+   "mismo_obra": true,
+   "coordenada_identica": false
+  },
+  {
+   "a": {
+    "direccion": "CAM. EL NOVICIADO LAMPA LAMPA",
+    "comuna": "",
+    "region": "",
+    "latitud": null,
+    "longitud": null,
+    "estado_calidad": "PENDIENTE"
+   },
+   "b": {
+    "direccion": "PUERTA DEL SOL 83",
+    "comuna": "Las Condes",
+    "region": "Metropolitana",
+    "latitud": -33.344296,
+    "longitud": -70.636597,
+    "estado_calidad": "CONFIRMADO"
+   },
+   "mismo_obra": true,
+   "coordenada_identica": false
+  },
+  {
+   "a": {
+    "direccion": "CAM. EL NOVICIADO LAMPA LAMPA",
+    "comuna": "",
+    "region": "",
+    "latitud": null,
+    "longitud": null,
+    "estado_calidad": "PENDIENTE"
+   },
+   "b": {
+    "direccion": "AV LAS TORRES 561",
+    "comuna": "PUDAHUEL",
+    "region": "Metropolitana",
+    "latitud": -33.468715,
+    "longitud": -70.730973,
+    "estado_calidad": "CONFIRMADO"
+   },
+   "mismo_obra": true,
+   "coordenada_identica": false
+  },
+  {
+   "a": {
+    "direccion": "HNOS CABOT 7517 LAS CONDES LAS CONDES",
+    "comuna": "",
+    "region": "",
+    "latitud": null,
+    "longitud": null,
+    "estado_calidad": "PENDIENTE"
+   },
+   "b": {
+    "direccion": "SAN MARTIN 262",
+    "comuna": "CONCEPCION",
+    "region": "",
+    "latitud": null,
+    "longitud": null,
+    "estado_calidad": "CONFIRMADO"
+   },
+   "mismo_obra": true,
+   "coordenada_identica": false
+  },
+  {
+   "a": {
+    "direccion": "PUERTA DEL SOL 83",
+    "comuna": "Las Condes",
+    "region": "Metropolitana",
+    "latitud": -33.344296,
+    "longitud": -70.636597,
+    "estado_calidad": "CONFIRMADO"
+   },
+   "b": {
+    "direccion": "AV LAS TORRES 561",
+    "comuna": "PUDAHUEL",
+    "region": "Metropolitana",
+    "latitud": -33.468715,
+    "longitud": -70.730973,
+    "estado_calidad": "CONFIRMADO"
+   },
+   "mismo_obra": true,
+   "coordenada_identica": false
+  },
+  {
+   "a": {
+    "direccion": "URUGUAY 15",
+    "comuna": "LA CISTERNA",
+    "region": "REGIÓN METROPOLITANA",
+    "latitud": -33.529673,
+    "longitud": -70.660891,
+    "estado_calidad": "CONFIRMADO"
+   },
+   "b": {
+    "direccion": "AV PROVIDENCIA 1550",
+    "comuna": "PROVIDENCIA",
+    "region": "",
+    "latitud": null,
+    "longitud": null,
+    "estado_calidad": "CONFIRMADO"
+   },
+   "mismo_obra": true,
+   "coordenada_identica": false
+  },
+  {
+   "a": {
+    "direccion": "SAN DAMIAN 0100",
+    "comuna": "VITACURA",
+    "region": "",
+    "latitud": -33.375077,
+    "longitud": -70.527403,
+    "estado_calidad": "CONFIRMADO"
+   },
+   "b": {
+    "direccion": "AV. CAM. LOS TRAPENSES",
+    "comuna": "LO BARNECHEA",
+    "region": "Metropolitana",
+    "latitud": null,
+    "longitud": null,
+    "estado_calidad": "CONFIRMADO"
+   },
+   "mismo_obra": true,
+   "coordenada_identica": false
+  },
+  {
+   "a": {
+    "direccion": "CLAUDIO ARRAU 6810",
+    "comuna": "PUDAHUEL",
+    "region": "Metropolitana",
+    "latitud": -33.449381,
+    "longitud": -70.766311,
+    "estado_calidad": "CONFIRMADO"
+   },
+   "b": {
+    "direccion": "CLAUDIO ARRAU 9440",
+    "comuna": "PUDAHUEL",
+    "region": "Metropolitana",
+    "latitud": -33.449381,
+    "longitud": -70.766311,
+    "estado_calidad": "CONFIRMADO"
+   },
+   "mismo_obra": false,
+   "coordenada_identica": true
+  },
+  {
+   "a": {
+    "direccion": "CAMINO LO RUIZ 3099",
+    "comuna": "RENCA",
+    "region": "Metropolitana",
+    "latitud": -33.402531,
+    "longitud": -70.686461,
+    "estado_calidad": "CONFIRMADO"
+   },
+   "b": {
+    "direccion": "CAMINO LO RUIZ 2901",
+    "comuna": "RENCA",
+    "region": "Metropolitana",
+    "latitud": -33.402531,
+    "longitud": -70.686461,
+    "estado_calidad": "CONFIRMADO"
+   },
+   "mismo_obra": false,
+   "coordenada_identica": true
+  },
+  {
+   "a": {
+    "direccion": "CAMINO LO RUIZ 3099",
+    "comuna": "RENCA",
+    "region": "Metropolitana",
+    "latitud": -33.402531,
+    "longitud": -70.686461,
+    "estado_calidad": "CONFIRMADO"
+   },
+   "b": {
+    "direccion": "CAMINO LO RUIZ 2901, RENCA",
+    "comuna": "Renca",
+    "region": "Metropolitana",
+    "latitud": -33.402531,
+    "longitud": -70.686461,
+    "estado_calidad": "CONFIRMADO"
+   },
+   "mismo_obra": false,
+   "coordenada_identica": true
+  },
+  {
+   "a": {
+    "direccion": "AV. PDTE. EDUARDO FREI MONTALVA 20670",
+    "comuna": "COLINA",
+    "region": "Metropolitana",
+    "latitud": -33.270047,
+    "longitud": -70.743686,
+    "estado_calidad": "CONFIRMADO"
+   },
+   "b": {
+    "direccion": "CAM. EL NOVICIADO",
+    "comuna": "LAMPA",
+    "region": "",
+    "latitud": null,
+    "longitud": null,
+    "estado_calidad": "CONFIRMADO"
+   },
+   "mismo_obra": true,
+   "coordenada_identica": false
+  },
+  {
+   "a": {
+    "direccion": "PEDRO RIVEROS 1411",
+    "comuna": "QUILICURA",
+    "region": "Metropolitana",
+    "latitud": -33.379341,
+    "longitud": -70.725474,
+    "estado_calidad": "CONFIRMADO"
+   },
+   "b": {
+    "direccion": "SAN LUIS 1201",
+    "comuna": "QUILICURA",
+    "region": "RM",
+    "latitud": null,
+    "longitud": null,
+    "estado_calidad": "CONFIRMADO"
+   },
+   "mismo_obra": true,
+   "coordenada_identica": false
+  },
+  {
+   "a": {
+    "direccion": "AV. CARRASCAL 5060",
+    "comuna": "QUINTA NORMAL",
+    "region": "Metropolitana",
+    "latitud": -33.415556,
+    "longitud": -70.714689,
+    "estado_calidad": "CONFIRMADO"
+   },
+   "b": {
+    "direccion": "AV . DIEGO PORIALES 1505",
+    "comuna": "",
+    "region": "De Valparaiso",
+    "latitud": null,
+    "longitud": null,
+    "estado_calidad": "CONFIRMADO"
+   },
+   "mismo_obra": true,
+   "coordenada_identica": false
+  },
+  {
+   "a": {
+    "direccion": "CAMINO LO AGUIRRE SUR",
+    "comuna": "PUDAHUEL",
+    "region": "",
+    "latitud": null,
+    "longitud": null,
+    "estado_calidad": "CONFIRMADO"
+   },
+   "b": {
+    "direccion": "CRUCERO PERALILLO",
+    "comuna": "LAMPA",
+    "region": "",
+    "latitud": null,
+    "longitud": null,
+    "estado_calidad": "CONFIRMADO"
+   },
+   "mismo_obra": true,
+   "coordenada_identica": false
+  },
+  {
+   "a": {
+    "direccion": "CAMINO LO AGUIRRE SUR",
+    "comuna": "PUDAHUEL",
+    "region": "",
+    "latitud": null,
+    "longitud": null,
+    "estado_calidad": "CONFIRMADO"
+   },
+   "b": {
+    "direccion": "COQUIMBO 15500",
+    "comuna": "COLINA",
+    "region": "",
+    "latitud": null,
+    "longitud": null,
+    "estado_calidad": "CONFIRMADO"
+   },
+   "mismo_obra": true,
+   "coordenada_identica": false
+  },
+  {
+   "a": {
+    "direccion": "LOS MAITENES SUR 9800",
+    "comuna": "PUDAHUEL",
+    "region": "Metropolitana",
+    "latitud": -33.432222,
+    "longitud": -70.792957,
+    "estado_calidad": "CONFIRMADO"
+   },
+   "b": {
+    "direccion": "RUTA G-30 15388",
+    "comuna": "SAN BERNARD0",
+    "region": "",
+    "latitud": null,
+    "longitud": null,
+    "estado_calidad": "CONFIRMADO"
+   },
+   "mismo_obra": true,
+   "coordenada_identica": false
+  },
+  {
+   "a": {
+    "direccion": "CRUCERO PERALILLO",
+    "comuna": "LAMPA",
+    "region": "",
+    "latitud": null,
+    "longitud": null,
+    "estado_calidad": "CONFIRMADO"
+   },
+   "b": {
+    "direccion": "COQUIMBO 15500",
+    "comuna": "COLINA",
+    "region": "",
+    "latitud": null,
+    "longitud": null,
+    "estado_calidad": "CONFIRMADO"
+   },
+   "mismo_obra": true,
+   "coordenada_identica": false
+  },
+  {
+   "a": {
+    "direccion": "CAMINO A MELIPILLA 10800 SANTIAGO MAIPU",
+    "comuna": "MAIPU",
+    "region": "RM",
+    "latitud": -33.522737,
+    "longitud": -70.742443,
+    "estado_calidad": "CONFIRMADO"
+   },
+   "b": {
+    "direccion": "CAMINO A MELIPILLA 10338",
+    "comuna": "MAIPU",
+    "region": "Metropolitana",
+    "latitud": null,
+    "longitud": null,
+    "estado_calidad": "CONFIRMADO"
+   },
+   "mismo_obra": true,
+   "coordenada_identica": false
+  }
+ ]
+}
