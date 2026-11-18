@@ -1506,7 +1506,9 @@ def _es_encabezado_guia_geometrico(items: List[Dict[str, Any]], ancla: Dict[str,
         return False
     return any(
         item is not ancla
-        and item["simple"] == "ELECTRONICA"
+        # Paddle puede leer la C como O (477355); sólo se acepta la
+        # confusión observada en esta cabecera y con la misma geometría.
+        and item["simple"] in {"ELECTRONICA", "ELECTRONIOA"}
         and -ancla["h"] <= item["y1"] - ancla["y2"] <= ancla["h"] * 2
         and abs(item["cx"] - ancla["cx"]) <= max(ancla["x2"] - ancla["x1"], item["x2"] - item["x1"]) * 1.5
         for item in items
