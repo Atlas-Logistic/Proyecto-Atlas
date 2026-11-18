@@ -582,10 +582,16 @@ def motivo_destinos_no_consolidables(canonico, duplicado) -> str:
 
     Exige: misma calle y numeración; coordenadas de ambos a <=150 m; y la
     misma comuna, o bien que la dirección del duplicado nombre
-    explícitamente (y sólo) la comuna del canónico -- un campo comuna
-    contradicho por la propia dirección confirmada no es otra ubicación.
+    inequívocamente la comuna del canónico -- un campo comuna contradicho
+    por la propia dirección confirmada no es otra ubicación. Ninguna de las
+    dos direcciones puede nombrar otra comuna.
+
+    La comuna que nombra una dirección se lee con la regla territorial ya
+    vigente (`_comuna_documental_inequivoca`): "SANTIAGO MAIPU" es ciudad +
+    comuna (Maipú), no dos comunas; dos comunas específicas, o "Santiago"
+    junto a una comuna de otra región, siguen siendo contradictorias.
     Cualquier otra diferencia es un destino legítimamente distinto."""
-    from atlas_core.rutas.destino_entrega import _comunas_explicitas
+    from atlas_core.rutas.destino_entrega import _comuna_documental_inequivoca, _comunas_explicitas
     from atlas_core.territorio_chile import ESTADO_COMUNA_EXACTA, normalizar_comuna
 
     if canonico.destino_id == duplicado.destino_id:
@@ -610,10 +616,17 @@ def motivo_destinos_no_consolidables(canonico, duplicado) -> str:
         resultado = normalizar_comuna(str(texto or ""))
         return resultado.comuna if resultado.estado == ESTADO_COMUNA_EXACTA and resultado.comuna else ""
 
+    def comuna_de_direccion(texto: str) -> str | None:
+        """None si la dirección no nombra comuna; '' si nombra varias en conflicto."""
+        return _comuna_documental_inequivoca(texto) if _comunas_explicitas(texto) else None
+
     comuna_c = comuna(canonico.comuna)
-    if not comuna_c or set(_comunas_explicitas(canonico.direccion)) - {comuna_c}:
+    if not comuna_c or comuna_de_direccion(canonico.direccion) not in (None, comuna_c):
         return "COMUNA_CANONICA_INCIERTA"
-    if comuna(duplicado.comuna) != comuna_c and _comunas_explicitas(duplicado.direccion) != (comuna_c,):
+    nombrada_d = comuna_de_direccion(duplicado.direccion)
+    if nombrada_d not in (None, comuna_c):
+        return "COMUNA_DISTINTA"
+    if comuna(duplicado.comuna) != comuna_c and nombrada_d != comuna_c:
         return "COMUNA_DISTINTA"
     return ""
 

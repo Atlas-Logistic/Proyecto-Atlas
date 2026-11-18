@@ -213,3 +213,72 @@ def test_accion_rechaza_destinos_distintos_sin_escribir(entorno):
         "destino_canonico_id": otro.destino_id, "destino_duplicado_id": canonico.destino_id}, actor="CLAUDE")
     assert invertido["estado"] == "RECHAZADA"
     assert _sha(entorno["cat"] / "destinos_maestros.json") == antes
+
+
+# ------------------------------------------------------------ ciudad + comuna (caso CAMINO A MELIPILLA 10800)
+
+MELIPILLA_CANONICO = dict(nombre_destino="CAMINO A MELIPILLA 10800 SANTIAGO MAIPU",
+                          direccion="CAMINO A MELIPILLA 10800 SANTIAGO MAIPU", comuna="MAIPU", region="RM",
+                          latitud=-33.522737, longitud=-70.742443, fuente="COORDENADA_CANONICA_CONFIRMADA")
+MELIPILLA_DUPLICADO = dict(nombre_destino="CAMINO A MELIPILLA 10800, MAIPU", direccion="CAMINO A MELIPILLA 10800, MAIPU",
+                           comuna="Maipú", region="Metropolitana", latitud=-33.523082, longitud=-70.740823,
+                           fuente="DECISION_HUMANA_R6:da643aa3")
+
+
+def test_santiago_como_ciudad_mas_comuna_no_es_contradiccion(tmp_path):
+    catalogo = _catalogo(tmp_path)
+    canonico = _crear(catalogo, **MELIPILLA_CANONICO)
+    # A <=150 m (sintético): ciudad + comuna basta para el criterio de comuna.
+    cercano = _crear(catalogo, **{**MELIPILLA_DUPLICADO, "latitud": -33.522800, "longitud": -70.742000})
+    assert motivo_destinos_no_consolidables(canonico, cercano) == ""
+    # Simétrico: el canónico sin ciudad y el duplicado con "SANTIAGO MAIPU".
+    assert motivo_destinos_no_consolidables(cercano, canonico) == ""
+
+
+def test_caso_real_melipilla_sigue_bloqueado_por_distancia(tmp_path):
+    """El ajuste de comuna no relaja la distancia: 154,995 m > 150 m."""
+    catalogo = _catalogo(tmp_path)
+    canonico, duplicado = _crear(catalogo, **MELIPILLA_CANONICO), _crear(catalogo, **MELIPILLA_DUPLICADO)
+    assert motivo_destinos_no_consolidables(canonico, duplicado) == "COORDENADAS_DISTANTES"
+    with pytest.raises(ErrorCatalogoDestinos, match="COORDENADAS_DISTANTES"):
+        catalogo.consolidar_destino_duplicado(canonico.destino_id, duplicado.destino_id, actor="T", referencia="R")
+
+
+@pytest.mark.parametrize("canonico_dir, duplicado_dir, duplicado_comuna, motivo", [
+    # Ciudad + comuna en ambos, mismo lugar.
+    ("CAMINO A MELIPILLA 10800 SANTIAGO MAIPU", "CAMINO A MELIPILLA 10800 SANTIAGO MAIPU", "MAIPU", ""),
+    # Campo comuna erróneo en el duplicado, corregido por su dirección (ciudad + comuna).
+    ("CAMINO A MELIPILLA 10800 SANTIAGO MAIPU", "CAMINO A MELIPILLA 10800, SANTIAGO MAIPU", "Santiago", ""),
+    # Dos comunas específicas en la dirección canónica: incierta.
+    ("CAMINO A MELIPILLA 10800, CERRILLOS MAIPU", "CAMINO A MELIPILLA 10800, MAIPU", "Maipú", "COMUNA_CANONICA_INCIERTA"),
+    # Santiago + comuna de OTRA región: contradicción real.
+    ("CAMINO A MELIPILLA 10800, SANTIAGO TEMUCO", "CAMINO A MELIPILLA 10800, MAIPU", "Maipú", "COMUNA_CANONICA_INCIERTA"),
+    # El duplicado nombra otra comuna aunque su campo diga Maipú.
+    ("CAMINO A MELIPILLA 10800 SANTIAGO MAIPU", "CAMINO A MELIPILLA 10800, SANTIAGO CERRILLOS", "Maipú", "COMUNA_DISTINTA"),
+    # El duplicado sólo dice "SANTIAGO" (posible comuna real) y su campo es Santiago.
+    ("CAMINO A MELIPILLA 10800 SANTIAGO MAIPU", "CAMINO A MELIPILLA 10800 SANTIAGO", "Santiago", "COMUNA_DISTINTA"),
+    # Sin comuna en la dirección y campo distinto.
+    ("CAMINO A MELIPILLA 10800 SANTIAGO MAIPU", "CAMINO A MELIPILLA 10800", "Cerrillos", "COMUNA_DISTINTA"),
+])
+def test_ciudad_comuna_y_comunas_contradictorias(tmp_path, canonico_dir, duplicado_dir, duplicado_comuna, motivo):
+    catalogo = _catalogo(tmp_path)
+    canonico = _crear(catalogo, **{**MELIPILLA_CANONICO, "direccion": canonico_dir, "nombre_destino": "C"})
+    otro = _crear(catalogo, **{**MELIPILLA_DUPLICADO, "direccion": duplicado_dir, "nombre_destino": "D",
+                                "comuna": duplicado_comuna, "latitud": -33.522800, "longitud": -70.742000})
+    assert motivo_destinos_no_consolidables(canonico, otro) == motivo
+
+
+def test_ciudad_comuna_no_relaja_direccion_ni_coordenadas(tmp_path):
+    catalogo = _catalogo(tmp_path)
+    canonico = _crear(catalogo, **MELIPILLA_CANONICO)
+    otro_numero = _crear(catalogo, **{**MELIPILLA_DUPLICADO, "direccion": "CAMINO A MELIPILLA 10900 SANTIAGO MAIPU",
+                                      "nombre_destino": "N", "latitud": -33.522800, "longitud": -70.742000})
+    sin_coord = _crear(catalogo, **{**MELIPILLA_DUPLICADO, "nombre_destino": "S", "direccion": "CAMINO A MELIPILLA 10800 MAIPU",
+                                    "latitud": None, "longitud": None})
+    assert motivo_destinos_no_consolidables(canonico, otro_numero) == "DIRECCION_DISTINTA"
+    # La clave de dirección no cambia: "SANTIAGO MAIPU" sin coma con campo Santiago conserva MAIPU en la calle.
+    clave_intacta = _crear(catalogo, **{**MELIPILLA_DUPLICADO, "direccion": "CAMINO A MELIPILLA 10800 SANTIAGO MAIPU",
+                                        "nombre_destino": "K", "comuna": "Santiago", "latitud": -33.522800,
+                                        "longitud": -70.742000})
+    assert motivo_destinos_no_consolidables(canonico, clave_intacta) == "DIRECCION_DISTINTA"
+    assert motivo_destinos_no_consolidables(canonico, sin_coord) == "SIN_COORDENADAS"
