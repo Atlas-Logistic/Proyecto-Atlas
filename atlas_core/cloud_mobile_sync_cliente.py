@@ -324,7 +324,8 @@ def _recibir_pendientes_cloud(
             break
         cola.vistos.add(envio_id)
         resumen["encontrados"] += 1
-        if _error_persistido_local(repositorio, envio_id, pendiente):
+        error_persistido = _error_persistido_local(repositorio, envio_id, pendiente)
+        if error_persistido and repositorio.foto_integra(envio_id, repositorio.cargar(envio_id)):
             # ERROR funcional ya persistido con este MISMO documento: nunca
             # se confirma ni se reprocesa solo. Sin lease, descarga ni
             # escritura en G:; sigue PENDIENTE en Cloud y vuelve al flujo
@@ -370,8 +371,16 @@ def _recibir_pendientes_cloud(
                 "tipos_novedad": lease.get("tipos_novedad"), "rol_documento": lease.get("rol_documento"),
                 "evidencia_de_envio_id": lease.get("evidencia_de_envio_id"),
             }
-            repositorio.recibir(envio_id=envio_id, imagen=imagen, mime=mime, metadata=metadata)
+            registro, _ = repositorio.recibir(envio_id=envio_id, imagen=imagen, mime=mime, metadata=metadata)
+            if registro.get("imagen_sha256") and registro.get("imagen_sha256") != sha:
+                raise ErrorSincronizacionCloudMobile("La imagen Cloud no coincide con el envio local")
             resumen["persistidos"].append(envio_id)
+            if registro.get("estado") == "ERROR":
+                # Solo se repara el original: recuperar ERROR exige accion explicita.
+                resumen["omitidos_error_persistido"].append(envio_id)
+                if procesar:
+                    resumen["errores_procesamiento"][envio_id] = "ERROR funcional persistido"
+                continue
             _marcar_aterrizado_cloud(repositorio, envio_id, lease)
             if not procesar:
                 continue
@@ -389,7 +398,7 @@ def _recibir_pendientes_cloud(
                 continue
             cola.leases[envio_id] = (lease_token, lease_activo)
             en_cola = True
-        except (ErrorSincronizacionCloudMobile, ErrorEnvioMobile, KeyError, TypeError, ValueError) as error:
+        except (ErrorSincronizacionCloudMobile, ErrorEnvioMobile, SesionOcupadaError, KeyError, TypeError, ValueError) as error:
             resumen["fallidos"][envio_id] = str(error)
         finally:
             if lease_activo is not None and not en_cola:
