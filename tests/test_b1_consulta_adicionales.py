@@ -30,10 +30,12 @@ def test_listado_y_comparaciones(fuente):
     assert r.resultado.resultado==1 and r.resultado.viajes_soporte[0]['viaje_id']=='v2'
 
 @pytest.mark.parametrize('nota',['ADICIONAL DE 30000 POR GUIA','ADICIONAL DE 30000 Y ADICIONAL DE 15000','ADICIONAL SIN MONTO','NO TIENE ADICIONAL DE 30000'])
-def test_nota_ambigua_no_da_conteo(fuente,nota):
+def test_nota_ambigua_conserva_conteo_confirmado_y_advertencia(fuente,nota):
     raiz,ruta,eventos,guardar=fuente; eventos.append(dict(eventos[0],nota=nota)); guardar(eventos)
     r=responder_consulta_atlas('Cuantos viajes tienen adicional de 30000',ruta_viajes=ruta,raiz_atlas=raiz)
-    assert r.resultado is None and r.estado=='NO_INTERPRETABLE'
+    assert r.estado == 'OK' and r.resultado.resultado == 1
+    assert '1 observaci\u00f3n ambigua' in r.texto_respuesta
+    assert 'no se sabe cu\u00e1ntos viajes distintos representan' in r.texto_respuesta
 
 def test_filtros_no_entendidos_no_se_omiten(fuente):
     raiz,ruta,*_=fuente
@@ -55,7 +57,8 @@ def test_archivo_corrupto_no_se_interpreta_como_cero(fuente):
 
 def test_nota_con_otro_importe_no_inventa(fuente):
     raiz,ruta,eventos,guardar=fuente; eventos[0]['nota']='ADICIONAL DE 30000 O 45000'; guardar(eventos)
-    assert responder_consulta_atlas('Cuantos viajes tienen adicional de 30000',ruta_viajes=ruta,raiz_atlas=raiz).resultado is None
+    r = responder_consulta_atlas('Cuantos viajes tienen adicional de 30000',ruta_viajes=ruta,raiz_atlas=raiz)
+    assert r.resultado.resultado == 1 and '1 observaci\u00f3n ambigua' in r.texto_respuesta
 
 
 def test_duplicado_en_reporte_cuenta_una_vez(fuente):
@@ -66,3 +69,44 @@ def test_duplicado_en_reporte_cuenta_una_vez(fuente):
         csv.DictWriter(f,fieldnames=fields,delimiter=';').writerow(filas[0])
     r=responder_consulta_atlas('Cuantos viajes tienen un adicional de $30.000',ruta_viajes=ruta,raiz_atlas=raiz)
     assert r.resultado.resultado==1
+
+
+def test_13_confirmados_y_4_observaciones_sin_inferir_4_viajes(tmp_path):
+    from atlas_core.consulta_adicionales import consultar_adicionales
+    raiz=tmp_path/'Atlas'; actual=raiz/'operacion'/'actual'; actual.mkdir(parents=True)
+    viajes=[{'viaje_id':f'v{i}', 'numero_transporte':f't{i}'} for i in range(15)]
+    def evento(i, nota, eid):
+        return {'evento_id':eid, 'estado':'ACTIVO','tipo_evento':'OBSERVACION_OPERACIONAL','naturaleza':'MARCA_VIAJE','viaje_id':f'v{i}','numero_transporte':f't{i}','nota':nota}
+    eventos=[evento(i,'ESTE VIAJE TIENE ADICIONAL DE $30.000 POR RETIRO',f'c{i}') for i in range(13)]
+    eventos += [evento(0,'ADICIONAL DE 30000 O 45000','a1'),evento(0,'ADICIONAL SIN MONTO','a2'),evento(13,'ADICIONAL DE 30000 POR GUIA','a3'),evento(13,'ADICIONAL DE 30000 Y ADICIONAL DE 15000','a4')]
+    eventos += [eventos[0],eventos[-1]]
+    (actual/'eventos_operacionales.json').write_text(json.dumps({'schema_version':1,'eventos':eventos}),encoding='utf-8')
+    tipo, resultado, texto = consultar_adicionales('Cuantos viajes tienen adicional de $30.000', viajes, raiz)
+    assert tipo == 'resultado' and resultado.resultado == 13
+    assert len({v['viaje_id'] for v in resultado.viajes_soporte}) == 13
+    assert texto == ('Hay 13 viajes con adicional confirmado de $30.000. Adem\u00e1s, existen 4 observaciones ambiguas pendientes de revisi\u00f3n; no se sabe cu\u00e1ntos viajes distintos representan.')
+
+
+def test_solo_ambiguos_no_se_presenta_como_cero_confirmado(fuente):
+    raiz,ruta,eventos,guardar=fuente
+    eventos[:]=[dict(eventos[0],nota='ADICIONAL DE 30000 O 45000')]
+    guardar(eventos)
+    r=responder_consulta_atlas('Cuantos viajes tienen adicional de 30000',ruta_viajes=ruta,raiz_atlas=raiz)
+    assert r.resultado is None and r.estado=='NO_INTERPRETABLE'
+    assert '1 observaci\u00f3n(es) ambiguas' in r.texto_respuesta
+
+
+def test_ambiguos_no_activan_respuesta_parcial_para_listado_o_comparacion(fuente):
+    raiz,ruta,eventos,guardar=fuente
+    eventos.append(dict(eventos[0],nota='ADICIONAL SIN MONTO'))
+    guardar(eventos)
+    for pregunta in ('Lista los viajes con adicional de 30000','Cuantos viajes tienen adicional superior a 15000'):
+        assert responder_consulta_atlas(pregunta,ruta_viajes=ruta,raiz_atlas=raiz).resultado is None
+
+
+def test_eventos_con_misma_identidad_y_contenido_distinto_no_cuentan(fuente):
+    raiz,ruta,eventos,guardar=fuente
+    eventos[0]['evento_id']='e1'
+    eventos.append(dict(eventos[0],nota='ADICIONAL DE 45000'))
+    guardar(eventos)
+    assert responder_consulta_atlas('Cuantos viajes tienen adicional de 30000',ruta_viajes=ruta,raiz_atlas=raiz).resultado is None
