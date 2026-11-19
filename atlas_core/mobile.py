@@ -302,6 +302,53 @@ class RepositorioEnviosMobile:
     def raiz(self) -> Path:
         return self.raiz_atlas / "operacion" / "mobile" / "envios"
 
+    def foto_integra(self, envio_id: str, registro: Mapping[str, object]) -> bool:
+        """Comprueba el original contra la identidad durable del envio."""
+        extension = MIME_PERMITIDOS.get(registro.get("imagen_mime"))
+        if (not _ID_SEGURO.fullmatch(envio_id) or registro.get("envio_id") != envio_id
+                or not extension or registro.get("foto_original") != "original" + extension):
+            return False
+        esperado = str(registro.get("imagen_sha256") or "")
+        if not re.fullmatch(r"[0-9a-f]{64}", esperado):
+            return False
+        ruta = self.raiz / envio_id / ("original" + extension)
+        try:
+            if not ruta.is_file() or ruta.is_symlink() or not 0 < ruta.stat().st_size <= MAX_IMAGEN_BYTES:
+                return False
+            with ruta.open("rb") as archivo:
+                actual = hashlib.file_digest(archivo, "sha256").hexdigest()
+            return hmac.compare_digest(actual, esperado)
+        except OSError:
+            return False
+
+    def _restaurar_foto(self, envio_id: str, registro: Mapping[str, object], imagen: bytes, mime: str) -> None:
+        esperado = str(registro.get("imagen_sha256") or "")
+        extension = MIME_PERMITIDOS.get(mime)
+        if (registro.get("envio_id") != envio_id or not extension
+                or registro.get("foto_original") != "original" + extension
+                or registro.get("imagen_mime") != mime
+                or not re.fullmatch(r"[0-9a-f]{64}", esperado)
+                or not hmac.compare_digest(hashlib.sha256(imagen).hexdigest(), esperado)):
+            raise ErrorEnvioMobile("La imagen recibida no coincide con la identidad original del envio")
+        directorio = self.raiz / envio_id
+        original = directorio / ("original" + extension)
+        if original.is_symlink():
+            raise ErrorEnvioMobile("La foto original no puede ser un enlace")
+        temporal = directorio / f".original.{secrets.token_hex(16)}.tmp"
+        try:
+            with temporal.open("xb") as archivo:
+                archivo.write(imagen)
+                archivo.flush()
+                os.fsync(archivo.fileno())
+            if temporal.stat().st_size != len(imagen):
+                raise ErrorEnvioMobile("Tamano de la foto restaurada no coincide")
+            with temporal.open("rb") as archivo:
+                if not hmac.compare_digest(hashlib.file_digest(archivo, "sha256").hexdigest(), esperado):
+                    raise ErrorEnvioMobile("SHA-256 de la foto restaurada no coincide")
+            os.replace(temporal, original)
+        finally:
+            temporal.unlink(missing_ok=True)
+
     def recibir(self, *, envio_id: str, imagen: bytes, mime: str, metadata: Mapping[str, object]) -> tuple[dict, bool]:
         if not _ID_SEGURO.fullmatch(envio_id):
             raise ErrorEnvioMobile("envio_id inválido")
@@ -349,12 +396,17 @@ class RepositorioEnviosMobile:
         # VERDADERAMENTE nuevo necesita el lock -- para excluir dos
         # primeras subidas simultáneas del mismo `envio_id` entre sí.
         if registro_path.is_file():
-            return json.loads(registro_path.read_text(encoding="utf-8")), False
+            registro = json.loads(registro_path.read_text(encoding="utf-8"))
+            if self.foto_integra(envio_id, registro):
+                return registro, False
         with bloqueo_sesion(self.raiz, f"mobile_{envio_id}", tiempo_expiracion_segundos=300):
             # Revalida DENTRO del lock -- la única carrera real que esto
             # protege es dos creaciones simultáneas del mismo envío.
             if registro_path.is_file():
-                return json.loads(registro_path.read_text(encoding="utf-8")), False
+                registro = json.loads(registro_path.read_text(encoding="utf-8"))
+                if not self.foto_integra(envio_id, registro):
+                    self._restaurar_foto(envio_id, registro, imagen, mime)
+                return registro, False
             directorio.mkdir(parents=True, exist_ok=True)
             extension = MIME_PERMITIDOS[mime]
             temporal = directorio / f".original{extension}.tmp"
