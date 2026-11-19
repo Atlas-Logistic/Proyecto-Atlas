@@ -61,3 +61,8 @@ El estado del reporte ya publicado **sigue bloqueado** para folio, obra y destin
 
 - Alcance: rol administrador del acceso Desktop (`c258b92`), herramienta y procedimiento de activación/recuperación, pruebas con copias aisladas. Sin cambios en el código Motor.
 - Cierre: Atlas-Viajes-Desktop `75d2398` (rama `feat/acceso-admin-mbt-20261119`, respaldada en origin). Preparado y validado, **no activado**: falta desplegar un Desktop con la rama y el alta por Javier (`docs/ACCESO_ADMIN_MBT_ACTIVACION_20261119.md`). Motor `918d629` y `f4b7775`+ compatibles con el ingreso MBT de la sesión (campo `usuario`).
+
+## Reserva activa — Desktop: instalable MBT con acceso administrador (2026-11-19)
+
+- Alcance: integrar `75d2398` + `15f8799`, construir y probar el instalador en aislamiento (Atlas-Viajes-Desktop, rama `release/desktop-mbt-acceso-20261119`). Sin instalar ni activar.
+- Fuera de alcance: código Motor (`b09bd28` y Estable `918d629` solo se usan como copias), G:, CASA, OFICINA, Cloud, Mobile y PULL.
