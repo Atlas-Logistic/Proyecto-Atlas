@@ -44,3 +44,9 @@ Esto no cubre los cortes posteriores al ledger de folio u obra, la bandeja ya tr
 Folio y obra con ledger escrito, y folio con bandeja trasladada, se recuperan al reintentar el token si dataset, ledger y bandeja coinciden byte por byte con sus estados previos o el resultado canónico de esa operación, y el estado del reporte permanece sin cambio. Se verifican identidad, confirmante y valor; los respaldos se restauran bajo los locks locales de los recursos y la acción oficial vuelve a comprobar el preview. Se probaron cortes adicionales durante la restauración, reinicio, reintentos, conflictos ajenos y comparación con una ejecución sin corte.
 
 El estado del reporte ya publicado **sigue bloqueado** para folio, obra y destino. Una prueba con generación real sintética interrumpe justo después de publicar ese estado y comprueba que el reintento no lo sobrescribe. No existe aún evidencia durable suficiente para atribuir ese estado al token sin confundirlo con una publicación concurrente. Los lectores directos de reportes siguen sin protección; no declarar completa la publicación coherente ni instalar.
+
+## Reserva activa — Motor: ingreso Desktop multiempresa (2026-11-19)
+
+- Alcance reservado: contrato Motor para acciones capacidades e ingresar, validación contextual empresa/perfil, custodia y auditoría por lote, y pruebas sintéticas aisladas.
+- Fuera de alcance: Desktop, Cloud, Mobile, PULL productivo, credenciales y datos CASA/OFICINA.
+- Base documental: 2ae8738 (eat/perfiles-documentales-20261118). El contrato Desktop 37edd8b no está disponible en este repositorio/remoto tras git fetch; se implementará de forma compatible y se dejará la limitación explícita.

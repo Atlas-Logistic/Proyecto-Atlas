@@ -6652,6 +6652,7 @@ def procesar_carpeta(
     pais_operacion: str = PAIS_OPERACION_PREDETERMINADO,
     servicio_telemetria: object = None,
     orquestador_ia: object = None,
+    perfil_documental: object = PERFIL_AZA,
 ) -> dict[str, int | float]:
     """Procesa secuencialmente una carpeta, persistiendo avances periódicos.
 
@@ -6814,7 +6815,7 @@ def procesar_carpeta(
         if procesador is not None:
             return procesador(ruta)
 
-        argumentos_archivo: dict[str, object] = {}
+        argumentos_archivo: dict[str, object] = {"perfil_documental": perfil_documental}
         if carpeta_catalogos is not None:
             argumentos_archivo["carpeta_catalogos"] = carpeta_catalogos
             argumentos_archivo["recolector_decisiones"] = recolector_documento
