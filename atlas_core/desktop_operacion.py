@@ -248,10 +248,11 @@ def _registrar_auditoria_ingreso(entrada, *, empresa_id, perfil_documental, usua
     (entrada/'_ingreso_multiempresa.json').write_text(json.dumps(contenido, ensure_ascii=False, indent=2), encoding='utf-8')
 
 
-def ingresar(raiz, archivos, comprobar, *, empresa_id='mbt', perfil_documental='aza', usuario_recibido=None):
+def ingresar(raiz, archivos, comprobar, *, empresa_id=None, perfil_documental=None, usuario_recibido=None):
     raiz = Path(raiz).resolve()
     originales = [Path(p).resolve(strict=True) for p in archivos]
-    from atlas_core.ingreso_multiempresa import resolver_perfil
+    from atlas_core.ingreso_multiempresa import normalizar_solicitud_ingreso, resolver_perfil
+    empresa_id, perfil_documental = normalizar_solicitud_ingreso(raiz, empresa_id, perfil_documental)
     resolver_perfil(raiz, empresa_id, perfil_documental)
     if not originales or any(not p.is_file() or p.suffix.lower() not in {'.png','.jpg','.jpeg','.pdf'} for p in originales):
         raise ValueError('Seleccione guías JPG, PNG o PDF válidas.')

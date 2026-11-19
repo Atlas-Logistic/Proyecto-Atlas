@@ -52,6 +52,25 @@ def resolver_perfil(raiz: str | Path, empresa_id: object, perfil_id: object) -> 
     raise FormatoDocumentalDesconocido("FORMATO_DOCUMENTAL_DESCONOCIDO: perfil no procesable")
 
 
+def normalizar_solicitud_ingreso(raiz: str | Path, empresa_id: object, perfil_id: object) -> tuple[str, str]:
+    """Admite sólo el sobre heredado MBT completamente ausente.
+
+    La ausencia parcial, cadenas vacías y cualquier valor explícito se dejan
+    para la validación estricta: nunca deben degradarse silenciosamente a MBT.
+    """
+    raiz = Path(raiz).resolve()
+    empresa = empresa_de_raiz(raiz)
+    if empresa_id is None and perfil_id is None:
+        if empresa == EMPRESA_MBT and empresa_proceso() == EMPRESA_MBT:
+            return EMPRESA_MBT, PERFIL_AZA_ID
+        raise ErrorIngresoMultiempresa("IDENTIFICACION_EMPRESA_Y_PERFIL_OBLIGATORIA")
+    if empresa_id is None or perfil_id is None:
+        raise ErrorIngresoMultiempresa("IDENTIFICACION_EMPRESA_Y_PERFIL_INCOMPLETA")
+    if not isinstance(empresa_id, str) or not empresa_id.strip() or not isinstance(perfil_id, str) or not perfil_id.strip():
+        raise ErrorIngresoMultiempresa("IDENTIFICACION_EMPRESA_Y_PERFIL_INVALIDA")
+    return empresa_id, perfil_id
+
+
 def capacidades(raiz: str | Path, empresa_id: object) -> dict[str, object]:
     """Consulta pura: no anuncia perfiles sin implementador ejecutable."""
     raiz = Path(raiz).resolve()

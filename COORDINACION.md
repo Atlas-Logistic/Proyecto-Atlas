@@ -51,3 +51,7 @@ El estado del reporte ya publicado **sigue bloqueado** para folio, obra y destin
 - Fuera de alcance: Desktop, Cloud, Mobile, PULL productivo, credenciales y datos CASA/OFICINA.
 - Base documental: `2ae8738` (`feat/perfiles-documentales-20261118`). El contrato Desktop `37edd8b` no está disponible en este repositorio/remoto tras `git fetch`; se implementó una frontera compatible y se deja esta limitación explícita.
 - Cierre: `f4b7775`; pruebas sintéticas aprobadas y rama respaldada en `origin/feat/motor-ingreso-multiempresa-20261119`.
+
+## Reserva activa — Motor: compatibilidad de ingreso MBT anterior (2026-11-19)
+
+- Alcance reservado: normalización de solicitudes `ingresar` antiguas sin empresa/perfil y pruebas sintéticas de compatibilidad. No se modifican Desktop, OCR, reglas documentales, Mobile, Cloud ni PULL.
