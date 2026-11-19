@@ -66,3 +66,9 @@ El estado del reporte ya publicado **sigue bloqueado** para folio, obra y destin
 
 - Alcance: integrar `75d2398` + `15f8799`, construir y probar el instalador en aislamiento. Sin cambios en el código Motor.
 - Cierre: Atlas-Viajes-Desktop 1.4.5, build `a11dd01` (rama `release/desktop-mbt-acceso-20261119`, respaldada en origin). NO instalado ni activado. Compatible con Motor `b09bd28` y con el Estable instalado `918d629` (ingreso MBT real verificado con ambos). Con `918d629`, cuatro funciones de fichas de CASA (licencia automática, varias clases, corrección de fechas, revisión documental simple) requieren Motor actualizado.
+
+## Reserva liberada — Motor OFICINA: actualización compatible Desktop 1.4.5 (2026-11-19)
+
+- Alcance exclusivo: evaluar y preparar actualización del Motor de OFICINA desde `918d629` a la referencia multiempresa `b09bd28`; pruebas sintéticas de fichas y regresión de ingreso MBT heredado, OCR, viajes y B1; procedimiento de actualización y reversión.
+- Prohibido: instalar, reiniciar o modificar el Motor real de OFICINA, y tocar CASA, Desktop, Mobile, Cloud, PULL o datos operacionales.
+- Resultado: `918d629` es ancestro de `b09bd28`; se aprobaron 95 pruebas sintéticas focales de fichas/ingreso y 136 regresiones heredadas de OCR, viajes y B1. Procedimiento de actualización y reversión preparado en `docs/ACTUALIZACION_MOTOR_OFICINA_DESKTOP_1_4_5_20261119.md`. No se instaló, reinició ni modificó OFICINA ni datos operacionales.
