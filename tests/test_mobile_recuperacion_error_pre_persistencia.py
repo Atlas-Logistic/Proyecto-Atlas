@@ -100,6 +100,9 @@ class _EscritorNoAdquirido:
     def __exit__(self, *_args):
         return False
 
+    def vincular_raiz(self, raiz):
+        self.raiz = raiz
+
     def adquirir(self):
         return False
 
@@ -112,7 +115,7 @@ def test_cli_no_recupera_si_no_adquiere_el_lease_global(tmp_path):
         fabrica_escritor=lambda **_kwargs: _EscritorNoAdquirido(),
     )
 
-    assert resultado == {"escritor_operativo": "NO_ADQUIRIDO", "envio_id": envio_id}
+    assert resultado == {"escritor_operativo": "NO_ADQUIRIDO", "envio_id": envio_id, "motivo": ""}
     assert repo.cargar(envio_id)["estado"] == "ERROR"
 
 
@@ -189,3 +192,111 @@ def test_recuperacion_que_termina_en_error_no_ejecuta_cierre(tmp_path, monkeypat
     assert resultado["recuperacion_error_pre_persistencia"]["estado"] == "FALLIDA"
     assert cierres == []
     assert _eventos(tmp_path) == []
+
+
+def test_cli_protocolo_2_confirma_y_alineacion_conserva_recuperacion(tmp_path, monkeypatch):
+    from test_estado_confirmado import CloudFalsa, Equipo, sha
+    from atlas_core import escritor_operativo as eo, estado_confirmado as ec
+    cloud = CloudFalsa(protocolo_minimo=2)
+    equipo = Equipo(tmp_path, "casa", cloud)
+    repo, envio_id, dataset = _envio_error(equipo.raiz)
+    monkeypatch.setattr(eo, "_json", cloud.json)
+    monkeypatch.setattr(ec.ClienteEstado, "_crudo", lambda c, h, **kw: cloud.crudo(c, h, **kw))
+    # Sembrar estado sintetico mediante el mismo protocolo de custodia.
+    with equipo.lease() as lease:
+        assert lease.adquirir()
+        dataset.write_bytes(dataset.read_bytes())
+        ruta_envio = repo.raiz / envio_id / "envio.json"
+        ruta_envio.write_bytes(ruta_envio.read_bytes())
+    lease = equipo.lease()
+    def vincular(raiz):
+        assert Path(raiz) == equipo.raiz.resolve()
+        lease.custodia = ec.CustodiaEstado(raiz, ec.ClienteEstado("https://cloud.test", "t", 5), carpeta_local=equipo.local)
+    lease.vincular_raiz = vincular
+    monkeypatch.setattr(mobile, "crear_proveedor_ocr", lambda: object())
+    monkeypatch.setattr(mobile, "procesar_archivo", lambda *a, **k: {"numero_guia": "900001", "numero_transporte": "0000900000", "cliente": "CLIENTE"})
+    resultado = ejecutar_recuperacion_con_escritor(base_url="https://cloud.test", token_motor="t", envio_id=envio_id, repositorio=repo, dataset=dataset, carpeta_catalogos=None, fabrica_escritor=lambda **kw: lease)
+    assert resultado["custodia"]["confirmados"] >= 2
+    assert resultado["resultado"]["recuperacion_error_pre_persistencia"]["estado"] == "COMPLETADA"
+    rutas = cloud._vigentes()
+    rel_envio = f"operacion/mobile/envios/{envio_id}/envio.json"
+    assert rutas[rel_envio][0] == sha((repo.raiz / envio_id / "envio.json").read_bytes())
+    assert rutas["operacion/actual/analisis_completo_guias.csv"][0] == sha(dataset.read_bytes())
+    with equipo.lease() as siguiente:
+        assert siguiente.adquirir()
+        assert repo.cargar(envio_id)["recuperacion_error_pre_persistencia"]["estado"] == "COMPLETADA"
+        assert rutas["operacion/actual/analisis_completo_guias.csv"][0] == sha(dataset.read_bytes())
+
+
+def test_cli_custodia_incompatible_no_procesa(tmp_path, monkeypatch):
+    repo, envio_id, dataset = _envio_error(tmp_path)
+    class Rechazo(_EscritorNoAdquirido):
+        motivo = "ESTADO_NO_VERIFICADO"
+    monkeypatch.setattr(mobile, "procesar_archivo", lambda *a, **k: pytest.fail("no debe procesar"))
+    resultado = ejecutar_recuperacion_con_escritor(base_url="https://cloud.test", token_motor="t", envio_id=envio_id, repositorio=repo, dataset=dataset, carpeta_catalogos=None, fabrica_escritor=lambda **kw: Rechazo())
+    assert resultado["motivo"] == "ESTADO_NO_VERIFICADO"
+    assert repo.cargar(envio_id)["estado"] == "ERROR"
+
+
+def test_cli_interrupcion_no_informa_exito_y_protege_escrituras(tmp_path, monkeypatch):
+    import recuperar_envio_mobile_error as cli
+    repo, envio_id, dataset = _envio_error(tmp_path)
+    class Escritor:
+        vigente = True
+        custodia = object()
+        def __enter__(self): return self
+        def __exit__(self, *args): pass
+        def vincular_raiz(self, raiz): self.raiz = raiz
+        def adquirir(self): return True
+    escritor = Escritor()
+    def interrumpir(*args, **kwargs):
+        escritor.vigente = False
+        dataset.write_text("no debe escribirse")
+    monkeypatch.setattr(cli, "recuperar_envio_mobile_error_pre_persistencia", interrumpir)
+    anterior = dataset.read_bytes()
+    with pytest.raises(PermissionError):
+        ejecutar_recuperacion_con_escritor(base_url="https://cloud.test", token_motor="t", envio_id=envio_id, repositorio=repo, dataset=dataset, carpeta_catalogos=None, fabrica_escritor=lambda **kw: escritor)
+    assert dataset.read_bytes() == anterior
+
+
+def test_cli_interrupcion_deja_estado_parcial_en_custodia(tmp_path, monkeypatch):
+    import recuperar_envio_mobile_error as cli
+    from test_estado_confirmado import CloudFalsa, Equipo, sha
+    from atlas_core import escritor_operativo as eo, estado_confirmado as ec
+    cloud = CloudFalsa(protocolo_minimo=2)
+    equipo = Equipo(tmp_path, "casa", cloud)
+    repo, envio_id, dataset = _envio_error(equipo.raiz)
+    monkeypatch.setattr(eo, "_json", cloud.json)
+    monkeypatch.setattr(ec.ClienteEstado, "_crudo", lambda c, h, **kw: cloud.crudo(c, h, **kw))
+    lease = equipo.lease()
+    lease.vincular_raiz = lambda raiz: setattr(lease, "custodia", ec.CustodiaEstado(raiz, ec.ClienteEstado("https://cloud.test", "t", 5), carpeta_local=equipo.local))
+    def corte(*args, **kwargs):
+        registro = repo.cargar(envio_id)
+        registro["recuperacion_error_pre_persistencia"] = {"estado": "INICIADA"}
+        repo.guardar(envio_id, registro)
+        raise RuntimeError("corte sintetico")
+    monkeypatch.setattr(cli, "recuperar_envio_mobile_error_pre_persistencia", corte)
+    with pytest.raises(RuntimeError, match="corte sintetico"):
+        ejecutar_recuperacion_con_escritor(base_url="https://cloud.test", token_motor="t", envio_id=envio_id, repositorio=repo, dataset=dataset, carpeta_catalogos=None, fabrica_escritor=lambda **kw: lease)
+    rel = f"operacion/mobile/envios/{envio_id}/envio.json"
+    assert cloud._vigentes()[rel][0] == sha((repo.raiz / envio_id / "envio.json").read_bytes())
+    with equipo.lease() as siguiente:
+        assert siguiente.adquirir()
+        assert repo.cargar(envio_id)["recuperacion_error_pre_persistencia"]["estado"] == "INICIADA"
+
+
+def test_cli_falla_confirmacion_no_declara_exito(tmp_path, monkeypatch):
+    import recuperar_envio_mobile_error as cli
+    repo, envio_id, dataset = _envio_error(tmp_path)
+    class Custodia:
+        def confirmar(self, escritor): raise RuntimeError("confirmacion fallida")
+    class Escritor:
+        vigente = True
+        custodia = Custodia()
+        def __enter__(self): return self
+        def __exit__(self, *args): pass
+        def vincular_raiz(self, raiz): pass
+        def adquirir(self): return True
+    monkeypatch.setattr(cli, "recuperar_envio_mobile_error_pre_persistencia", lambda *a, **k: {"estado": "COMPLETADA"})
+    with pytest.raises(RuntimeError, match="confirmacion fallida"):
+        ejecutar_recuperacion_con_escritor(base_url="https://cloud.test", token_motor="t", envio_id=envio_id, repositorio=repo, dataset=dataset, carpeta_catalogos=None, fabrica_escritor=lambda **kw: Escritor())

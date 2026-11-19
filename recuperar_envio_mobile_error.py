@@ -12,6 +12,7 @@ from pathlib import Path
 
 from atlas_core.almacenamiento_portable import leer_estado_operacion, resolver_raiz_atlas
 from atlas_core.escritor_operativo import LeaseEscritorOperativo
+from atlas_core.guardia_pull import proteger_escrituras
 from atlas_core.fuente_catalogos import ErrorFuenteCatalogos, validar_fuente_catalogos
 from atlas_core.mobile import RepositorioEnviosMobile, recuperar_envio_mobile_error_pre_persistencia
 
@@ -24,15 +25,32 @@ def ejecutar_recuperacion_con_escritor(
     dataset: Path, carpeta_catalogos: str | Path | None, timeout: float = 30.0,
     fabrica_escritor=LeaseEscritorOperativo,
 ) -> dict:
-    """No inicia una recuperación si no posee el escritor global vigente."""
+    """Recupera solo con turno local, lease y custodia confirmada."""
+    raiz = Path(repositorio.raiz_atlas).resolve()
+    if not Path(dataset).resolve().is_relative_to(raiz):
+        raise ValueError("El dataset debe pertenecer a la raiz protegida por custodia")
     with fabrica_escritor(base_url=base_url, token_motor=token_motor, timeout=timeout) as escritor:
+        escritor.vincular_raiz(raiz)
         if not escritor.adquirir() or not escritor.vigente:
-            return {"escritor_operativo": "NO_ADQUIRIDO", "envio_id": envio_id}
-        resultado = recuperar_envio_mobile_error_pre_persistencia(
-            repositorio, envio_id, dataset=dataset, carpeta_catalogos=carpeta_catalogos,
-            puede_escribir=lambda: escritor.vigente,
-        )
-        return {"escritor_operativo": "ADQUIRIDO", "envio_id": envio_id, "resultado": resultado}
+            return {"escritor_operativo": "NO_ADQUIRIDO", "envio_id": envio_id,
+                    "motivo": getattr(escritor, "motivo", "")}
+        if escritor.custodia is None:
+            raise RuntimeError("La recuperacion exige custodia de protocolo 2")
+        estado = leer_estado_operacion(raiz=raiz) or {}
+        dataset_alineado = raiz / estado.get("dataset_operacional", "operacion/actual/analisis_completo_guias.csv")
+        if Path(dataset).resolve() != dataset_alineado.resolve():
+            raise RuntimeError("El dataset cambio durante la alineacion; no se recupero el envio")
+        with proteger_escrituras(raiz, lambda: escritor.vigente):
+            resultado = recuperar_envio_mobile_error_pre_persistencia(
+                repositorio, envio_id, dataset=dataset, carpeta_catalogos=carpeta_catalogos,
+                puede_escribir=lambda: escritor.vigente,
+            )
+            if not escritor.vigente:
+                raise PermissionError("Lease perdido: recuperacion sin confirmacion de custodia")
+            confirmacion = escritor.custodia.confirmar(escritor)
+        return {"escritor_operativo": "ADQUIRIDO", "envio_id": envio_id,
+                "resultado": resultado, "custodia": confirmacion}
+
 
 
 def main() -> None:
