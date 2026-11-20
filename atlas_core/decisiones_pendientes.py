@@ -2207,6 +2207,18 @@ def _identidad_cliente_por_rut(carpeta: Path, rut: str):
         return None
 
 
+def _direccion_confirmada_para_pregunta(calle: str, texto: str, comuna: str) -> bool:
+    """Suprime solo una pregunta textual, sin elegir un destino geografico."""
+    if direccion_confirmada_coincide(calle, texto):
+        return True  # conservar las equivalencias previas
+    # El comparador tolera OCR con comuna, pero por si solo puede aceptar
+    # una segunda numeracion. No ampliar este camino si existe tal conflicto.
+    numeros_calle = [t for t in re.findall(r"[A-Z0-9]+", calle) if any(c.isdigit() for c in t)]
+    numeros_texto = [t for t in re.findall(r"[A-Z0-9]+", texto) if any(c.isdigit() for c in t)]
+    return (len(numeros_calle) == len(numeros_texto) == 1
+            and direccion_confirmada_coincide(calle, texto, comuna_confirmada=comuna))
+
+
 def _decisiones_obra_para_cliente(
     *, carpeta: Path, cliente_id: str, cliente_razon_social: str,
     cliente_aliases: Iterable[str], obra_texto: str, despachar_a_documental: str,
@@ -2412,7 +2424,7 @@ def _decisiones_obra_para_cliente(
                 )
                 resuelta = any(
                     (calle := normalizar_nombre_destino(destino.direccion.split(",", 1)[0]))
-                    and direccion_confirmada_coincide(calle, texto_documental)
+                    and _direccion_confirmada_para_pregunta(calle, texto_documental, destino.comuna)
                     for destino in destinos_confirmados_obra
                 )
             if resuelta:
@@ -4277,7 +4289,7 @@ def _regenerar_decisiones_persistidas(
                     )
                     resuelta = any(
                         (calle := normalizar_nombre_destino(destino.direccion.split(",", 1)[0]))
-                        and direccion_confirmada_coincide(calle, texto_documental)
+                        and _direccion_confirmada_para_pregunta(calle, texto_documental, destino.comuna)
                         for destino in destinos_confirmados_obra
                     )
             # Bloque REVISIONES ESTANCADAS -- casos reales 472008 / 472227:
