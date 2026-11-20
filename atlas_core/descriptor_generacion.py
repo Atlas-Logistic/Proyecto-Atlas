@@ -1,4 +1,4 @@
-"""Descriptor preparado de una generación operacional (contrato v1).
+"""Descriptor preparado de una generación operacional (contrato v2; lee v1).
 
 Constructor **puro y determinista**: recibe del llamador un inventario
 explícito de fuentes y objetos ya identificados por huella y devuelve un
@@ -18,6 +18,10 @@ Tres conceptos separados (ver ``docs/DESCRIPTOR_GENERACION.md``):
 Una fuente inexistente nunca equivale a una colección vacía: cada tipo debe
 declararse con su número exacto de objetos, y el vacío (``0``) sólo se admite
 como declaración explícita en los tipos donde es legítimo.
+
+Versiones: cada descriptor se valida y serializa con las reglas de **su**
+``version_contrato``. Un descriptor v1 sigue siendo legible con sus reglas y
+sus mismos bytes, pero nunca se reinterpreta como v2.
 """
 from __future__ import annotations
 
@@ -29,8 +33,8 @@ from dataclasses import dataclass, field
 from typing import Any
 
 ESQUEMA = "atlas.descriptor_generacion"
-VERSION_CONTRATO = 1
-VERSIONES_COMPATIBLES = frozenset({1})
+VERSION_CONTRATO = 2
+VERSIONES_COMPATIBLES = frozenset({1, 2})
 CLASE = "DESCRIPTOR_PREPARADO"
 # El descriptor no puede afirmar su completitud: sólo el protocolo oficial de
 # publicación la confirma, fuera de este documento.
@@ -51,10 +55,8 @@ class ReglaTipo:
     admite_global: bool = False
 
 
-# Inventario de tipos v1. Los tipos de archivo único con estado propio
-# (dataset, ledger, bandeja, agrupaciones, registro de investigación...) son
-# obligatorios: su archivo vacío sigue siendo un objeto con huella.
-TIPOS: Mapping[str, ReglaTipo] = {
+# Tabla v1 (9b99abb/57e5173). Sólo para leer y verificar descriptores v1.
+TIPOS_V1: Mapping[str, ReglaTipo] = {
     "IDENTIDAD_EMPRESA": ReglaTipo(1, 1, True),
     "DATASET_OPERACIONAL": ReglaTipo(1, 1, True),
     "LEDGER_DECISIONES": ReglaTipo(1, 1, True),
@@ -66,6 +68,53 @@ TIPOS: Mapping[str, ReglaTipo] = {
     "EVIDENCIA_DOCUMENTAL": ReglaTipo(0, None, False),
     "CATALOGO": ReglaTipo(1, None, True, admite_global=True),
     "ASIGNACIONES": ReglaTipo(1, None, True),
+}
+
+# Tabla v2 (docs/FUENTES_GENERACION.md). Los tipos de archivo único con estado
+# propio son obligatorios: su archivo vacío sigue siendo un objeto con huella.
+# - DECISIONES_HUMANAS: los dos registros reales, uno por rol.
+# - ASIGNACIONES no es un tipo: no tiene almacén propio y se representa como
+#   derivación de sus fuentes originales (ver DERIVACIONES).
+TIPOS_V2: Mapping[str, ReglaTipo] = {
+    "IDENTIDAD_EMPRESA": ReglaTipo(1, 1, True),
+    "DATASET_OPERACIONAL": ReglaTipo(1, 1, True),
+    "LEDGER_DECISIONES": ReglaTipo(1, 1, True),
+    "DECISIONES_HUMANAS": ReglaTipo(2, 2, True),
+    "BANDEJA_REVISION": ReglaTipo(1, 1, True),
+    "AGRUPACIONES_CONFIRMADAS": ReglaTipo(1, 1, True),
+    "REGISTRO_INVESTIGACION": ReglaTipo(1, 1, True),
+    "CUARENTENA": ReglaTipo(0, None, False),
+    "EVIDENCIA_DOCUMENTAL": ReglaTipo(0, None, False),
+    "CATALOGO": ReglaTipo(1, None, True, admite_global=True),
+}
+TIPOS = TIPOS_V2
+TIPOS_POR_VERSION: Mapping[int, Mapping[str, ReglaTipo]] = {1: TIPOS_V1, 2: TIPOS_V2}
+
+# --- Roles v2 ---------------------------------------------------------------
+# Registros humanos reales (acciones_operacionales.json, operaciones_conversacionales.json).
+ROLES_DECISIONES_HUMANAS = frozenset({"acciones_operacionales", "operaciones_conversacionales"})
+# Rol documental de un binario de evidencia. "Evidencia procesada" son los
+# derivados técnicos del PDF (página PNG y texto). La ubicación (Mobile,
+# entradas, evidencia_resuelta) no es un rol: mover un archivo no cambia su identidad.
+ROLES_EVIDENCIA_DOCUMENTO = frozenset({"original", "orientada", "pdf", "pdf-pagina", "pdf-texto"})
+# Índices de evidencia: identidad fija y sin documento.
+ROLES_EVIDENCIA_INDICE: Mapping[str, str] = {
+    "registro-relecturas": "evidencia/registro-relecturas",
+    "registro-evidencias-adicionales": "evidencia/pdf/evidencias-adicionales",
+}
+_PATRON_ROL_CATALOGO = re.compile(r"^[a-z][a-z0-9_]{0,63}$")
+
+# --- Derivaciones v2 --------------------------------------------------------
+# Conceptos sin almacén propio, representados por sus fuentes originales del
+# mismo inventario (misma empresa y generación), sin copiarlas. Cada ranura
+# exige (tipo, rol) del objeto apuntado; una derivación nunca apunta a
+# DECISIONES_HUMANAS: una asignación inferida no es una confirmación humana.
+DERIVACIONES: Mapping[str, Mapping[str, tuple[str, str | None]]] = {
+    "ASIGNACIONES": {
+        "vehiculos": ("CATALOGO", "vehiculos"),
+        "choferes": ("CATALOGO", "choferes"),
+        "ledger": ("LEDGER_DECISIONES", None),
+    },
 }
 
 # ``empresa_id`` es la identidad canónica de custodia: ``ContextoEmpresa.cloud_id``,
@@ -80,11 +129,30 @@ EMPRESAS_SIN_MARCA = frozenset({"empresa-prueba-javier"})
 _REGLA_SIN_MARCA = ReglaTipo(0, 0, False)
 
 
-def regla_tipo(tipo: str, empresa_id: str) -> ReglaTipo | None:
-    """Regla del tipo para esa empresa; ``None`` si el tipo es desconocido."""
-    if tipo == "IDENTIDAD_EMPRESA" and empresa_id in EMPRESAS_SIN_MARCA:
+def regla_tipo(tipo: str, empresa_id: str, version: int = VERSION_CONTRATO) -> ReglaTipo | None:
+    """Regla del tipo para esa empresa y versión; ``None`` si el tipo es desconocido."""
+    tabla = TIPOS_POR_VERSION.get(version, {})
+    if tipo == "IDENTIDAD_EMPRESA" and empresa_id in EMPRESAS_SIN_MARCA and tipo in tabla:
         return _REGLA_SIN_MARCA
-    return TIPOS.get(tipo)
+    return tabla.get(tipo)
+
+
+def identidad_evidencia(documento: str, rol: str, huella: str) -> str:
+    """Identidad v2 de un binario de evidencia de documento.
+
+    ``evidencia/<sha256(documento)>/<rol>/<sha256 del contenido>``. El
+    ``documento`` es el ``archivo`` real, que puede tener mayúsculas, espacios
+    o ``::pagina=NNNN`` y por eso no es identidad. El hash de contenido
+    distingue varias fotos del mismo documento (relecturas).
+    """
+    if rol not in ROLES_EVIDENCIA_DOCUMENTO:
+        raise ValueError(f"rol de evidencia {rol!r}")
+    if not isinstance(documento, str) or not documento.strip():
+        raise ValueError("documento vacío")
+    if not isinstance(huella, str) or not _PATRON_HUELLA.fullmatch(huella):
+        raise ValueError("huella no verificable")
+    return f"evidencia/{hashlib.sha256(documento.encode('utf-8')).hexdigest()}/{rol}/{huella[7:]}"
+
 
 # Campos que pertenecen a la publicación o a la custodia: no pueden aparecer
 # en el descriptor ni en los metadatos de sus fuentes.
@@ -102,6 +170,7 @@ _PATRON_GENERACION = re.compile(r"^[a-z0-9][a-z0-9._-]{0,127}$")
 _PATRON_CLAVE_META = re.compile(r"^[a-z][a-z0-9_]{0,63}$")
 _PATRON_HUELLA = re.compile(r"^sha256:[0-9a-f]{64}$")
 _PATRON_RUTA_ABSOLUTA = re.compile(r"^(?:[A-Za-z]:[\\/]|[\\/]|file:|[a-z][a-z0-9+.-]*://)")
+_CONTROL = re.compile(r"[\x00-\x1f\x7f]")
 _MAX_IDENTIDAD = 256
 _MAX_VALOR_META = 512
 
@@ -112,6 +181,8 @@ CODIGOS = frozenset({
     "OBLIGATORIEDAD_INCONSISTENTE", "FUENTE_OBLIGATORIA_AUSENTE", "INVENTARIO_INCOMPLETO",
     "INVENTARIO_INCONSISTENTE", "REFERENCIA_INCONSISTENTE", "REFERENCIA_ENTRE_EMPRESAS",
     "DESCRIPTOR_AUTODECLARADO", "DESCRIPTOR_ALTERADO",
+    # v2
+    "ROL_INVALIDO", "EVIDENCIA_NO_VERIFICABLE", "DEPENDENCIA_INCOMPLETA",
 })
 
 
@@ -153,6 +224,10 @@ class ObjetoFuente:
     metadatos: Mapping[str, Any] = field(default_factory=dict)
     referencias: tuple[Referencia, ...] = ()
     relacion: str = RELACION_PROPIA
+    # v2: rol (DECISIONES_HUMANAS, CATALOGO, EVIDENCIA_DOCUMENTAL) y, para la
+    # evidencia de documento, el ``archivo`` real al que pertenece.
+    rol: str | None = None
+    documento: str | None = None
 
 
 @dataclass(frozen=True)
@@ -171,6 +246,8 @@ class Inventario:
     # Número exacto de objetos por tipo según la enumeración oficial del llamador.
     declaracion: Mapping[str, int]
     objetos: tuple[ObjetoFuente, ...]
+    # v2: {derivación: {ranura: identidad de un objeto del inventario}}.
+    derivaciones: Mapping[str, Mapping[str, str]] = field(default_factory=dict)
 
 
 # ------------------------------------------------------------------- salida
@@ -182,6 +259,7 @@ class DescriptorPreparado:
     fuentes: tuple[ObjetoFuente, ...]
     huella_descriptor: str
     version_contrato: int = VERSION_CONTRATO
+    derivaciones: tuple[tuple[str, tuple[tuple[str, str], ...]], ...] = ()
 
     @property
     def completitud(self) -> str:
@@ -193,8 +271,16 @@ class DescriptorPreparado:
                 return objeto
         raise KeyError(identidad)
 
+    def derivacion(self, nombre: str) -> dict[str, ObjetoFuente]:
+        """Objetos originales de los que se deriva ``nombre`` (p. ej. ASIGNACIONES)."""
+        for clave, ranuras in self.derivaciones:
+            if clave == nombre:
+                return {ranura: self.fuente(identidad) for ranura, identidad in ranuras}
+        raise KeyError(nombre)
+
     def como_dict(self) -> dict:
-        cuerpo = _cuerpo(self.empresa_id, self.generacion, self.declaracion, self.fuentes)
+        cuerpo = _cuerpo(self.version_contrato, self.empresa_id, self.generacion, self.declaracion, self.fuentes,
+                         self.derivaciones)
         cuerpo["huella_descriptor"] = self.huella_descriptor
         return cuerpo
 
@@ -209,28 +295,35 @@ def _huella(datos: bytes) -> str:
     return "sha256:" + hashlib.sha256(datos).hexdigest()
 
 
-def _fuente_dict(o: ObjetoFuente) -> dict:
-    return {
+def _fuente_dict(o: ObjetoFuente, version: int) -> dict:
+    salida = {
         "identidad": o.identidad, "tipo": o.tipo, "huella": o.huella, "tamano": o.tamano,
         "empresa_id": o.empresa_id, "relacion": o.relacion, "obligatorio": o.obligatorio,
         "metadatos": dict(sorted(o.metadatos.items())),
         "referencias": [{"identidad": r.identidad, "huella": r.huella, "empresa_id": r.empresa_id}
                         for r in o.referencias],
     }
+    if version >= 2:
+        salida["rol"] = o.rol
+        salida["documento"] = o.documento
+    return salida
 
 
-def _cuerpo(empresa_id, generacion, declaracion, fuentes) -> dict:
+def _cuerpo(version, empresa_id, generacion, declaracion, fuentes, derivaciones) -> dict:
     tamanos = [o.tamano for o in fuentes if o.tamano is not None]
-    return {
-        "esquema": ESQUEMA, "version_contrato": VERSION_CONTRATO, "clase": CLASE,
+    cuerpo = {
+        "esquema": ESQUEMA, "version_contrato": version, "clase": CLASE,
         "completitud": COMPLETITUD, "algoritmo_huella": ALGORITMO_HUELLA, "empresa_id": empresa_id,
         "generacion": {"id": generacion.generacion_id, "secuencia": generacion.secuencia,
                        "previa_id": generacion.previa_id},
         "declaracion": dict(declaracion),
-        "fuentes": [_fuente_dict(o) for o in fuentes],
+        "fuentes": [_fuente_dict(o, version) for o in fuentes],
         "resumen": {"objetos": len(fuentes), "obligatorios": sum(o.obligatorio for o in fuentes),
                     "bytes_declarados": sum(tamanos), "tamanos_desconocidos": len(fuentes) - len(tamanos)},
     }
+    if version >= 2:
+        cuerpo["derivaciones"] = {nombre: dict(ranuras) for nombre, ranuras in derivaciones}
+    return cuerpo
 
 
 # -------------------------------------------------------------- validación
@@ -282,7 +375,40 @@ def _validar_metadatos(o: ObjetoFuente, problemas: list) -> None:
                 problemas.append(Problema("CAMPO_PROHIBIDO", o.identidad, f"{clave}: ruta absoluta o URL"))
 
 
-def _validar_objeto(o, empresa_id: str, problemas: list) -> bool:
+def _validar_rol_v2(o: ObjetoFuente, problemas: list) -> None:
+    """Rol y documento v2. Supone identidad ya válida."""
+    ident, rol, doc = o.identidad, o.rol, o.documento
+    if o.tipo == "DECISIONES_HUMANAS":
+        if rol not in ROLES_DECISIONES_HUMANAS:
+            problemas.append(Problema("ROL_INVALIDO", ident, f"rol {rol!r}; admitidos {sorted(ROLES_DECISIONES_HUMANAS)}"))
+    elif o.tipo == "CATALOGO":
+        if not isinstance(rol, str) or not _PATRON_ROL_CATALOGO.fullmatch(rol):
+            problemas.append(Problema("ROL_INVALIDO", ident, f"catálogo sin nombre válido {rol!r}"))
+    elif o.tipo == "EVIDENCIA_DOCUMENTAL":
+        if rol in ROLES_EVIDENCIA_INDICE:
+            if ident != ROLES_EVIDENCIA_INDICE[rol]:
+                problemas.append(Problema("EVIDENCIA_NO_VERIFICABLE", ident,
+                                          f"el índice {rol} tiene identidad fija {ROLES_EVIDENCIA_INDICE[rol]!r}"))
+            if doc is not None:
+                problemas.append(Problema("FORMATO_INVALIDO", ident, "un índice de evidencia no tiene documento"))
+        elif rol in ROLES_EVIDENCIA_DOCUMENTO:
+            if (not isinstance(doc, str) or not doc.strip() or doc != doc.strip() or len(doc) > _MAX_VALOR_META
+                    or _CONTROL.search(doc) or _PATRON_RUTA_ABSOLUTA.match(doc)):
+                problemas.append(Problema("EVIDENCIA_NO_VERIFICABLE", ident,
+                                          f"documento ausente o inválido {str(doc)[:80]!r}"))
+            elif isinstance(o.huella, str) and _PATRON_HUELLA.fullmatch(o.huella) \
+                    and ident != identidad_evidencia(doc, rol, o.huella):
+                problemas.append(Problema("EVIDENCIA_NO_VERIFICABLE", ident,
+                                          "identidad distinta de evidencia/<sha256(documento)>/<rol>/<sha256 contenido>"))
+        else:
+            problemas.append(Problema("ROL_INVALIDO", ident, f"rol de evidencia {rol!r}"))
+    elif rol is not None:
+        problemas.append(Problema("ROL_INVALIDO", ident, f"{o.tipo} no lleva rol"))
+    if o.tipo != "EVIDENCIA_DOCUMENTAL" and doc is not None:
+        problemas.append(Problema("FORMATO_INVALIDO", ident, "sólo la evidencia lleva documento"))
+
+
+def _validar_objeto(o, empresa_id: str, version: int, problemas: list) -> bool:
     """Valida un objeto aislado. Devuelve False si no puede indexarse por identidad."""
     if not isinstance(o, ObjetoFuente):
         problemas.append(Problema("FORMATO_INVALIDO", "", f"objeto de tipo {type(o).__name__}"))
@@ -292,9 +418,12 @@ def _validar_objeto(o, empresa_id: str, problemas: list) -> bool:
         problemas.append(Problema("IDENTIDAD_INVALIDA", str(ident)[:80],
                                   "identidad lógica: minúsculas, segmentos con '/', sin rutas locales"))
         return False
-    regla = regla_tipo(o.tipo, empresa_id) if isinstance(o.tipo, str) else None
+    regla = regla_tipo(o.tipo, empresa_id, version) if isinstance(o.tipo, str) else None
     if regla is None:
-        problemas.append(Problema("TIPO_DESCONOCIDO", ident, f"tipo {o.tipo!r}"))
+        detalle = f"tipo {o.tipo!r}"
+        if o.tipo == "ASIGNACIONES" and version >= 2:
+            detalle += ": sin almacén propio; declarar la derivación ASIGNACIONES"
+        problemas.append(Problema("TIPO_DESCONOCIDO", ident, detalle))
     elif regla is _REGLA_SIN_MARCA:
         problemas.append(Problema("EMPRESA_INCORRECTA", ident,
                                   "esta empresa opera sin marca; una marca indica custodia ajena"))
@@ -325,6 +454,11 @@ def _validar_objeto(o, empresa_id: str, problemas: list) -> bool:
     _validar_metadatos(o, problemas)
     if not isinstance(o.referencias, tuple) or not all(isinstance(r, Referencia) for r in o.referencias):
         problemas.append(Problema("FORMATO_INVALIDO", ident, "referencias debe ser tupla de Referencia"))
+    if version >= 2:
+        if regla is not None:
+            _validar_rol_v2(o, problemas)
+    elif o.rol is not None or o.documento is not None:
+        problemas.append(Problema("FORMATO_INVALIDO", ident, "rol y documento no existen en el contrato v1"))
     return True
 
 
@@ -357,6 +491,60 @@ def _validar_referencias(o: ObjetoFuente, indice: Mapping[str, ObjetoFuente], em
                                       "fuente obligatoria depende de un objeto opcional"))
 
 
+def _validar_roles_agregados_v2(indice: Mapping[str, ObjetoFuente], problemas: list) -> None:
+    """Unicidad de roles dentro del inventario v2."""
+    por_rol: dict[tuple[str, str], list[str]] = {}
+    for o in indice.values():
+        if o.tipo in ("DECISIONES_HUMANAS", "CATALOGO") or (o.tipo == "EVIDENCIA_DOCUMENTAL" and o.rol in ROLES_EVIDENCIA_INDICE):
+            if isinstance(o.rol, str):
+                por_rol.setdefault((o.tipo, o.rol), []).append(o.identidad)
+    for (tipo, rol), idents in por_rol.items():
+        if len(idents) > 1:
+            problemas.append(Problema("IDENTIDAD_CONTRADICTORIA", f"{tipo}:{rol}",
+                                      f"rol repetido en {sorted(idents)}"))
+    presentes = {rol for (tipo, rol) in por_rol if tipo == "DECISIONES_HUMANAS"}
+    for rol in sorted(ROLES_DECISIONES_HUMANAS - presentes):
+        problemas.append(Problema("FUENTE_OBLIGATORIA_AUSENTE", f"DECISIONES_HUMANAS:{rol}",
+                                  "registro humano obligatorio ausente"))
+
+
+def _validar_derivaciones(derivaciones, indice: Mapping[str, ObjetoFuente], empresa_id: str, version: int,
+                          problemas: list) -> None:
+    if version < 2:
+        if derivaciones:
+            problemas.append(Problema("FORMATO_INVALIDO", "derivaciones", "no existen en el contrato v1"))
+        return
+    if not isinstance(derivaciones, Mapping):
+        problemas.append(Problema("FORMATO_INVALIDO", "derivaciones", "debe ser un mapa"))
+        return
+    for nombre in derivaciones:
+        if nombre not in DERIVACIONES:
+            problemas.append(Problema("TIPO_DESCONOCIDO", str(nombre), "derivación desconocida"))
+    for nombre, ranuras_exigidas in DERIVACIONES.items():
+        declaradas = derivaciones.get(nombre)
+        if declaradas is None:
+            problemas.append(Problema("DEPENDENCIA_INCOMPLETA", nombre, "derivación no declarada; la omisión no es vacío"))
+            continue
+        if not isinstance(declaradas, Mapping):
+            problemas.append(Problema("FORMATO_INVALIDO", nombre, "ranuras debe ser un mapa"))
+            continue
+        for ranura in declaradas:
+            if ranura not in ranuras_exigidas:
+                problemas.append(Problema("FORMATO_INVALIDO", f"{nombre}.{ranura}", "ranura desconocida"))
+        for ranura, (tipo, rol) in ranuras_exigidas.items():
+            sujeto = f"{nombre}.{ranura}"
+            identidad = declaradas.get(ranura)
+            destino = indice.get(identidad) if isinstance(identidad, str) else None
+            if destino is None:
+                problemas.append(Problema("DEPENDENCIA_INCOMPLETA", sujeto,
+                                          f"fuente original {identidad!r} ausente del inventario"))
+            elif destino.tipo != tipo or (rol is not None and destino.rol != rol):
+                problemas.append(Problema("DEPENDENCIA_INCOMPLETA", sujeto,
+                                          f"se esperaba {tipo}{f' rol {rol}' if rol else ''}, no {destino.tipo} {destino.rol!r}"))
+            elif destino.relacion != RELACION_PROPIA or destino.empresa_id != empresa_id:
+                problemas.append(Problema("EMPRESA_INCORRECTA", sujeto, "la fuente original no es de la empresa"))
+
+
 def _validar_generacion(g, problemas: list) -> None:
     if not isinstance(g, GeneracionSolicitada):
         problemas.append(Problema("GENERACION_INVALIDA", "", "generación ausente"))
@@ -378,15 +566,17 @@ def _validar_generacion(g, problemas: list) -> None:
                                   "secuencia > 1 exige generación previa"))
 
 
-def _validar_declaracion(declaracion, conteo: Mapping[str, int], empresa_id: str, problemas: list) -> None:
+def _validar_declaracion(declaracion, conteo: Mapping[str, int], empresa_id: str, version: int,
+                         problemas: list) -> None:
+    tabla = TIPOS_POR_VERSION[version]
     if not isinstance(declaracion, Mapping):
         problemas.append(Problema("INVENTARIO_INCOMPLETO", "", "sin declaración de tipos"))
         return
     for tipo in declaracion:
-        if tipo not in TIPOS:
+        if tipo not in tabla:
             problemas.append(Problema("TIPO_DESCONOCIDO", str(tipo), "tipo declarado desconocido"))
-    for tipo in TIPOS:
-        regla = regla_tipo(tipo, empresa_id)
+    for tipo in tabla:
+        regla = regla_tipo(tipo, empresa_id, version)
         presentes = conteo.get(tipo, 0)
         if tipo not in declaracion:
             codigo = "FUENTE_OBLIGATORIA_AUSENTE" if regla.obligatorio else "INVENTARIO_INCOMPLETO"
@@ -411,16 +601,19 @@ def _validar_declaracion(declaracion, conteo: Mapping[str, int], empresa_id: str
 def construir_descriptor(inventario: Inventario) -> DescriptorPreparado:
     """Valida el inventario completo y devuelve el descriptor preparado.
 
-    Rechaza con ``ErrorDescriptor`` cualquier problema; nunca devuelve un
-    descriptor parcial. El orden de entrada de objetos, referencias,
-    metadatos y declaración no altera el resultado.
+    Usa las reglas de ``inventario.version_contrato`` (v2 vigente; v1 sólo
+    para descriptores existentes). Rechaza con ``ErrorDescriptor`` cualquier
+    problema; nunca devuelve un descriptor parcial. El orden de entrada de
+    objetos, referencias, metadatos, declaración y derivaciones no altera el
+    resultado.
     """
     problemas: list[Problema] = []
     if not isinstance(inventario, Inventario):
         raise ErrorDescriptor([Problema("FORMATO_INVALIDO", "", "se esperaba Inventario")])
-    if inventario.version_contrato not in VERSIONES_COMPATIBLES or not _es_entero(inventario.version_contrato):
+    version = inventario.version_contrato
+    if not _es_entero(version) or version not in VERSIONES_COMPATIBLES:
         raise ErrorDescriptor([Problema("VERSION_INCOMPATIBLE", "inventario",
-                                        f"versión {inventario.version_contrato!r}; admitidas {sorted(VERSIONES_COMPATIBLES)}")])
+                                        f"versión {version!r}; admitidas {sorted(VERSIONES_COMPATIBLES)}")])
     empresa_id = inventario.empresa_id
     if empresa_id is None or (isinstance(empresa_id, str) and not empresa_id.strip()):
         raise ErrorDescriptor([Problema("EMPRESA_AUSENTE", "inventario", "empresa no indicada")])
@@ -433,10 +626,11 @@ def construir_descriptor(inventario: Inventario) -> DescriptorPreparado:
     if not isinstance(inventario.objetos, (tuple, list)):
         raise ErrorDescriptor([Problema("FORMATO_INVALIDO", "inventario", "objetos debe ser una secuencia")])
 
+    tabla = TIPOS_POR_VERSION[version]
     indice: dict[str, ObjetoFuente] = {}
     conteo: dict[str, int] = {}
     for o in inventario.objetos:
-        if not _validar_objeto(o, empresa_id, problemas):
+        if not _validar_objeto(o, empresa_id, version, problemas):
             continue
         previo = indice.get(o.identidad)
         if previo is not None:
@@ -444,12 +638,15 @@ def construir_descriptor(inventario: Inventario) -> DescriptorPreparado:
             problemas.append(Problema(codigo, o.identidad, "identidad repetida en el inventario"))
             continue
         indice[o.identidad] = o
-        if isinstance(o.tipo, str) and o.tipo in TIPOS:
+        if isinstance(o.tipo, str) and o.tipo in tabla:
             conteo[o.tipo] = conteo.get(o.tipo, 0) + 1
     for o in indice.values():
         if isinstance(o.referencias, tuple):
             _validar_referencias(o, indice, empresa_id, problemas)
-    _validar_declaracion(inventario.declaracion, conteo, empresa_id, problemas)
+    if version >= 2:
+        _validar_roles_agregados_v2(indice, problemas)
+    _validar_derivaciones(inventario.derivaciones, indice, empresa_id, version, problemas)
+    _validar_declaracion(inventario.declaracion, conteo, empresa_id, version, problemas)
     if problemas:
         raise ErrorDescriptor(problemas)
 
@@ -458,13 +655,16 @@ def construir_descriptor(inventario: Inventario) -> DescriptorPreparado:
             identidad=o.identidad, tipo=o.tipo, huella=o.huella, empresa_id=o.empresa_id,
             obligatorio=o.obligatorio, tamano=o.tamano, metadatos=dict(sorted(o.metadatos.items())),
             referencias=tuple(sorted(set(o.referencias), key=lambda r: (r.identidad, r.huella))),
-            relacion=o.relacion)
+            relacion=o.relacion, rol=o.rol, documento=o.documento)
         for o in sorted(indice.values(), key=lambda x: x.identidad))
     declaracion = tuple(sorted((t, int(n)) for t, n in inventario.declaracion.items()))
-    cuerpo = _cuerpo(empresa_id, inventario.generacion, declaracion, fuentes)
+    derivaciones = tuple(sorted((nombre, tuple(sorted(ranuras.items())))
+                                for nombre, ranuras in (inventario.derivaciones or {}).items()))
+    cuerpo = _cuerpo(version, empresa_id, inventario.generacion, declaracion, fuentes, derivaciones)
     return DescriptorPreparado(empresa_id=empresa_id, generacion=inventario.generacion,
                                declaracion=declaracion, fuentes=fuentes,
-                               huella_descriptor=_huella(_canonico(cuerpo)))
+                               huella_descriptor=_huella(_canonico(cuerpo)), version_contrato=version,
+                               derivaciones=derivaciones)
 
 
 def serializar_descriptor(descriptor: DescriptorPreparado) -> bytes:
@@ -472,11 +672,17 @@ def serializar_descriptor(descriptor: DescriptorPreparado) -> bytes:
     return _canonico(descriptor.como_dict())
 
 
+_CAMPOS_V1 = frozenset({"esquema", "version_contrato", "clase", "completitud", "algoritmo_huella", "empresa_id",
+                        "generacion", "declaracion", "fuentes", "resumen", "huella_descriptor"})
+_CAMPOS_POR_VERSION = {1: _CAMPOS_V1, 2: _CAMPOS_V1 | {"derivaciones"}}
+
+
 def leer_descriptor(datos: bytes) -> DescriptorPreparado:
-    """Lee y **revalida por completo** un descriptor serializado.
+    """Lee y **revalida por completo** un descriptor serializado, con las reglas de su versión.
 
     Rechaza esquemas o versiones no admitidas, cualquier pretensión de
-    completitud o campo de publicación/custodia, y contenido alterado.
+    completitud o campo de publicación/custodia, y contenido alterado. Un
+    descriptor v1 se devuelve con ``version_contrato == 1``.
     """
     try:
         bruto = json.loads(datos.decode("utf-8"))
@@ -496,8 +702,7 @@ def leer_descriptor(datos: bytes) -> DescriptorPreparado:
                                         "sólo el protocolo oficial de publicación confirma completitud "
                                         f"(clase={bruto.get('clase')!r}, completitud={bruto.get('completitud')!r}, "
                                         f"campos={reservados})")])
-    esperadas = {"esquema", "version_contrato", "clase", "completitud", "algoritmo_huella", "empresa_id",
-                 "generacion", "declaracion", "fuentes", "resumen", "huella_descriptor"}
+    esperadas = _CAMPOS_POR_VERSION[version]
     if set(bruto) != esperadas or bruto.get("algoritmo_huella") != ALGORITMO_HUELLA:
         raise ErrorDescriptor([Problema("FORMATO_INVALIDO", "descriptor",
                                         f"campos {sorted(set(bruto) ^ esperadas)}")])
@@ -513,9 +718,12 @@ def leer_descriptor(datos: bytes) -> DescriptorPreparado:
                     obligatorio=f["obligatorio"], tamano=f["tamano"], metadatos=dict(f["metadatos"]),
                     referencias=tuple(Referencia(r["identidad"], r["huella"], r["empresa_id"])
                                       for r in f["referencias"]),
-                    relacion=f["relacion"])
-                for f in bruto["fuentes"]))
-    except (KeyError, TypeError, ValueError) as exc:
+                    relacion=f["relacion"],
+                    rol=f["rol"] if version >= 2 else None,
+                    documento=f["documento"] if version >= 2 else None)
+                for f in bruto["fuentes"]),
+            derivaciones={n: dict(r) for n, r in bruto["derivaciones"].items()} if version >= 2 else {})
+    except (KeyError, TypeError, ValueError, AttributeError) as exc:
         raise ErrorDescriptor([Problema("FORMATO_INVALIDO", "descriptor", f"estructura: {exc!r}")]) from None
     descriptor = construir_descriptor(inventario)
     if descriptor.huella_descriptor != bruto["huella_descriptor"] or serializar_descriptor(descriptor) != datos:

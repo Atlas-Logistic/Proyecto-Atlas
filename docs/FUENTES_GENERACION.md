@@ -40,21 +40,25 @@ bastan:
 Por eso todas las fuentes mutables requieren la frontera común. `integracion` dice sólo si,
 **además**, falta algo propio de la fuente.
 
-## Matriz resumida
+## Matriz resumida (descriptor v2)
+
+Estado tras el descriptor v2. Las decisiones humanas y las asignaciones ya se representan
+sin bloqueo. La evidencia queda representada en el contrato, pero su integración sigue
+bloqueada por razones operacionales: custodia, purga y límite de Cloud.
 
 | Tipo descriptor | Fuente real (ruta relativa a la raíz de la empresa) | Identidad propuesta | Mapeo | Integración | Custodia actual |
 | --- | --- | --- | --- | --- | --- |
 | `IDENTIDAD_EMPRESA` | `catalogos_privados/empresa_identidad.json` (MBT: no existe) | `empresa/identidad` | RESUELTO | LISTA_TRAS_FRONTERA | en semilla |
 | `DATASET_OPERACIONAL` | `operacion/actual/analisis_completo_guias.csv` | `operacion/dataset` | RESUELTO | LISTA_TRAS_FRONTERA | en semilla |
 | `LEDGER_DECISIONES` | `operacion/actual/decisiones_aplicadas.json` | `operacion/ledger` | RESUELTO | LISTA_TRAS_FRONTERA | en semilla |
-| `DECISIONES_HUMANAS` | `operacion/actual/acciones_operacionales.json` **y** `operacion/actual/operaciones_conversacionales.json` | `operacion/acciones-operacionales`, `operacion/operaciones-conversacionales` | **AMBIGUO** | **BLOQUEADA** | en semilla |
+| `DECISIONES_HUMANAS` | `operacion/actual/acciones_operacionales.json` **y** `operacion/actual/operaciones_conversacionales.json` | `operacion/acciones-operacionales` (rol `acciones_operacionales`), `operacion/operaciones-conversacionales` (rol `operaciones_conversacionales`); exactamente 2 | RESUELTO | LISTA_TRAS_FRONTERA | en semilla |
 | `BANDEJA_REVISION` | `operacion/actual/decisiones_pendientes.json` | `operacion/bandeja` | RESUELTO | LISTA_TRAS_FRONTERA | en semilla |
 | `AGRUPACIONES_CONFIRMADAS` | `operacion/actual/agrupaciones_viaje.json` | `operacion/agrupaciones` | RESUELTO | LISTA_TRAS_FRONTERA | en semilla |
 | `REGISTRO_INVESTIGACION` | `operacion/actual/documentos_en_investigacion.json` | `operacion/investigacion` | RESUELTO | LISTA_TRAS_FRONTERA (depende de evidencia) | en semilla |
 | `CUARENTENA` | — (estado `EN_INVESTIGACION` dentro del registro de investigación) | — | SIN_ALMACEN_PROPIO | DECLARAR_CERO | — |
-| `EVIDENCIA_DOCUMENTAL` | binarios en `operacion/{entradas/<lote>, mobile/envios/<envio_id>, evidencia_pdf, evidencia_orientada, evidencia_resuelta/<entrada>}`; `operacion/relecturas_documentales.json`; `operacion/evidencia_pdf/evidencias_adicionales.json` | `evidencia/<sha256(archivo)>/<rol>`, `evidencia/registro-relecturas`, `evidencia/pdf/evidencias-adicionales` | RESUELTO | **BLOQUEADA** | **fuera de semilla** |
-| `CATALOGO` | `catalogos_privados/{choferes, vehiculos, clientes, empresas, destinos_maestros, plantas, rutas, obras_destinos, incidencias_documentales}.json`; global `catalogos_privados/geografia_chile.json` del repositorio | `catalogos/<nombre>`, `global/geografia-chile` | RESUELTO | LISTA_TRAS_FRONTERA | en semilla (geografía: versionada en código) |
-| `ASIGNACIONES` | — (dentro de `vehiculos.json`, más `choferes.json` y el ledger) | — | SIN_ALMACEN_PROPIO | **BLOQUEADA** | — |
+| `EVIDENCIA_DOCUMENTAL` | binarios en `operacion/{entradas/<lote>, mobile/envios/<envio_id>, evidencia_pdf, evidencia_orientada, evidencia_resuelta/<entrada>}`; `operacion/relecturas_documentales.json`; `operacion/evidencia_pdf/evidencias_adicionales.json` | `evidencia/<sha256(documento)>/<rol>/<sha256 contenido>` con rol `original`/`orientada`/`pdf`/`pdf-pagina`/`pdf-texto`; `evidencia/registro-relecturas`, `evidencia/pdf/evidencias-adicionales` | RESUELTO | **BLOQUEADA** (operacional) | **fuera de semilla** |
+| `CATALOGO` | `catalogos_privados/{choferes, vehiculos, clientes, empresas, destinos_maestros, plantas, rutas, obras_destinos, incidencias_documentales}.json`; global `catalogos_privados/geografia_chile.json` del repositorio | `catalogos/<nombre>` (rol = nombre), `global/geografia-chile` | RESUELTO | LISTA_TRAS_FRONTERA | en semilla (geografía: versionada en código) |
+| `ASIGNACIONES` (derivación v2, no tipo) | — (dentro de `vehiculos.json`, más `choferes.json` y el ledger) | sin objeto: `derivaciones.ASIGNACIONES = {vehiculos, choferes, ledger}` | SIN_ALMACEN_PROPIO | DEPENDENCIAS_DECLARADAS | — |
 
 ## Detalle por fuente
 
@@ -101,8 +105,9 @@ ausencia frente a vacío hoy · riesgo.
   * `operacion/actual/operaciones_conversacionales.json`. Es el ledger de instrucciones
     humanas chofer-vehículo (`operaciones_conversacionales._ledger_ruta`, `:44`). Si no
     existe, se trata como vacío (`_leer_ledger`, `:48`). Además escribe `vehiculos.json`.
-* **BLOQUEADA:** el descriptor exige exactamente 1 `DECISIONES_HUMANAS` y hay dos registros
-  reales. Las decisiones aplicadas viven además en el ledger. Ver «Decisiones pendientes».
+* **Resuelto en v2:** `DECISIONES_HUMANAS` admite exactamente estos dos objetos originales,
+  obligatorios, con roles `acciones_operacionales` y `operaciones_conversacionales`. No se
+  fusionan. Las decisiones aplicadas siguen viviendo en el ledger.
 
 ### Revisión y pendientes
 * `operacion/actual/decisiones_pendientes.json`. Es un artefacto derivado y regenerable; su
@@ -157,11 +162,12 @@ ausencia frente a vacío hoy · riesgo.
   * `registrar_relectura` (`:116`) y los movimientos y purgas `mover_evidencia_resuelta_sin_revision_pendiente`
     (`:367`) y `purgar_evidencia_resuelta_vencida` (`:430`), con retención de 30 días.
 * Identidad: el `archivo` real no es una identidad válida, por mayúsculas, espacios o `<pdf>::pagina=NNNN`
-  (`:` está prohibido en el Motor y en `rutaEstadoValida` de Cloud). Se propone
-  `evidencia/<sha256(archivo)>/<rol>` (`identidad_evidencia`), con el `archivo` original en
-  metadatos. Roles: `activa-mobile`, `activa-desktop`, `derivada-pdf`, `texto-pdf`,
-  `orientada`, `resuelta`.
-* **BLOQUEADA:**
+  (`:` está prohibido en el Motor y en `rutaEstadoValida` de Cloud). En v2 la identidad es
+  `evidencia/<sha256(documento)>/<rol>/<sha256 contenido>` (`identidad_evidencia`), con el
+  `archivo` original en el campo `documento`. Roles documentales: `original`, `orientada`,
+  `pdf`, `pdf-pagina` y `pdf-texto`. La ubicación (Mobile, entradas, resuelta) no forma parte
+  de la identidad, y el hash de contenido distingue las relecturas.
+* **BLOQUEADA** (operacional; la representación ya está resuelta en v2):
   * los binarios están fuera de la semilla de custodia y Desktop los escribe fuera del hook;
   * el inventario es derivado: dataset (`archivo`, `evidencia_documentos_relacionados`) más
     relecturas, y su resolución cambia con movimientos y purgas no coordinados con una frontera;
@@ -193,8 +199,10 @@ ausencia frente a vacío hoy · riesgo.
   `FLAG_ASIGNACION_VARIABLE` de `choferes.json` y las decisiones del ledger, y convierte
   cualquier error de lectura en vacío.
 * `cloud_asignaciones_vehiculo` publica una **derivación** hacia Cloud; no es fuente.
-* **BLOQUEADA:** el descriptor exige al menos un objeto `ASIGNACIONES` con identidad propia,
-  pero la fuente real está dentro de `vehiculos.json`. No se fabrica un objeto equivalente.
+* **Resuelto en v2:** `ASIGNACIONES` deja de ser un tipo. Es la derivación
+  `derivaciones.ASIGNACIONES = {vehiculos, choferes, ledger}`, que apunta a los objetos
+  originales del mismo inventario sin copiarlos y nunca a `DECISIONES_HUMANAS`. No se fabrica
+  ningún objeto.
 
 ## Archivos reales fuera de la tabla de tipos v1
 
@@ -220,32 +228,28 @@ con custodia activa.
 
 ## Listas para integración y bloqueadas
 
-**Listas, a la espera de la frontera común:** identidad empresarial (con la excepción MBT),
-dataset, ledger, bandeja, agrupaciones, registro de investigación (condicionado a la
-evidencia), catálogos y geografía global. `CUARENTENA` se declara 0.
+**Listas, a la espera de la frontera común:**
+* identidad empresarial (con la excepción MBT), dataset, ledger y bandeja;
+* los **dos registros de decisiones humanas** (v2);
+* agrupaciones y registro de investigación (condicionado a la evidencia);
+* catálogos con rol y geografía global.
 
-**Bloqueadas:**
-1. `DECISIONES_HUMANAS`: hay dos registros humanos reales para un tipo de cardinalidad 1.
-2. `ASIGNACIONES`: no tiene almacén propio; vive en `vehiculos.json`.
-3. `EVIDENCIA_DOCUMENTAL`: está fuera de custodia, es derivada, se mueve y se purga, y choca
-   con el límite de 1000 objetos de Cloud.
+`CUARENTENA` se declara 0. `ASIGNACIONES` se declara como derivación v2.
 
-Las pruebas `test_contrato_actual_no_produce_inventario_completo` (empresa normal y MBT) e
-`test_incluir_ambos_registros_humanos_viola_la_cardinalidad` demuestran que, con el contrato
-actual, el descriptor rechaza el inventario exactamente por esos tipos: no se omite nada en
-silencio.
+**Bloqueada:** la integración de `EVIDENCIA_DOCUMENTAL` (binarios, relecturas y evidencias
+adicionales). Su representación ya está resuelta en v2, pero está fuera de custodia, es
+derivada, se mueve y se purga, y choca con el límite de 1000 objetos de Cloud.
+
+`test_contrato_v2_produce_inventario_completo` (empresa normal y MBT) muestra que con v2 las
+fuentes del contrato forman un inventario completo sin fabricar objetos (la evidencia se
+declara 0). `test_falta_un_registro_humano` y `test_ausente_no_es_vacio` muestran que cualquier
+omisión se rechaza.
 
 ## Decisiones pendientes (no tomadas aquí)
 
-El contrato de compatibilidad (`57e5173`) no se modificó. Los bloqueos 1 y 2 son
-incompatibilidades demostradas entre la tabla de tipos v1 y las fuentes reales, pero
-resolverlas exige decidir semántica:
+Las decisiones sobre `DECISIONES_HUMANAS` y `ASIGNACIONES` se tomaron en el descriptor v2 (ver
+`docs/DESCRIPTOR_GENERACION.md`). Siguen pendientes:
 
-* `DECISIONES_HUMANAS`: cardinalidad `1..n`, o un tipo por registro, o declarar el ledger como
-  única fuente de decisiones humanas y tratar `acciones_operacionales.json` como estado de
-  publicación. Cualquiera cambia la tabla de tipos y exige subir `VERSION_CONTRATO`.
-* `ASIGNACIONES`: declararlo 0 con la regla «contenidas en `CATALOGO` vehículos», o eliminar el
-  tipo. Ambas cambian la tabla.
 * Evidencia: la regla de inventario (qué binarios por documento, cuáles en `evidencia_resuelta`,
   qué hacer con `PURGADA`), cómo entran a custodia los binarios de Desktop, y el límite de 1000
   objetos de Cloud.

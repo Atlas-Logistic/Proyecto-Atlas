@@ -15,8 +15,9 @@ la fuente.
 """
 from __future__ import annotations
 
-import hashlib
 from dataclasses import dataclass
+
+from atlas_core import descriptor_generacion as _dg
 
 # --------------------------------------------------------------- estados
 # Mapeo: qué tan bien se sabe cuál es la fuente real.
@@ -30,7 +31,10 @@ MAPEOS = frozenset({RESUELTO, AMBIGUO, SIN_ALMACEN_PROPIO, NO_RESUELTO})
 LISTA_TRAS_FRONTERA = "LISTA_TRAS_FRONTERA"  # mapeo cerrado; sólo espera la frontera común
 DECLARAR_CERO = "DECLARAR_CERO"              # el tipo se declara 0 explícitamente
 BLOQUEADA = "BLOQUEADA"                      # requiere una decisión o un cambio antes de integrar
-INTEGRACIONES = frozenset({LISTA_TRAS_FRONTERA, DECLARAR_CERO, BLOQUEADA})
+# Sin almacén propio: el descriptor v2 la representa como derivación de sus
+# fuentes originales (descriptor_generacion.DERIVACIONES), sin objeto propio.
+DEPENDENCIAS_DECLARADAS = "DEPENDENCIAS_DECLARADAS"
+INTEGRACIONES = frozenset({LISTA_TRAS_FRONTERA, DECLARAR_CERO, BLOQUEADA, DEPENDENCIAS_DECLARADAS})
 
 # Cobertura de la custodia actual (estado_confirmado.SEMILLA_*).
 EN_SEMILLA = "EN_SEMILLA"
@@ -62,6 +66,7 @@ class FuenteReal:
     lectores_tolerantes: tuple[str, ...]  # lectores que hoy convierten ausencia/error en vacío
     riesgo: str
     bloqueo: str = ""              # motivo concreto cuando integracion == BLOQUEADA
+    rol: str | None = None         # rol del objeto en el descriptor v2, si el tipo lo exige
 
 
 _ACT = "operacion/actual/"
@@ -106,26 +111,26 @@ FUENTES: tuple[FuenteReal, ...] = (
     FuenteReal(
         "acciones_operacionales", "DECISIONES_HUMANAS", "operacion/acciones-operacionales",
         _ACT + "acciones_operacionales.json",
-        AMBIGUO, BLOQUEADA, PROPIA, EN_SEMILLA,
+        RESUELTO, LISTA_TRAS_FRONTERA, PROPIA, EN_SEMILLA,
         ("acciones_operacionales.CapaAccionesOperacionales._guardar_registro",), ("acciones_operacionales",),
         ("dataset", "ledger", "bandeja"),
-        "Inexistente se trata hoy como registro vacío (_leer_registro). Contiene previews, auditoría de "
-        "confirmaciones y marcas de publicación en curso (publicacion_iniciada/confirmacion_recuperable).",
+        "Obligatorio en v2 (rol acciones_operacionales). Inexistente se trata hoy como registro vacío "
+        "(_leer_registro). Contiene previews, auditoría de confirmaciones y marcas de publicación en curso "
+        "(publicacion_iniciada/confirmacion_recuperable).",
         ("acciones_operacionales._leer_json", "acciones_operacionales.publicacion_documental_incompleta"),
         "Alto: es a la vez registro de confirmaciones y marca de publicación documental incompleta.",
-        "DECISIONES_HUMANAS exige exactamente 1 objeto y hay dos registros humanos reales "
-        "(acciones_operacionales.json y operaciones_conversacionales.json); además las decisiones "
-        "aplicadas viven en el ledger. Requiere decidir la tabla de tipos."),
+        rol="acciones_operacionales"),
     FuenteReal(
         "operaciones_conversacionales", "DECISIONES_HUMANAS", "operacion/operaciones-conversacionales",
         _ACT + "operaciones_conversacionales.json",
-        AMBIGUO, BLOQUEADA, PROPIA, EN_SEMILLA,
+        RESUELTO, LISTA_TRAS_FRONTERA, PROPIA, EN_SEMILLA,
         ("operaciones_conversacionales",), ("operaciones_conversacionales", "catalogo_vehiculos"),
         ("catalogo_vehiculos", "catalogo_choferes"),
-        "Inexistente se trata como ledger vacío (_leer_ledger).",
+        "Obligatorio en v2 (rol operaciones_conversacionales). Inexistente se trata hoy como ledger vacío "
+        "(_leer_ledger).",
         ("operaciones_conversacionales._leer_ledger",),
         "Medio: escribe además vehiculos.json bajo otro lock (catalogo_vehiculos).",
-        "Segundo registro de instrucciones humanas (asociación chofer-vehículo); ver acciones_operacionales."),
+        rol="operaciones_conversacionales"),
     FuenteReal(
         "bandeja", "BANDEJA_REVISION", "operacion/bandeja", _ACT + "decisiones_pendientes.json",
         RESUELTO, LISTA_TRAS_FRONTERA, PROPIA, EN_SEMILLA,
@@ -159,7 +164,7 @@ FUENTES: tuple[FuenteReal, ...] = (
         "y estado_confirmado tiene una cuarentena local de custodia (LOCALAPPDATA).",
         (), "Ninguno propio."),
     FuenteReal(
-        "evidencia", "EVIDENCIA_DOCUMENTAL", "evidencia/<sha256 de archivo>/<rol>",
+        "evidencia", "EVIDENCIA_DOCUMENTAL", "evidencia/<sha256(documento)>/<rol>/<sha256 contenido>",
         "operacion/{entradas/<lote>,mobile/envios/<envio_id>,evidencia_pdf,evidencia_orientada,evidencia_resuelta/<entrada>}/<archivo>",
         RESUELTO, BLOQUEADA, PROPIA, FUERA_DE_SEMILLA,
         ("externo:Desktop atlas:procesar-imagenes (Electron)", "mobile.RepositorioEnviosMobile", "ingesta_pdf",
@@ -172,9 +177,10 @@ FUENTES: tuple[FuenteReal, ...] = (
         ("evidencia_documental.resolver_ruta_evidencia",),
         "Alto: binarios fuera de la semilla; Desktop (Electron) escribe fuera del hook de custodia; "
         "se mueven a evidencia_resuelta y se purgan a los 30 días.",
-        "Binarios fuera de custodia; inventario derivado de dataset (archivo, evidencia_documentos_relacionados) "
-        "y relecturas; 'archivo' real no es identidad válida (p. ej. '<pdf>::pagina=NNNN'); límite Cloud de "
-        "1000 objetos; movimientos/purgas sin coordinación con la frontera."),
+        "Representación resuelta en el descriptor v2 (rol documental, documento e identidad verificable). "
+        "Siguen bloqueando la integración: binarios fuera de custodia; inventario derivado de dataset "
+        "(archivo, evidencia_documentos_relacionados) y relecturas; límite Cloud de 1000 objetos; "
+        "movimientos/purgas sin coordinación con la frontera."),
     FuenteReal(
         "relecturas", "EVIDENCIA_DOCUMENTAL", "evidencia/registro-relecturas", "operacion/relecturas_documentales.json",
         RESUELTO, BLOQUEADA, PROPIA, FUERA_DE_SEMILLA,
@@ -182,7 +188,7 @@ FUENTES: tuple[FuenteReal, ...] = (
         "Inexistente o ilegible se trata como registro vacío (leer_registro_relecturas).",
         ("evidencia_documental.leer_registro_relecturas",),
         "Medio: decide cuál foto es la evidencia vigente de un documento.",
-        "Fuera de la semilla de custodia (operacion/, no operacion/actual)."),
+        "Fuera de la semilla de custodia (operacion/, no operacion/actual).", rol="registro-relecturas"),
     FuenteReal(
         "evidencias_adicionales_pdf", "EVIDENCIA_DOCUMENTAL", "evidencia/pdf/evidencias-adicionales",
         "operacion/evidencia_pdf/evidencias_adicionales.json",
@@ -191,12 +197,12 @@ FUENTES: tuple[FuenteReal, ...] = (
         "Inexistente o ilegible se trata como lista vacía (leer_evidencias_adicionales).",
         ("ingesta_pdf.leer_evidencias_adicionales",),
         "Medio: asocia páginas PDF a documentos existentes sin fila propia.",
-        "Fuera de la semilla de custodia (operacion/evidencia_pdf)."),
+        "Fuera de la semilla de custodia (operacion/evidencia_pdf).", rol="registro-evidencias-adicionales"),
     *(FuenteReal(
         f"catalogo_{nombre}", "CATALOGO", f"catalogos/{nombre.replace('_', '-')}", _CAT + f"{nombre}.json",
         RESUELTO, LISTA_TRAS_FRONTERA, PROPIA, EN_SEMILLA, escritores, locks, (),
         "Archivo de catálogo obligatorio: inexistente es ausencia (fuente_catalogos exige los requeridos).",
-        lectores, riesgo)
+        lectores, riesgo, rol=nombre)
       # Escritores verificados en atlas_core; puede haber otros no auditados.
       for nombre, escritores, locks, lectores, riesgo in (
           ("choferes", ("catalogos.cambiar_estado_chofer",), ("choferes",),
@@ -216,19 +222,21 @@ FUENTES: tuple[FuenteReal, ...] = (
         "geografia", "CATALOGO", "global/geografia-chile", "catalogos_privados/geografia_chile.json",
         RESUELTO, LISTA_TRAS_FRONTERA, GLOBAL, VERSIONADA_EN_CODIGO, ("externo:repositorio Motor",), (), (),
         "Versionado en el repositorio (atlas_core/geografia/cl.py); ausente es error de instalación.",
-        (), "Bajo: cambia con el código, no con la operación."),
+        (), "Bajo: cambia con el código, no con la operación.", rol="geografia_chile"),
     FuenteReal(
-        "asignaciones", "ASIGNACIONES", "catalogos/asignaciones", None,
-        SIN_ALMACEN_PROPIO, BLOQUEADA, PROPIA, NO_APLICA, (), (),
+        "asignaciones", "ASIGNACIONES", "derivacion/asignaciones", None,
+        SIN_ALMACEN_PROPIO, DEPENDENCIAS_DECLARADAS, PROPIA, NO_APLICA, (), (),
         ("catalogo_vehiculos", "catalogo_choferes", "ledger"),
         "No hay archivo propio: asignaciones_vigentes_con_fecha las deriva de las evidencias "
         "CONFIRMACION_HUMANA con rut_chofer_asociado de vehiculos.json, más FLAG_ASIGNACION_VARIABLE "
         "de choferes.json y decisiones del ledger.",
         ("equipo_operacional.ResolutorEquipoOperacional",),
-        "Alto: derivado de tres fuentes; cualquier error de lectura anula la regla general.",
-        "ASIGNACIONES exige al menos 1 objeto con identidad propia y la fuente real está dentro de "
-        "vehiculos.json. Requiere decidir la tabla de tipos (no inventar un objeto)."),
+        "Alto: derivado de tres fuentes; cualquier error de lectura anula la regla general. En v2 es la "
+        "derivación ASIGNACIONES (vehiculos, choferes, ledger), sin objeto propio ni confirmación humana."),
 )
+
+# Ranura de la derivación ASIGNACIONES -> clave de la fila del contrato que la satisface.
+RANURAS_ASIGNACIONES = {"vehiculos": "catalogo_vehiculos", "choferes": "catalogo_choferes", "ledger": "ledger"}
 
 # Archivos reales observados que la tabla de tipos v1 no clasifica. No se
 # incluyen en FUENTES: decidir si las precondiciones del preview los leen.
@@ -247,23 +255,9 @@ FUERA_DE_TABLA_V1: tuple[tuple[str, str], ...] = (
 _PROHIBIDO_EN_RUTA = ("..", "\\", ":")
 
 
-def identidad_evidencia(archivo: str, rol: str) -> str:
-    """Identidad lógica propuesta para un binario de evidencia.
-
-    ``documento.archivo`` real puede tener mayúsculas, espacios o
-    ``::pagina=NNNN``, que no son identidades válidas ni rutas Cloud. Se usa
-    su SHA-256 (UTF-8); el ``archivo`` original debe viajar en metadatos.
-    """
-    if not isinstance(archivo, str) or not archivo.strip():
-        raise ValueError("archivo vacío")
-    if rol not in ROLES_EVIDENCIA:
-        raise ValueError(f"rol desconocido {rol!r}")
-    return f"evidencia/{hashlib.sha256(archivo.encode('utf-8')).hexdigest()}/{rol}"
-
-
-# Ubicaciones de evidencia_documental.resolver_ruta_evidencia y derivados persistidos.
-ROLES_EVIDENCIA = frozenset({"activa-mobile", "activa-desktop", "derivada-pdf", "texto-pdf", "orientada",
-                             "resuelta"})
+# Identidad y roles de evidencia: los define el descriptor v2 (una sola fuente de verdad).
+identidad_evidencia = _dg.identidad_evidencia
+ROLES_EVIDENCIA = _dg.ROLES_EVIDENCIA_DOCUMENTO
 
 
 def fuentes_por_tipo() -> dict[str, tuple[FuenteReal, ...]]:
@@ -297,6 +291,12 @@ def validar_contrato() -> list[str]:
             problemas.append(f"{f.clave}: lista sin mapeo resuelto")
         if f.integracion == DECLARAR_CERO and (f.mapeo != SIN_ALMACEN_PROPIO or f.ruta is not None):
             problemas.append(f"{f.clave}: declarar cero exige no tener almacén propio")
+        if f.integracion == DEPENDENCIAS_DECLARADAS and (f.ruta is not None or f.tipo not in _dg.DERIVACIONES):
+            problemas.append(f"{f.clave}: dependencias declaradas exige derivación v2 sin almacén propio")
+        if f.tipo == "DECISIONES_HUMANAS" and f.rol not in _dg.ROLES_DECISIONES_HUMANAS:
+            problemas.append(f"{f.clave}: rol de decisión humana {f.rol!r}")
+        if f.tipo == "CATALOGO" and not f.rol:
+            problemas.append(f"{f.clave}: catálogo sin rol")
         if not f.ausencia_vs_vacio:
             problemas.append(f"{f.clave}: sin regla ausencia/vacío")
         for d in f.dependencias:

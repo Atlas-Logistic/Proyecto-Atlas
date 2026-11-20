@@ -13,7 +13,7 @@ import pytest
 
 from atlas_core import descriptor_generacion as dg
 from atlas_core.descriptor_generacion import (
-    COMPLETITUD, TIPOS, ErrorDescriptor, GeneracionSolicitada, Inventario, ObjetoFuente, Referencia,
+    COMPLETITUD, TIPOS_V1, ErrorDescriptor, GeneracionSolicitada, Inventario, ObjetoFuente, Referencia,
     construir_descriptor, huella_contenido, leer_descriptor, serializar_descriptor, verificar_contenido,
 )
 
@@ -26,7 +26,7 @@ def obj(ident, tipo, contenido, *, empresa=EMP, obligatorio=None, referencias=()
     datos = contenido.encode("utf-8")
     return ObjetoFuente(
         identidad=ident, tipo=tipo, huella=huella_contenido(datos), empresa_id=empresa,
-        obligatorio=TIPOS[tipo].obligatorio if obligatorio is None else obligatorio,
+        obligatorio=TIPOS_V1[tipo].obligatorio if obligatorio is None else obligatorio,
         tamano=len(datos), metadatos=metadatos or {}, referencias=tuple(referencias), **kw)
 
 
@@ -35,7 +35,7 @@ def ref(o, empresa=EMP):
 
 
 def declarar(objetos):
-    conteo = {t: 0 for t in TIPOS}
+    conteo = {t: 0 for t in TIPOS_V1}
     for o in objetos:
         conteo[o.tipo] = conteo.get(o.tipo, 0) + 1
     return conteo
@@ -90,7 +90,7 @@ def test_descriptor_completo_valido():
     assert d.empresa_id == EMP and d.generacion == GEN and d.completitud == COMPLETITUD
     assert d.huella_descriptor.startswith("sha256:") and len(d.huella_descriptor) == 71
     assert [f.identidad for f in d.fuentes] == sorted(f.identidad for f in d.fuentes)
-    assert dict(d.declaracion) == {**{t: 0 for t in TIPOS}, **declarar(d.fuentes)}
+    assert dict(d.declaracion) == {**{t: 0 for t in TIPOS_V1}, **declarar(d.fuentes)}
     cuerpo = d.como_dict()
     assert cuerpo["clase"] == "DESCRIPTOR_PREPARADO" and cuerpo["completitud"] == "PENDIENTE_PROTOCOLO_OFICIAL"
     assert cuerpo["resumen"]["objetos"] == 14 and cuerpo["resumen"]["tamanos_desconocidos"] == 0
@@ -149,7 +149,7 @@ def test_cambio_de_contenido_cambia_huella():
 
 
 # 4 -----------------------------------------------------------------------
-OBLIGATORIOS = sorted(t for t, r in TIPOS.items() if r.obligatorio)
+OBLIGATORIOS = sorted(t for t, r in TIPOS_V1.items() if r.obligatorio)
 
 
 @pytest.mark.parametrize("tipo", OBLIGATORIOS)
@@ -375,12 +375,12 @@ def test_generacion_invalida(gen):
 
 
 # 11 ----------------------------------------------------------------------
-@pytest.mark.parametrize("version", [0, 2, 99, True, "1", None])
+@pytest.mark.parametrize("version", [0, 3, 99, True, "1", None])
 def test_version_de_inventario_incompatible(version):
     assert rechazo(inventario(objetos_base(), version=version)).codigos == {"VERSION_INCOMPATIBLE"}
 
 
-@pytest.mark.parametrize("version", [0, 2, "1", None])
+@pytest.mark.parametrize("version", [0, 3, "1", None])
 def test_version_de_descriptor_incompatible(version):
     datos = serializar_descriptor(construir_descriptor(inventario(objetos_base())))
     with pytest.raises(ErrorDescriptor) as exc:

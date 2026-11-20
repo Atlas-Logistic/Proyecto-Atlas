@@ -22,7 +22,7 @@ from atlas_core.descriptor_custodia import (
     MAX_OBJETOS_CUSTODIA, RUTA_DESCRIPTOR, proyectar_para_custodia, verificar_generacion_custodia,
 )
 from atlas_core.descriptor_generacion import (
-    COMPLETITUD, TIPOS, ErrorDescriptor, GeneracionSolicitada, Inventario, ObjetoFuente, Referencia,
+    COMPLETITUD, TIPOS_V1, ErrorDescriptor, GeneracionSolicitada, Inventario, ObjetoFuente, Referencia,
     construir_descriptor, huella_contenido, leer_descriptor, serializar_descriptor,
 )
 
@@ -42,7 +42,7 @@ def generacion(empresa=EMP, gen=G1, *, n_evidencia=2, variante="", con_marca=Non
         datos = texto.encode("utf-8")
         contenidos[ident] = datos
         o = ObjetoFuente(ident, tipo, huella_contenido(datos), empresa,
-                         TIPOS[tipo].obligatorio if obligatorio is None else obligatorio,
+                         TIPOS_V1[tipo].obligatorio if obligatorio is None else obligatorio,
                          len(datos), metadatos or {}, tuple(referencias))
         objetos.append(o)
         return o
@@ -61,7 +61,7 @@ def generacion(empresa=EMP, gen=G1, *, n_evidencia=2, variante="", con_marca=Non
     agregar("operacion/investigacion", "REGISTRO_INVESTIGACION", '{"abiertos":[]}', referencias=refs[:1])
     agregar("catalogos/choferes", "CATALOGO", "rut,nombre\n")
     agregar("catalogos/asignaciones", "ASIGNACIONES", "patente,rut,desde\n")
-    declaracion = {t: 0 for t in TIPOS}
+    declaracion = {t: 0 for t in TIPOS_V1}
     for o in objetos:
         declaracion[o.tipo] += 1
     d = construir_descriptor(Inventario(1, empresa, gen, declaracion, tuple(objetos)))
@@ -217,7 +217,7 @@ def test_version_motor_incompatible_dentro_de_la_custodia():
     d, _ = generacion()
     p = proyectar_para_custodia(d, EMP)
     motor = json.loads(p.objeto_descriptor)
-    motor["version_contrato"] = 2
+    motor["version_contrato"] = 3
     datos = json.dumps(motor, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode()
     objetos = [o if o["ruta"] != RUTA_DESCRIPTOR else {"ruta": RUTA_DESCRIPTOR, "sha256": hashlib.sha256(datos).hexdigest()}
                for o in p.descriptor()["objetos"]]
@@ -252,7 +252,7 @@ def test_inventario_completo_y_exacto():
             "FORMATO_INVALIDO", "VERSION_INCOMPATIBLE"}
 
 
-@pytest.mark.parametrize("tipo", sorted(t for t, r in TIPOS.items() if r.obligatorio and t != "IDENTIDAD_EMPRESA"))
+@pytest.mark.parametrize("tipo", sorted(t for t, r in TIPOS_V1.items() if r.obligatorio and t != "IDENTIDAD_EMPRESA"))
 def test_fuente_obligatoria_ausente_no_llega_a_custodia(tipo):
     d, _ = generacion()
     sin = tuple(f for f in d.fuentes if f.tipo != tipo)

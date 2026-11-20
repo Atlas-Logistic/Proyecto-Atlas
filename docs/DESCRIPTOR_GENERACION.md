@@ -1,6 +1,7 @@
-# Descriptor preparado de generación operacional (contrato v1)
+# Descriptor preparado de generación operacional (contrato v2; lee v1)
 
-Módulo: `atlas_core/descriptor_generacion.py`. Pruebas: `tests/test_descriptor_generacion.py`.
+Módulo: `atlas_core/descriptor_generacion.py`. Pruebas: `tests/test_descriptor_generacion_v2.py`
+(v2) y `tests/test_descriptor_generacion.py` (reglas v1, que siguen vigentes para leer).
 Base: Motor CASA `c08bc3804eed69200a6bd1eff1bba52fc9580e4d`. Responde al paso 2 del
 "cambio mínimo recomendado" de `docs/VERIFICACION_CUSTODIA_GENERACIONES.md` (625ab15) y al
 punto 3 del contrato de `docs/CONTRATO_COHERENCIA_LECTURA_LOTES.md` (51167a7), **sólo en la
@@ -42,7 +43,8 @@ parcial: un solo problema rechaza el inventario completo.
 
 ### Entrada: `Inventario`
 
-* `version_contrato`: entero en `VERSIONES_COMPATIBLES` (hoy `{1}`).
+* `version_contrato`: entero en `VERSIONES_COMPATIBLES` (`{1, 2}`). **2 es la vigente**; cada
+  inventario se valida con la tabla y reglas de su versión (ver «Versiones»).
 * `empresa_id`: obligatorio, patrón `^[a-z][a-z0-9-]{1,38}[a-z0-9]$`. Es la **identidad
   de custodia** (`ContextoEmpresa.cloud_id`, la que Cloud deduce del token Motor); para MBT,
   `empresa-prueba-javier`. Los identificadores locales `mbt` y `oficina` se rechazan
@@ -53,6 +55,7 @@ parcial: un solo problema rechaza el inventario completo.
   llamador. Todo tipo conocido debe aparecer. `0` es la única forma de declarar vacío y sólo
   vale donde el tipo lo admite. Un tipo omitido nunca equivale a vacío.
 * `objetos`: `ObjetoFuente` por objeto.
+* `derivaciones` (v2): `{derivación: {ranura: identidad}}`; ver «Derivaciones». En v1 debe ir vacío.
 
 ### `ObjetoFuente`
 
@@ -66,22 +69,24 @@ parcial: un solo problema rechaza el inventario completo.
 | `obligatorio` | Booleano. Debe ser `True` en tipos obligatorios. |
 | `metadatos` | Mapa `clave -> str/int/bool/None`; claves `^[a-z][a-z0-9_]{0,63}$`. Sin rutas absolutas ni URLs en los valores, sin claves con aspecto de credencial ni reservadas al protocolo. |
 | `referencias` | `Referencia(identidad, huella, empresa_id)` hacia otro objeto del **mismo** inventario y empresa, con la huella exacta inventariada. Una fuente obligatoria no puede depender de un objeto opcional. |
+| `rol` (v2) | Obligatorio en `DECISIONES_HUMANAS`, `CATALOGO` y `EVIDENCIA_DOCUMENTAL`; prohibido en los demás tipos (`ROL_INVALIDO`). En v1 no existe. |
+| `documento` (v2) | Sólo en evidencia de documento: el `archivo` real (máx. 512, sin control, sin ruta absoluta ni URL; puede llevar mayúsculas, espacios o `::pagina=NNNN`). En v1 no existe. |
 
-### Tipos v1
+### Tipos
 
-| Tipo | Cardinalidad | Vacío admitido |
-| --- | --- | --- |
-| `IDENTIDAD_EMPRESA` | exactamente 1; **0 para MBT** | sólo MBT, declarado `0` |
-| `DATASET_OPERACIONAL` | exactamente 1 | no |
-| `LEDGER_DECISIONES` | exactamente 1 | no |
-| `DECISIONES_HUMANAS` | exactamente 1 | no |
-| `BANDEJA_REVISION` | exactamente 1 | no |
-| `AGRUPACIONES_CONFIRMADAS` | exactamente 1 | no |
-| `REGISTRO_INVESTIGACION` | exactamente 1 | no |
-| `CATALOGO` | 1 o más | no (admite globales) |
-| `ASIGNACIONES` | 1 o más | no |
-| `CUARENTENA` | 0 o más | sí, declarado `0` |
-| `EVIDENCIA_DOCUMENTAL` | 0 o más | sí, declarado `0` |
+| Tipo | v1 | v2 | Vacío admitido |
+| --- | --- | --- | --- |
+| `IDENTIDAD_EMPRESA` | exactamente 1; **0 para MBT** | igual | sólo MBT, declarado `0` |
+| `DATASET_OPERACIONAL` | exactamente 1 | igual | no |
+| `LEDGER_DECISIONES` | exactamente 1 | igual | no |
+| `DECISIONES_HUMANAS` | exactamente 1 | **exactamente 2**, uno por rol | no |
+| `BANDEJA_REVISION` | exactamente 1 | igual | no |
+| `AGRUPACIONES_CONFIRMADAS` | exactamente 1 | igual | no |
+| `REGISTRO_INVESTIGACION` | exactamente 1 | igual | no |
+| `CATALOGO` | 1 o más | 1 o más, rol único por catálogo | no (admite globales) |
+| `ASIGNACIONES` | 1 o más | **no es tipo**: derivación (abajo) | — |
+| `CUARENTENA` | 0 o más | igual | sí, declarado `0` |
+| `EVIDENCIA_DOCUMENTAL` | 0 o más | 0 o más, con rol y documento | sí, declarado `0` |
 
 Un archivo de colección vacía (`[]`, `{}`, CSV con sólo encabezado) sigue siendo un objeto con
 huella; su inexistencia es `FUENTE_OBLIGATORIA_AUSENTE`.
@@ -90,7 +95,64 @@ MBT opera sin `catalogos_privados/empresa_identidad.json`; en su custodia una ma
 empresa ajena (`aislamiento_empresas.verificar_manifiesto_empresa`). Por eso, para
 `EMPRESAS_SIN_MARCA = {"empresa-prueba-javier"}` (= `CLOUD_MBT`, verificado por prueba) el tipo
 se declara `0` y un objeto `IDENTIDAD_EMPRESA` es `EMPRESA_INCORRECTA`. Las demás empresas
-siguen exigiendo exactamente una marca.
+siguen exigiendo exactamente una marca. La regla vale en v1 y v2.
+
+### Reglas v2 (fuentes reales, `docs/FUENTES_GENERACION.md`)
+
+**Decisiones humanas.** Exactamente dos objetos originales, obligatorios, con identidades y
+huellas propias. Roles: `acciones_operacionales` (`operacion/actual/acciones_operacionales.json`)
+y `operaciones_conversacionales` (`operacion/actual/operaciones_conversacionales.json`). Cada rol
+aparece una vez: si falta uno, `FUENTE_OBLIGATORIA_AUSENTE` con sujeto
+`DECISIONES_HUMANAS:<rol>`; un rol repetido es `IDENTIDAD_CONTRADICTORIA`; otro rol (p. ej.
+`asignaciones`) es `ROL_INVALIDO`. No se fusionan ni se crea un archivo artificial.
+
+**Derivaciones.** Un concepto sin almacén propio se representa por sus fuentes originales
+del mismo inventario, sin copiarlas:
+
+```
+derivaciones = {"ASIGNACIONES": {"vehiculos": <identidad CATALOGO rol vehiculos>,
+                                 "choferes":  <identidad CATALOGO rol choferes>,
+                                 "ledger":    <identidad LEDGER_DECISIONES>}}
+```
+
+Se exige la derivación y sus tres ranuras. Cada una debe apuntar a un objeto presente, del
+tipo y rol esperados, y propio de la empresa (no global). Los errores son
+`DEPENDENCIA_INCOMPLETA` y `EMPRESA_INCORRECTA`; una ranura desconocida es `FORMATO_INVALIDO`.
+Como todas las ranuras apuntan dentro del mismo descriptor, sus objetos son de la misma
+generación. Ninguna ranura admite `DECISIONES_HUMANAS`: **una asignación inferida nunca
+figura como confirmación humana**. Un objeto de tipo `ASIGNACIONES` en v2 es `TIPO_DESCONOCIDO`.
+`DescriptorPreparado.derivacion("ASIGNACIONES")` devuelve los objetos originales.
+
+**Evidencia documental.** Admite varios objetos por generación.
+* Roles de documento: `original`, `orientada`, `pdf`, `pdf-pagina` y `pdf-texto`. Los dos
+  últimos son la «evidencia procesada», es decir, los derivados técnicos del PDF.
+* Identidad verificable: `evidencia/<sha256(documento)>/<rol>/<sha256 del contenido>`
+  (`identidad_evidencia`). Si no coincide con `documento`, `rol` y `huella`, el error es
+  `EVIDENCIA_NO_VERIFICABLE`, igual que si falta el `documento`.
+* El hash del contenido evita colisiones entre varias fotos del mismo documento (relecturas).
+* La ubicación (Mobile, `entradas`, `evidencia_resuelta`) **no** es rol ni parte de la
+  identidad: mover un archivo no cambia su identidad.
+* Índices: `registro-relecturas` (identidad fija `evidencia/registro-relecturas`) y
+  `registro-evidencias-adicionales` (`evidencia/pdf/evidencias-adicionales`), sin documento.
+* La referencia a la guía puede ir en `metadatos` (p. ej. `numero_guia`) y en `referencias`
+  desde el dataset.
+* Fuera de este contrato: almacenamiento, movimiento, purga y retención.
+
+**Catálogos.** `rol` es el nombre del catálogo (`vehiculos`, `choferes`, `geografia_chile`...),
+único entre los catálogos del inventario.
+
+### Versiones
+
+* `construir_descriptor` y `leer_descriptor` aplican las reglas y la serialización de **la
+  versión del inventario o del descriptor**: `TIPOS_POR_VERSION = {1: TIPOS_V1, 2: TIPOS_V2}`.
+* Un descriptor v1 se lee con sus reglas y sus mismos bytes y huella (fixture
+  `tests/fixtures/descriptor_generacion_v1.json`, generado con el código de 57e5173/c90053b).
+  Se devuelve con `version_contrato == 1`, sin derivaciones ni roles.
+* Un descriptor v1 nunca se promueve a v2: cambiarle la versión o agregarle `derivaciones` es
+  `FORMATO_INVALIDO`, y su inventario no cumple las reglas v2.
+* Un inventario v1 con `rol`, `documento` o `derivaciones` es `FORMATO_INVALIDO`.
+* Cualquier otra versión es `VERSION_INCOMPATIBLE`.
+* Los consumidores deben comprobar `version_contrato` antes de suponer las garantías v2.
 
 ### Salida serializada
 
@@ -99,10 +161,11 @@ identidad; referencias por `(identidad, huella)` sin duplicados; metadatos y dec
 clave. Campos de primer nivel exactos:
 
 ```
-esquema="atlas.descriptor_generacion", version_contrato=1, clase, completitud,
+esquema="atlas.descriptor_generacion", version_contrato, clase, completitud,
 algoritmo_huella="sha256", empresa_id, generacion{id,secuencia,previa_id},
 declaracion{tipo:n}, fuentes[...], resumen{objetos,obligatorios,bytes_declarados,
 tamanos_desconocidos}, huella_descriptor
+v2 además: derivaciones{nombre:{ranura:identidad}}; cada fuente lleva rol y documento (null si no aplican)
 ```
 
 `huella_descriptor` = `sha256` del JSON canónico de todos los demás campos. El orden de
@@ -118,7 +181,7 @@ por completo y exige huella **y** bytes canónicos idénticos (`DESCRIPTOR_ALTER
 `CONTENIDO_NO_VERIFICABLE`, `CAMPO_PROHIBIDO`, `OBLIGATORIEDAD_INCONSISTENTE`,
 `FUENTE_OBLIGATORIA_AUSENTE`, `INVENTARIO_INCOMPLETO`, `INVENTARIO_INCONSISTENTE`,
 `REFERENCIA_INCONSISTENTE`, `REFERENCIA_ENTRE_EMPRESAS`, `DESCRIPTOR_AUTODECLARADO`,
-`DESCRIPTOR_ALTERADO`.
+`DESCRIPTOR_ALTERADO`; v2: `ROL_INVALIDO`, `EVIDENCIA_NO_VERIFICABLE`, `DEPENDENCIA_INCOMPLETA`.
 
 ## Compatibilidad con la custodia de generaciones Cloud v1
 
@@ -160,7 +223,7 @@ del objeto descriptor Motor descargados por el llamador, y exige coincidencia ex
 | 2 | Generación | `generacion_id` Motor (`^[a-z0-9][a-z0-9._-]{0,127}$`) ⊂ `ID_SEGURO` Cloud. `anterior_id` = `previa_id`. `secuencia` no existe en Cloud: viaja dentro del objeto descriptor Motor. |
 | 3 | Identidades lógicas | `ruta` = identidad, sin traducción (ver Representación). |
 | 4 | Huellas | `sha256:<hex>` en Motor, `<hex>` en Cloud; misma función SHA-256 sobre los mismos bytes. `descriptor_sha256` se calcula igual que el Worker y la prueba cruzada lo compara. |
-| 5 | Serialización y versión | Dos versiones independientes: `version` Cloud (=1) y `version_contrato` Motor (=1, formato serializado sin cambios). Cualquier otra se rechaza (`VERSION_INCOMPATIBLE`) en ambos lados. |
+| 5 | Serialización y versión | Dos versiones independientes: `version` Cloud (=1, sin cambios) y `version_contrato` Motor (2 vigente, 1 legible). Cualquier otra se rechaza (`VERSION_INCOMPATIBLE`) en ambos lados. |
 | 6 | Tipos obligatorios | Cloud no los conoce ("el llamador debe enumerar todas las fuentes"). Se validan en el Motor al construir y otra vez al verificar la lectura, desde el objeto descriptor Motor. Corrección: MBT no lleva marca (tabla de tipos). |
 | 7 | Vacíos explícitos | Cloud sólo ve objetos presentes; el `0` declarado viaja en el descriptor Motor. Cloud exige ≥ 1 objeto, siempre cumplido (descriptor Motor + obligatorias). |
 | 8 | Evidencia y referencias | La evidencia es un objeto más (subida por `PUT .../estado/objetos/<sha>`, por empresa), sin depender de `rutas_semilla`. Cloud verifica su existencia e integridad al publicar y leer; el Motor verifica que cada sha coincida con su huella y marca `REFERENCIA_INCONSISTENTE` si la fuente es referida. |
@@ -170,12 +233,20 @@ Catálogos `COMPARTIDA_GLOBAL`: en Cloud los objetos son por empresa
 (`estado-operativo/<empresa>/<sha>`), así que un catálogo global se sube como objeto en la
 custodia de cada empresa que lo inventaría. No requiere cambios.
 
-### Cambios del descriptor Motor (sin cambio de formato)
+### Cambios del descriptor Motor
 
-`VERSION_CONTRATO` sigue en 1 y la serialización es idéntica; las 78 pruebas de 9b99abb
-pasan sin modificación. Se endurecieron dos validaciones:
-`mbt`/`oficina` como empresa y la marca de identidad en MBT. Un descriptor así, que 9b99abb
-aceptaba, ahora se rechaza; no existía ninguno porque el descriptor nunca se integró.
+* 57e5173 (sin cambio de formato): se endurecieron `mbt`/`oficina` como empresa y la marca de
+  identidad en MBT.
+* v2 (este contrato): decisiones humanas, derivación de asignaciones y evidencia con rol.
+  **El adaptador Cloud no cambió.** El descriptor Cloud sigue siendo
+  `{version: 1, empresa_id, generacion_id, objetos:[{ruta, sha256}]}`, con
+  `_atlas/descriptor_generacion.json` como objeto. Las identidades v2 (las de evidencia tienen
+  unos 150 caracteres) cumplen `rutaEstadoValida`. Las derivaciones viajan dentro del objeto
+  descriptor Motor; Cloud no las ve ni las necesita.
+* Los descriptores v1 siguen proyectándose y verificándose igual; quien los lea debe comprobar
+  `version_contrato`.
+* Las pruebas v1 (78 + 31) sólo cambiaron de forma mecánica: `TIPOS` pasó a `TIPOS_V1` y la
+  versión «desconocida» de prueba pasó de 2 a 3, porque 2 ahora es válida.
 
 ### Pendientes y cambios que debería evaluar Codex en Cloud
 
