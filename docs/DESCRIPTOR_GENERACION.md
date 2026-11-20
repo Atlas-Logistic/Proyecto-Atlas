@@ -43,8 +43,10 @@ parcial: un solo problema rechaza el inventario completo.
 ### Entrada: `Inventario`
 
 * `version_contrato`: entero en `VERSIONES_COMPATIBLES` (hoy `{1}`).
-* `empresa_id`: obligatorio, patrón `^[a-z][a-z0-9-]{1,38}[a-z0-9]$` (el de
-  `aislamiento_empresas`, sin su lista de reservados: ver conciliación).
+* `empresa_id`: obligatorio, patrón `^[a-z][a-z0-9-]{1,38}[a-z0-9]$`. Es la **identidad
+  de custodia** (`ContextoEmpresa.cloud_id`, la que Cloud deduce del token Motor); para MBT,
+  `empresa-prueba-javier`. Los identificadores locales `mbt` y `oficina` se rechazan
+  (`EMPRESA_INVALIDA`): no se traducen.
 * `generacion`: `GeneracionSolicitada(generacion_id, secuencia>=1, previa_id)`. `secuencia 1`
   no admite previa; `secuencia > 1` la exige y debe ser distinta.
 * `declaracion`: número **exacto** de objetos por tipo, según la enumeración oficial del
@@ -69,7 +71,7 @@ parcial: un solo problema rechaza el inventario completo.
 
 | Tipo | Cardinalidad | Vacío admitido |
 | --- | --- | --- |
-| `IDENTIDAD_EMPRESA` | exactamente 1 | no |
+| `IDENTIDAD_EMPRESA` | exactamente 1; **0 para MBT** | sólo MBT, declarado `0` |
 | `DATASET_OPERACIONAL` | exactamente 1 | no |
 | `LEDGER_DECISIONES` | exactamente 1 | no |
 | `DECISIONES_HUMANAS` | exactamente 1 | no |
@@ -83,6 +85,12 @@ parcial: un solo problema rechaza el inventario completo.
 
 Un archivo de colección vacía (`[]`, `{}`, CSV con sólo encabezado) sigue siendo un objeto con
 huella; su inexistencia es `FUENTE_OBLIGATORIA_AUSENTE`.
+
+MBT opera sin `catalogos_privados/empresa_identidad.json`; en su custodia una marca indica
+empresa ajena (`aislamiento_empresas.verificar_manifiesto_empresa`). Por eso, para
+`EMPRESAS_SIN_MARCA = {"empresa-prueba-javier"}` (= `CLOUD_MBT`, verificado por prueba) el tipo
+se declara `0` y un objeto `IDENTIDAD_EMPRESA` es `EMPRESA_INCORRECTA`. Las demás empresas
+siguen exigiendo exactamente una marca.
 
 ### Salida serializada
 
@@ -112,39 +120,108 @@ por completo y exige huella **y** bytes canónicos idénticos (`DESCRIPTOR_ALTER
 `REFERENCIA_INCONSISTENTE`, `REFERENCIA_ENTRE_EMPRESAS`, `DESCRIPTOR_AUTODECLARADO`,
 `DESCRIPTOR_ALTERADO`.
 
-## Campos que requieren conciliación antes de integrar
+## Compatibilidad con la custodia de generaciones Cloud v1
 
-El contrato definitivo de custodia de generaciones no está disponible (el worktree
-`cloud-generaciones-completas-20261120` de Codex no tiene commits nuevos sobre `b28d594`).
-No se inventa ninguna API productiva. Antes de integrar hay que acordar:
+Conciliado contra Atlas-Mobile-Cloud `61c28726cd7aafbfa3113f4e5ef77487dd8aa1f9`
+(`docs/custodia-generaciones-v1.md`, `migrations/0013_generaciones_custodia.sql`,
+`src/worker.js` `descriptorGeneracion`/`prepararGeneracion`/`publicarGeneracion`/
+`leerGeneracion`). Módulo `atlas_core/descriptor_custodia.py`, también puro:
 
-1. **Identidad de generación**: quién asigna `generacion_id` y `secuencia` (¿la custodia al
-   abrir `PENDIENTE`?), su formato y si `previa_id` debe coincidir con la última `COMPLETA`
-   autoritativa. Aquí sólo se valida la forma y la coherencia interna.
-2. **Empresa**: `aislamiento_empresas.validar_empresa_id` reserva `mbt`, `oficina` y
-   `empresa-prueba-javier`; el descriptor los acepta porque MBT opera con esos nombres. Hay
-   que fijar qué identificador lleva el descriptor (local `mbt` o Cloud
-   `empresa-prueba-javier`) y cómo se cruza con `catalogos_privados/empresa_identidad.json`.
-3. **Inventario exacto de tipos**: la tabla v1 sigue la lista del encargo y de 51167a7.
-   Falta mapear cada tipo a los archivos reales que leen el preview y las precondiciones
-   (p. ej. `acciones_operacionales.json` como `DECISIONES_HUMANAS`,
-   `agrupaciones_viaje.json`, catálogos de choferes/vehículos y asignaciones). Cambiar la
-   tabla exige subir `VERSION_CONTRATO`.
-4. **Identidad lógica vs. ruta de custodia**: la custodia direcciona por ruta relativa
-   (`operacion/actual/...`) y SHA-256 hex sin prefijo. Hay que definir la traducción
-   identidad ↔ ruta y si la huella viaja como `sha256:<hex>` o hex.
-5. **Evidencia fuera de la semilla**: originales de `operacion/entradas`, fotos Mobile y
-   rutas de `resolver_ruta_evidencia` no están en `rutas_semilla`. Hace falta decidir cómo
-   llegan como objetos durables antes de poder referenciarlos.
-6. **Catálogos globales**: `COMPARTIDA_GLOBAL` (sin empresa) es una propuesta; confirmar si
-   la custodia por empresa puede servir objetos globales o si deben copiarse por empresa.
-7. **Tamaño del descriptor**: es un único objeto, no N entradas de manifiesto, así que no
-   depende de `LOTE_CONFIRMACION = 50` ni del límite de 200 rutas del Worker. Falta fijar
-   dónde se guarda (objeto R2 por huella) y su límite (95 MiB por objeto en el Worker
-   inspeccionado; 100 fuentes sintéticas producen unos 30 KB).
-8. **Recuperación**: qué hace el protocolo con un descriptor preparado de una operación
-   interrumpida. Este módulo no tiene estado; volver a construirlo con el mismo inventario
-   da los mismos bytes.
+```python
+proyectar_para_custodia(DescriptorPreparado, empresa_custodia) -> ProyeccionCustodia
+verificar_generacion_custodia(descriptor_cloud, descriptor_sha256, datos_descriptor,
+                              empresa_custodia) -> DescriptorPreparado
+```
+
+`ProyeccionCustodia` lleva los bytes del campo `descriptor` de `POST .../preparar`
+(idénticos a los que Cloud guarda con `JSON.stringify`), el `descriptor_sha256` que Cloud
+debe devolver, `anterior_id` (= `previa_id`) y los bytes del descriptor Motor a subir como
+objeto. No incluye `lease_token` ni `version_base` (estado de custodia) ni hace HTTP.
+`verificar_generacion_custodia` valida la respuesta de `GET .../actual` junto con los bytes
+del objeto descriptor Motor descargados por el llamador, y exige coincidencia exacta.
+
+### Representación
+
+* Descriptor Cloud v1: `{version: 1, empresa_id, generacion_id, objetos: [{ruta, sha256}]}`.
+* Cada fuente Motor es un objeto: `ruta` = identidad lógica, `sha256` = huella sin el
+  prefijo `sha256:`. La gramática de identidades Motor es un subconjunto estricto de
+  `rutaEstadoValida` (sin `:`, `\`, `/` inicial, segmentos vacíos, `.` ni `..`; máx. 256 < 512).
+* El descriptor Motor serializado viaja **como un objeto más** en
+  `RUTA_DESCRIPTOR = "_atlas/descriptor_generacion.json"`. Es la única forma de que tipos,
+  obligatoriedad, referencias, vacíos declarados, secuencia y `previa_id` lleguen a Cloud sin
+  cambiar su API: Cloud lo trata como un objeto opaco y lo verifica por SHA-256. La ruta
+  empieza por `_`, fuera del espacio de identidades Motor, por lo que no puede colisionar.
+
+### Puntos conciliados
+
+| # | Punto | Resolución |
+| --- | --- | --- |
+| 1 | Identidad empresarial | `empresa_id` del descriptor = identidad autenticada de Cloud = `ContextoEmpresa.cloud_id`. La proyección exige que coincidan y no traduce: `mbt`/`oficina` se rechazan. No se cambió ningún identificador. |
+| 2 | Generación | `generacion_id` Motor (`^[a-z0-9][a-z0-9._-]{0,127}$`) ⊂ `ID_SEGURO` Cloud. `anterior_id` = `previa_id`. `secuencia` no existe en Cloud: viaja dentro del objeto descriptor Motor. |
+| 3 | Identidades lógicas | `ruta` = identidad, sin traducción (ver Representación). |
+| 4 | Huellas | `sha256:<hex>` en Motor, `<hex>` en Cloud; misma función SHA-256 sobre los mismos bytes. `descriptor_sha256` se calcula igual que el Worker y la prueba cruzada lo compara. |
+| 5 | Serialización y versión | Dos versiones independientes: `version` Cloud (=1) y `version_contrato` Motor (=1, formato serializado sin cambios). Cualquier otra se rechaza (`VERSION_INCOMPATIBLE`) en ambos lados. |
+| 6 | Tipos obligatorios | Cloud no los conoce ("el llamador debe enumerar todas las fuentes"). Se validan en el Motor al construir y otra vez al verificar la lectura, desde el objeto descriptor Motor. Corrección: MBT no lleva marca (tabla de tipos). |
+| 7 | Vacíos explícitos | Cloud sólo ve objetos presentes; el `0` declarado viaja en el descriptor Motor. Cloud exige ≥ 1 objeto, siempre cumplido (descriptor Motor + obligatorias). |
+| 8 | Evidencia y referencias | La evidencia es un objeto más (subida por `PUT .../estado/objetos/<sha>`, por empresa), sin depender de `rutas_semilla`. Cloud verifica su existencia e integridad al publicar y leer; el Motor verifica que cada sha coincida con su huella y marca `REFERENCIA_INCONSISTENTE` si la fuente es referida. |
+| 9 | Preparado vs. publicado | `PENDIENTE`/`PUBLICADA` sólo existen en respuestas Cloud. El descriptor Motor conserva `PENDIENTE_PROTOCOLO_OFICIAL`; un cuerpo Cloud con campos extra (p. ej. `estado`) se rechaza. |
+
+Catálogos `COMPARTIDA_GLOBAL`: en Cloud los objetos son por empresa
+(`estado-operativo/<empresa>/<sha>`), así que un catálogo global se sube como objeto en la
+custodia de cada empresa que lo inventaría. No requiere cambios.
+
+### Cambios del descriptor Motor (sin cambio de formato)
+
+`VERSION_CONTRATO` sigue en 1 y la serialización es idéntica; las 78 pruebas de 9b99abb
+pasan sin modificación. Se endurecieron dos validaciones:
+`mbt`/`oficina` como empresa y la marca de identidad en MBT. Un descriptor así, que 9b99abb
+aceptaba, ahora se rechaza; no existía ninguno porque el descriptor nunca se integró.
+
+### Pendientes y cambios que debería evaluar Codex en Cloud
+
+Ninguno es necesario para intercambiar descriptores válidos: la prueba cruzada contra
+`61c2872` pasa sin modificar Cloud. Antes de integrar el escritor:
+
+1. **Límite de 1000 objetos** (`descriptorGeneracion`). Con el descriptor Motor caben 999
+   fuentes (`LIMITE_CUSTODIA` si se excede). Un inventario real que incluya toda la evidencia
+   documental probablemente lo supere (el censo del 19/11 contó 395 envíos Mobile con foto y
+   la copia de CASA del 17/11 tenía 811 filas en el dataset, más los originales de sus guías;
+   no se midió el inventario real en esta tarea). Cambio
+   mínimo en Cloud: elevar el límite o admitir el inventario en varias partes, conservando un
+   solo `descriptor_sha256` y una sola transición de puntero. Medir el inventario real antes
+   de decidir.
+2. **`GET .../actual` no devuelve `anterior_id` ni `version_base`.** El lector Motor obtiene
+   `previa_id` desde el objeto descriptor, pero Cloud no comprueba que `anterior_id` del
+   `preparar` coincida con él, porque no interpreta ese objeto. Opcional: incluir
+   `anterior_id` en la respuesta de `actual` para que el lector lo compare.
+3. **Formato de `cloud_id`**: Cloud acepta cualquier cadena y `inicializar_empresa` sólo exige
+   que no esté vacía; el descriptor exige `^[a-z][a-z0-9-]{1,38}[a-z0-9]$`. `empresa-prueba-javier`
+   cumple. Hay que verificar los `cloud_id` de las demás empresas; si alguno no cumple, se
+   ampliaría el patrón Motor y no se cambiaría el identificador.
+4. **Convención `RUTA_DESCRIPTOR`**: requiere el visto bueno de Codex. Cloud no necesita
+   cambios para soportarla.
+5. **Retención R2** y semántica real de D1/R2 desplegados: siguen pendientes según
+   `custodia-generaciones-v1.md`.
+6. **Mapeo de tipos a archivos reales** (p. ej. `acciones_operacionales.json` →
+   `DECISIONES_HUMANAS`) y quién asigna `generacion_id`/`secuencia`: siguen pendientes de la
+   integración con el escritor oficial y no se inventan aquí.
+
+### Prueba de contrato cruzada
+
+`tests/test_descriptor_custodia.py::test_contrato_cruzado_con_worker_cloud` ejecuta
+`tests/contrato_custodia/cruce_generaciones.mjs`. El script carga el `src/worker.js` real y su
+arnés `test/d1_sqlite.js` (SQLite y R2 en memoria, migraciones reales), sin red ni
+credenciales. Se activa con `DESCRIPTOR_CLOUD_CONTRATO_DIR=<copia del código Cloud>` y `node`
+≥ 22.5 (usa `node:sqlite`; validado con 24.22.0); si falta, se omite. Para preparar una copia de sólo lectura:
+
+```
+git -C <repo Cloud> archive 61c28726cd7aafbfa3113f4e5ef77487dd8aa1f9 | tar -x -C <carpeta>
+```
+
+Cubre: aceptación del descriptor Motor con igual `descriptor_sha256`, idempotencia, rechazo
+de la empresa cruzada y de la versión 2, publicación, lectura y verificación Motor,
+aislamiento de la otra empresa (`actual`, objeto y publicar), `NO_CONFIABLE` con evidencia sin
+subir, encadenamiento `anterior_id` = `previa_id` y lectura de la generación 2.
 
 ## Limitaciones
 

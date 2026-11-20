@@ -68,6 +68,24 @@ TIPOS: Mapping[str, ReglaTipo] = {
     "ASIGNACIONES": ReglaTipo(1, None, True),
 }
 
+# ``empresa_id`` es la identidad canónica de custodia: ``ContextoEmpresa.cloud_id``,
+# la misma que Cloud deduce del token Motor. Los identificadores locales de MBT
+# no lo son y se rechazan en vez de traducirse.
+EMPRESAS_LOCALES_NO_CANONICAS = frozenset({"mbt", "oficina"})
+# MBT opera sin ``catalogos_privados/empresa_identidad.json``: en su custodia
+# una marca indica empresa ajena (``aislamiento_empresas.verificar_manifiesto_empresa``).
+# Su ausencia se declara explícitamente con 0. Debe coincidir con
+# ``aislamiento_empresas.CLOUD_MBT`` (lo verifica una prueba).
+EMPRESAS_SIN_MARCA = frozenset({"empresa-prueba-javier"})
+_REGLA_SIN_MARCA = ReglaTipo(0, 0, False)
+
+
+def regla_tipo(tipo: str, empresa_id: str) -> ReglaTipo | None:
+    """Regla del tipo para esa empresa; ``None`` si el tipo es desconocido."""
+    if tipo == "IDENTIDAD_EMPRESA" and empresa_id in EMPRESAS_SIN_MARCA:
+        return _REGLA_SIN_MARCA
+    return TIPOS.get(tipo)
+
 # Campos que pertenecen a la publicación o a la custodia: no pueden aparecer
 # en el descriptor ni en los metadatos de sus fuentes.
 CAMPOS_PROTOCOLO = frozenset({
@@ -274,9 +292,12 @@ def _validar_objeto(o, empresa_id: str, problemas: list) -> bool:
         problemas.append(Problema("IDENTIDAD_INVALIDA", str(ident)[:80],
                                   "identidad lógica: minúsculas, segmentos con '/', sin rutas locales"))
         return False
-    regla = TIPOS.get(o.tipo) if isinstance(o.tipo, str) else None
+    regla = regla_tipo(o.tipo, empresa_id) if isinstance(o.tipo, str) else None
     if regla is None:
         problemas.append(Problema("TIPO_DESCONOCIDO", ident, f"tipo {o.tipo!r}"))
+    elif regla is _REGLA_SIN_MARCA:
+        problemas.append(Problema("EMPRESA_INCORRECTA", ident,
+                                  "esta empresa opera sin marca; una marca indica custodia ajena"))
     _validar_huella(o.huella, ident, problemas)
     if o.tamano is not None and (not _es_entero(o.tamano) or o.tamano < 0):
         problemas.append(Problema("CONTENIDO_NO_VERIFICABLE", ident, f"tamaño {o.tamano!r}"))
@@ -357,14 +378,15 @@ def _validar_generacion(g, problemas: list) -> None:
                                   "secuencia > 1 exige generación previa"))
 
 
-def _validar_declaracion(declaracion, conteo: Mapping[str, int], problemas: list) -> None:
+def _validar_declaracion(declaracion, conteo: Mapping[str, int], empresa_id: str, problemas: list) -> None:
     if not isinstance(declaracion, Mapping):
         problemas.append(Problema("INVENTARIO_INCOMPLETO", "", "sin declaración de tipos"))
         return
     for tipo in declaracion:
         if tipo not in TIPOS:
             problemas.append(Problema("TIPO_DESCONOCIDO", str(tipo), "tipo declarado desconocido"))
-    for tipo, regla in TIPOS.items():
+    for tipo in TIPOS:
+        regla = regla_tipo(tipo, empresa_id)
         presentes = conteo.get(tipo, 0)
         if tipo not in declaracion:
             codigo = "FUENTE_OBLIGATORIA_AUSENTE" if regla.obligatorio else "INVENTARIO_INCOMPLETO"
@@ -404,6 +426,9 @@ def construir_descriptor(inventario: Inventario) -> DescriptorPreparado:
         raise ErrorDescriptor([Problema("EMPRESA_AUSENTE", "inventario", "empresa no indicada")])
     if not _empresa_valida(empresa_id):
         raise ErrorDescriptor([Problema("EMPRESA_INVALIDA", "inventario", repr(empresa_id))])
+    if empresa_id in EMPRESAS_LOCALES_NO_CANONICAS:
+        raise ErrorDescriptor([Problema("EMPRESA_INVALIDA", "inventario",
+                                        f"{empresa_id!r} es local; usar la identidad de custodia (cloud_id)")])
     _validar_generacion(inventario.generacion, problemas)
     if not isinstance(inventario.objetos, (tuple, list)):
         raise ErrorDescriptor([Problema("FORMATO_INVALIDO", "inventario", "objetos debe ser una secuencia")])
@@ -424,7 +449,7 @@ def construir_descriptor(inventario: Inventario) -> DescriptorPreparado:
     for o in indice.values():
         if isinstance(o.referencias, tuple):
             _validar_referencias(o, indice, empresa_id, problemas)
-    _validar_declaracion(inventario.declaracion, conteo, problemas)
+    _validar_declaracion(inventario.declaracion, conteo, empresa_id, problemas)
     if problemas:
         raise ErrorDescriptor(problemas)
 
