@@ -1108,6 +1108,22 @@ _MOTIVOS_POR_CAMPO_FOCAL_CONOCIDO: dict[str, tuple[str, ...]] = {
 }
 
 
+def tipo_carga_tras_material(tipo_actual: object, material_anterior: object, material_nuevo: object, *,
+                             fijado_por_decision: bool) -> str:
+    """`tipo_carga` resultante de corregir el material de una fila.
+
+    Se deriva del material (igual que DOCUMENTO_RECUPERAR_MATERIAL). Se
+    respeta, en cambio, uno fijado aparte: por una decisión humana del ledger
+    sobre `tipo_carga`, o distinto del derivado del material anterior."""
+    from atlas_core.clasificador_material import clasificar_material
+    actual = str(tipo_actual or "").strip()
+    if fijado_por_decision:
+        return actual
+    if actual in {"", "NO DETERMINADO", clasificar_material(str(material_anterior or "")).value}:
+        return clasificar_material(str(material_nuevo or "")).value
+    return actual
+
+
 def duplicados_guia_transporte(
     filas: list[dict[str, str]], *, archivo: str, numero_guia: str, numero_transporte: str,
 ) -> list[str]:
@@ -1239,12 +1255,9 @@ def reparar_documento_focal_con_valores_conocidos(
                     motivos_restantes = sorted({*motivos_restantes, atipico})
             material = next((c for c in cambios if c.campo == "descripcion_material"), None)
             if material is not None:
-                # tipo_carga se deriva del material (igual que DOCUMENTO_RECUPERAR_MATERIAL);
-                # uno fijado aparte, distinto del derivado del material anterior, se respeta.
-                from atlas_core.clasificador_material import clasificar_material
-                if str(fila.get("tipo_carga", "")).strip() in {
-                        "", "NO DETERMINADO", clasificar_material(material.valor_anterior).value}:
-                    fila["tipo_carga"] = clasificar_material(material.valor_nuevo).value
+                fila["tipo_carga"] = tipo_carga_tras_material(
+                    fila.get("tipo_carga"), material.valor_anterior, material.valor_nuevo,
+                    fijado_por_decision=_hay_decision_humana_para_campo(aplicaciones, fila=fila, campo="tipo_carga"))
             if not conservar_estado_operacional:
                 fila["motivos_revision_documento"] = SEPARADOR_MOTIVOS.join(motivos_restantes)
                 indicador, documental, operacional = _indicadores_documentales_coherentes(

@@ -40,11 +40,24 @@ def _hora_documental_valida(valor: str) -> bool:
     return bool(re.fullmatch(r"(?:[01][0-9]|2[0-3]):[0-5][0-9]", valor))
 
 
+# Respuestas de una conversación, nunca la descripción de un material: una
+# confirmación o negativa no puede quedar guardada como valor documental.
+_RESPUESTAS_NO_MATERIAL = frozenset({
+    "SI", "SÍ", "NO", "OK", "OKA", "OKEY", "DALE", "CONFIRMO", "CONFIRMADO", "CONFIRMAR", "ACEPTO", "ACEPTAR",
+    "CANCELA", "CANCELAR", "CANCELADO", "LISTO", "GRACIAS",
+})
+
+
 def _material_documental_valido(valor: str) -> bool:
     # "NO DETERMINADO" es justamente la ausencia que se corrige: nunca un material.
     marcador = " ".join(str(valor).replace("_", " ").split()).upper()
     ausentes = {a.upper() for a in _AUSENTES} | {"NO DETERMINADO", "NO DETERMINADA"}
-    return valor not in _AUSENTES and marcador not in ausentes and len(valor) <= 200
+    # Un material se nombra con palabras ("BARRAS", "ROLLO 8MM"): sólo cifras o
+    # signos, caracteres de control o una respuesta de conversación no lo son.
+    return (valor not in _AUSENTES and marcador not in ausentes and len(valor) <= 200
+            and re.search(r"[^\W\d_]{2}", valor) is not None
+            and not re.search(r"[\x00-\x1f\x7f]", valor)
+            and marcador.strip(" .,;:!¡?¿") not in _RESPUESTAS_NO_MATERIAL)
 
 
 CAMPOS_FOCALES_CONOCIDOS: dict[str, object] = {

@@ -1484,6 +1484,8 @@ def _plan_documento_campo(ctx: _Contexto, p: dict) -> Plan:
         return _plan_documento_transporte(ctx, p, fila, sin_cambios=sin_cambios)
     if campo == "fecha":
         return _plan_documento_fecha(ctx, fila, actual, valor, sin_cambios=sin_cambios)
+    if campo == "descripcion_material":
+        return _plan_documento_material_humano(ctx, fila, actual, valor, sin_cambios=sin_cambios)
     obsoletas = [d for d in ctx.decisiones() if _decision_obsoleta_por_campo(d, archivo, campo, valor)]
     return Plan(
         entidad={"tipo": "DOCUMENTO", "id": archivo, "numero_guia": fila.get("numero_guia", ""),
@@ -1619,6 +1621,91 @@ def _plan_documento_fecha(ctx: _Contexto, fila: dict[str, str], actual: str, nue
     )
 
 
+def _correcciones_humanas_material(ctx: _Contexto, fila: Mapping[str, str]) -> list[dict]:
+    """Correcciones de material de un operador ya registradas para ESTE
+    documento (por archivo; por guía sólo en entradas sin archivo). Las
+    reemplaza una nueva corrección confirmada: el preview debe mostrarlas."""
+    from atlas_core.decisiones_pendientes import _actor_es_humano
+    archivo, guia = str(fila.get("archivo", "")).strip(), str(fila.get("numero_guia", "")).strip()
+    ledger = _leer_json(ctx.archivos["ledger_decisiones"], {"aplicaciones": []})
+    previas = []
+    for entrada in ledger.get("aplicaciones") or []:
+        documento = entrada.get("documento") if isinstance(entrada, Mapping) else None
+        # Propuesta por B1 (actor B1) pero confirmada por una persona: es humana.
+        confirmante = str(entrada.get("confirmado_por") or "").strip() if isinstance(entrada, Mapping) else ""
+        if (not isinstance(documento, Mapping) or entrada.get("tipo") != TIPO_LEDGER_CORRECCION
+                or str(entrada.get("campo", "")).strip() != "descripcion_material"
+                or not ((confirmante and _actor_es_humano(confirmante)) or _actor_es_humano(entrada.get("actor")))):
+            continue
+        doc_archivo = str(documento.get("archivo", "")).strip()
+        if (doc_archivo and doc_archivo == archivo) or (not doc_archivo and guia
+                                                        and str(documento.get("numero_guia", "")).strip() == guia):
+            previas.append({"decision_id": entrada.get("decision_id"), "fecha": entrada.get("fecha"),
+                            "confirmado_por": entrada.get("confirmado_por") or entrada.get("actor"),
+                            "valor_corregido": entrada.get("valor_corregido")})
+    return previas
+
+
+def _plan_documento_material_humano(ctx: _Contexto, fila: dict[str, str], actual: str, nuevo: str, *,
+                                    sin_cambios: bool) -> Plan:
+    """Material indicado por una persona. Además del caso genérico: muestra
+    el tipo de carga resultante y cualquier corrección humana previa del
+    material que esta reemplazaría (conflicto explícito, nunca silencioso)."""
+    from atlas_core.decisiones_pendientes import _actor_es_humano
+    from atlas_core.reprocesamiento_reparador import _hay_decision_humana_para_campo, tipo_carga_tras_material
+    archivo, guia, transporte = str(fila.get("archivo", "")), str(fila.get("numero_guia", "")), _transporte(fila)
+    previas = _correcciones_humanas_material(ctx, fila)
+    # Mismo criterio que el reparador: sólo una decisión humana ajena a este canal fija el tipo de carga.
+    ledger = _leer_json(ctx.archivos["ledger_decisiones"], {"aplicaciones": []})
+    decisiones_tipo = [a for a in ledger.get("aplicaciones") or []
+                       if isinstance(a, Mapping) and a.get("tipo") != TIPO_LEDGER_CORRECCION
+                       and _actor_es_humano(a.get("actor"))]
+    tipo_fijado = _hay_decision_humana_para_campo(decisiones_tipo, fila=fila, campo="tipo_carga")
+    tipo_actual = str(fila.get("tipo_carga", "")).strip()
+    tipo_nuevo = tipo_actual if sin_cambios else tipo_carga_tras_material(
+        tipo_actual, actual, nuevo, fijado_por_decision=tipo_fijado)
+    obsoletas = [] if sin_cambios else [
+        d for d in ctx.decisiones() if _decision_obsoleta_por_campo(d, archivo, "descripcion_material", nuevo)]
+    consecuencias = []
+    if previas and not sin_cambios:
+        consecuencias.append(
+            "Atención: esta guía ya tiene el material corregido por una persona ("
+            + "; ".join(f"«{p['valor_corregido']}», confirmado por {p['confirmado_por'] or 'sin registro'}"
+                        f"{' el ' + str(p['fecha'])[:10] if p.get('fecha') else ''}" for p in previas)
+            + "). Si confirmas, esta corrección la reemplaza y queda registrada como tal.")
+    if not sin_cambios:
+        consecuencias.append(
+            (f"El tipo de carga se conserva en {tipo_actual or 'sin tipo'} porque lo fijó una decisión humana."
+             if tipo_fijado else
+             f"El tipo de carga pasa de {tipo_actual or 'sin tipo'} a {tipo_nuevo or 'sin tipo'}."
+             if tipo_nuevo != tipo_actual else f"El tipo de carga se mantiene en {tipo_actual or 'sin tipo'}."))
+    consecuencias.extend([
+        "El valor queda protegido en el ledger: un reproceso/OCR no lo revierte.",
+        "No cambian el documento original, su lectura OCR, la ruta, el estado del viaje ni las agrupaciones.",
+        "Se retiran sólo las tarjetas que preguntaban por el material anterior y se recalculan la bandeja y el "
+        "reporte del viaje de esta guía, sin reconciliación global.",
+    ])
+    return Plan(
+        entidad={"tipo": "DOCUMENTO", "id": archivo, "numero_guia": guia, "numero_transporte": transporte,
+                 "campo": "descripcion_material"},
+        valor_actual={"descripcion_material": actual, "tipo_carga": tipo_actual},
+        valor_propuesto={"descripcion_material": nuevo, "tipo_carga": tipo_nuevo},
+        # Si otra corrección del material llega entre el preview y el «sí», el
+        # conflicto mostrado ya no es cierto: el preview queda obsoleto.
+        estado_base={"fila": fila, "correcciones_previas": previas}, sin_cambios=sin_cambios,
+        afectados={"guias": [guia], "numero_transporte": transporte, "correcciones_reemplazadas": previas,
+                   "tipo_carga": {"antes": tipo_actual, "despues": tipo_nuevo, "fijado_por_decision": tipo_fijado},
+                   "decisiones_obsoletas": [{"decision_id": d.get("decision_id"), "tipo": d.get("tipo"),
+                                             "valor_documental": d.get("valor_documental")} for d in obsoletas]},
+        consecuencias=consecuencias,
+        revalidaciones=["RETIRO_DECISIONES_OBSOLETAS", "RECONCILIAR_BANDEJA", "MANTENIMIENTO_FOCAL_GUIA",
+                        "REGENERAR_REPORTE_VIAJES"],
+        archivos=("dataset", "bandeja", "ledger_decisiones"),
+        datos={"archivo": archivo, "guia": guia, "transporte": transporte,
+               "reemplaza": [p["decision_id"] for p in previas]},
+    )
+
+
 def _plan_documento_transporte(ctx: _Contexto, p: dict, fila: dict[str, str], *, sin_cambios: bool) -> Plan:
     archivo, guia = str(fila.get("archivo", "")), str(fila.get("numero_guia", ""))
     anterior, nuevo = _transporte(fila), str(p["valor"])
@@ -1691,6 +1778,8 @@ def _aplicar_documento_campo(ctx: _Contexto, p: dict, plan: Plan, actor: str) ->
                           "numero_transporte": plan.datos["transporte"]},
             "campo": campo, "valor_documental": antes, "valor_corregido": valor,
             "referencia": str(p.get("referencia", "")),
+            # Correcciones humanas previas del mismo campo que esta reemplaza (mostradas en el preview).
+            **({"reemplaza": list(plan.datos["reemplaza"])} if plan.datos.get("reemplaza") else {}),
         })
         escribir_json_atomico(ctx.archivos["ledger_decisiones"], ledger)
     if plan.datos.get("conservar_estado"):

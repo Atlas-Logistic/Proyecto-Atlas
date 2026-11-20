@@ -214,6 +214,58 @@ _MATERIAL_GUIA = [
     re.compile(r"^(?:CORRIGE|CORREGIR|CAMBIA|CAMBIAR|FIJA|FIJAR)\s+" + _MATERIAL + r"\s+(?:DE\s+LA\s+|DE\s+)" + _GUIA
                + r"\s+(?:A|POR|EN|AL\s+VALOR)\s+(?P<material>.+)$"),
 ]
+# Caso real 484838: «…, corrígelo» quedó guardado como parte del material. Las
+# colas de cortesía, de orden o de reserva («no cambies nada más») no son
+# material y se descartan; nunca confirman nada (el «sí» sigue siendo aparte).
+_COLA_MATERIAL = re.compile(
+    r"(?:\s*[,;.:]\s*|\s+)(?:"
+    r"POR\s+FAVOR|PORFA|GRACIAS|"
+    r"(?:Y\s+)?(?:CORRIGELO|CORRIJELO|CORRIJALO|CAMBIALO|CAMBIELO|ARREGLALO|ACTUALIZALO|FIJALO|HAZLO|"
+    r"CONFIRMALO|APLICALO|REGISTRALO|GUARDALO)|"
+    r"(?:Y\s+)?(?:NO\s+(?:MODIFIQUES|CAMBIES|TOQUES|ALTERES)|SIN\s+(?:MODIFICAR|CAMBIAR|TOCAR|ALTERAR))(?:\s+[A-Z]+)*"
+    r")\s*[.!]*$")
+# Una sola instrucción por dato: si tras el material aparece otro campo de la
+# guía («y el peso es 30000») o se nombra otra guía, no se adivina qué es material.
+_OTRO_DATO_EN_MATERIAL = re.compile(
+    r"(?:^|[\s,;.])(?:Y\s+)?(?:EL|LA|LOS|LAS|SU)\s+(?:PESO|FECHA|CHOFER|CONDUCTOR|PATENTE|RAMPLA|TRACTO|DESTINO|"
+    r"DIRECCION|CLIENTE|RUT|OBRA|TRANSPORTE|FOLIO|NUMERO|HORA|GUIA)S?\b|\bGUIAS?\s+(?:N[°O]?\s*)?\d")
+_MATERIAL_VARIAS_GUIAS = re.compile(
+    r"\bMATERIAL(?:ES)?\b.*\bGUIAS\b|\bGUIAS\b.*\bMATERIAL(?:ES)?\b"
+    r"|\bMATERIAL\b.*\bGUIA\s+(?:N[°O]?\s*)?\d{3,12}\s*(?:,|\bY\b|\bE\b)\s*(?:(?:LA\s+)?GUIA\s+)?(?:N[°O]?\s*)?\d{3,12}\b")
+
+
+def _intencion_material_guia(texto: str, original: str, plano: str) -> Intencion | None:
+    """«El material de la guía N es X» / «Corrige el material de la guía N a X»:
+    valor humano para DOCUMENTO_CORREGIR_CAMPO (campo `descripcion_material`).
+    Rechaza con explicación lo que no es exactamente una guía y un material."""
+    from atlas_core.campos_documentales import _material_documental_valido
+    if _VERBO_LECTURA.match(plano) or not re.search(r"\bMATERIAL(?:ES)?\b", plano):
+        return None
+    if _MATERIAL_VARIAS_GUIAS.search(plano):
+        raise ErrorContratoInterpretacion(
+            "La instrucción de material nombra más de una guía. Corrige el material de una guía por instrucción, "
+            "por ejemplo «El material de la guía 482816 es barras». No se corrigió nada.")
+    for patron in _MATERIAL_GUIA:
+        m = patron.match(plano)
+        if not m:
+            continue
+        inicio, fin = m.span("material")
+        while (cola := _COLA_MATERIAL.search(plano[inicio:fin])) is not None and cola.start() > 0:
+            fin = inicio + cola.start()
+        if _OTRO_DATO_EN_MATERIAL.search(plano[inicio:fin]):
+            raise ErrorContratoInterpretacion(
+                f"La instrucción mezcla el material de la guía {m.group('guia')} con otro dato. Corrige un dato por "
+                f"instrucción, por ejemplo «El material de la guía {m.group('guia')} es barras». No se corrigió nada.")
+        material = " ".join(original[inicio:fin].split()).strip(" .,:;!").upper()
+        if not _material_documental_valido(material):
+            raise ErrorContratoInterpretacion(
+                f"«{material or texto.strip()}» no es un material válido para la guía {m.group('guia')}: indica la "
+                "descripción del material con palabras, por ejemplo «barras» o «rollo 8mm». "
+                "Una respuesta como «sí» nunca se guarda como material. No se corrigió nada.")
+        return Intencion("DOCUMENTO_CORREGIR_CAMPO", {
+            "numero_guia": m.group("guia"), "campo": "descripcion_material", "valor": material,
+            "referencia": " ".join(str(texto).split())[:500]})
+    return None
 # FOLIO de una guía existente mal leído (caso real 8484553 -> 484553): "corrige
 # el número de guía X a Y", "la guía X tiene como número correcto Y". Sólo
 # admite al final una reserva que pide no tocar nada más ("no modifiques
@@ -995,13 +1047,9 @@ def interpretar_determinista(texto: str) -> Intencion | None:
         if m:
             return Intencion("DOCUMENTO_RECUPERAR_MATERIAL", {
                 "numero_guia": m.group("guia"), "referencia": " ".join(str(texto).split())[:500]})
-        for patron in _MATERIAL_GUIA:
-            m = patron.match(plano)
-            if m:
-                material = " ".join(original[m.start("material"):m.end("material")].split()).strip(" .,:").upper()
-                return Intencion("DOCUMENTO_CORREGIR_CAMPO", {
-                    "numero_guia": m.group("guia"), "campo": "descripcion_material", "valor": material,
-                    "referencia": " ".join(str(texto).split())[:500]})
+        material = _intencion_material_guia(texto, original, plano)
+        if material is not None:
+            return material
         for patron in _COORDENADA_DESTINO:
             m = patron.match(plano)
             if m:
