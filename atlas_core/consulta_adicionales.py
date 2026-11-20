@@ -120,23 +120,45 @@ def consultar_adicionales(pregunta, viajes, raiz_atlas):
         por_id[vid] = v
         por_transporte.setdefault(t, []).append(vid)
     cuenta, op, valores_consulta = c
+    # La respuesta parcial se limita al conteo sin filtros de un monto exacto.
+    # No extrapola incertidumbres a un listado, comparacion o filtro adicional.
+    parcial = cuenta and op in ('DE', 'IGUAL A') and len(valores_consulta) == 1 and filtro_extra is None
     montos = {}
+    ambiguas = 0
+    eventos_por_id = {}
     for evento in eventos:
         if evento.get('estado') != 'ACTIVO' or evento.get('tipo_evento') != 'OBSERVACION_OPERACIONAL':
             continue
         nota = _sin_motivo_canonico(_normalizar(evento.get('nota') or ''))
         if not re.search(r'\bADICIONAL(?:ES)?\b', nota):
             continue
+        evento_id = str(evento.get('evento_id') or '').strip()
+        if evento_id:
+            anterior = eventos_por_id.get(evento_id)
+            if anterior is not None:
+                if anterior != evento:
+                    return ('limitacion', 'El registro contiene eventos contradictorios con la misma identidad; no puedo contar con fiabilidad.')
+                continue
+            eventos_por_id[evento_id] = evento
         # No convertir importes por guia, negados, o varios conceptos en un monto de viaje.
         if evento.get('naturaleza') != 'MARCA_VIAJE' or re.search(r'\b(?:POR|CADA)\s+(?:GUIA|DOCUMENTO|FOTO)\b|\b(?:SIN|NO(?:\s+\w+){0,4})\s+ADICIONAL', nota):
+            if parcial:
+                ambiguas += 1
+                continue
             return ('limitacion', 'Hay observaciones de adicionales que no identifican con certeza un monto por viaje; no puedo dar un conteo fiable.')
         hallados = re.findall(r'\bADICIONAL\s+(?:DE|POR|ES DE)\s*(' + _MONTO + r')', nota)
         if not hallados and not valores_consulta and len(re.findall(r'\bADICIONAL(?:ES)?\b', nota)) == 1 and not re.search(r'\d', nota):
             hallados = []
         elif len(hallados) != 1 or len(re.findall(r'\bADICIONAL(?:ES)?\b', nota)) != 1:
+            if parcial:
+                ambiguas += 1
+                continue
             return ('limitacion', 'Hay observaciones de adicionales con importes ambiguos; no puedo dar un conteo fiable.')
         resto = nota.replace(hallados[0], '', 1) if hallados else nota
         if re.search(r'\d', resto):
+            if parcial:
+                ambiguas += 1
+                continue
             return ('limitacion', 'Hay observaciones de adicionales con otras cifras que requieren revision; no puedo dar un conteo fiable.')
         importe = _monto(hallados[0]) if hallados else None
         vid = str(evento.get('viaje_id') or '').strip()
@@ -160,12 +182,22 @@ def consultar_adicionales(pregunta, viajes, raiz_atlas):
                 'MENOR QUE': importe < valor, 'AL MENOS': importe >= valor, 'COMO MINIMO': importe >= valor,
                 'HASTA': importe <= valor, 'COMO MAXIMO': importe <= valor}[op]
     soporte = tuple(por_id[vid] for vid, importes in montos.items() if any(coincide(n) for n in importes) and (filtro_extra is None or vid in filtro_extra))
+    if ambiguas and not soporte:
+        return ('limitacion', f'Hay {ambiguas} observaci\u00f3n(es) ambiguas y no se encontraron viajes con ese monto inequ\u00edvocamente registrado; no puedo dar un conteo fiable.')
     descripcion = ' o '.join(f'${valor:,}'.replace(',', '.') for valor in valores_consulta)
     etiqueta = f'{op.lower()} {descripcion}' if op else ''
     consulta = ConsultaAtlas(metrica=METRICA_COUNT_VIAJES if cuenta else METRICA_LISTAR_VIAJES,
                              filtros={**filtros_base, 'adicional': etiqueta or 'CUALQUIERA'})
     resultado = ResultadoConsultaAtlas(consulta, len(soporte) if cuenta else soporte, 'viajes', len(soporte), soporte)
     mensaje = f'{len(soporte)} viaje(s) con adicional {etiqueta}.'.replace(' .', '.')
+    if ambiguas:
+        viaje = 'viaje' if len(soporte) == 1 else 'viajes'
+        observacion = 'observaci\u00f3n ambigua' if ambiguas == 1 else 'observaciones ambiguas'
+        pendiente = 'pendiente' if ambiguas == 1 else 'pendientes'
+        verbo = 'existe' if ambiguas == 1 else 'existen'
+        mensaje = (f'Hay {len(soporte)} {viaje} con adicional confirmado de {descripcion}. '
+                   f'Adem\u00e1s, {verbo} {ambiguas} {observacion} {pendiente} de revisi\u00f3n; '
+                   'no se sabe cu\u00e1ntos viajes distintos representan.')
     if filtro_extra is not None:
         mensaje += ' Se aplicaron los filtros indicados de chofer, fecha o campos.'
     if not eventos:
