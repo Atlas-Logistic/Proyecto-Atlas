@@ -47,6 +47,10 @@ from atlas_core.direccion_equivalente import (
     direcciones_equivalentes_por_sufijo_geografico,
 )
 
+from atlas_core.territorio_chile import (
+    ESTADO_COMUNA_NORMALIZADA_SEGURA, normalizar_comuna,
+)
+
 if TYPE_CHECKING:  # pragma: no cover - sólo para anotaciones
     from atlas_core.gestor_viajes import DocumentoViaje
 
@@ -270,6 +274,26 @@ def _numero_compatible_con_confirmado(numero_documental: str, numero_confirmado:
     return len(numero_documental) >= 3 and numero_confirmado.endswith(numero_documental)
 
 
+def _comunas_sufijo_con_normalizacion_segura(tokens: Sequence[str]) -> set[str] | None:
+    """Acepta una sola lectura OCR segura y exige cubrir todo el sufijo."""
+    alternativas = []
+    for inicio in range(len(tokens)):
+        for fin in range(inicio + 1, len(tokens) + 1):
+            resultado = normalizar_comuna(" ".join(tokens[inicio:fin]))
+            if resultado.estado != ESTADO_COMUNA_NORMALIZADA_SEGURA:
+                continue
+            oficial = comuna_oficial(resultado.comuna or "")
+            if not oficial:
+                continue
+            comunas = comunas_en_sufijo([*tokens[:inicio], *oficial.split(), *tokens[fin:]])
+            if comunas is not None:
+                alternativas.append(comunas)
+    # Diferentes interpretaciones del sufijo no son evidencia segura.
+    if not alternativas or any(c != alternativas[0] for c in alternativas[1:]):
+        return None
+    return alternativas[0]
+
+
 def _documento_compatible_con_destino_confirmado(
     documento: "DocumentoViaje", confirmado: "DocumentoViaje",
 ) -> bool:
@@ -291,6 +315,8 @@ def _documento_compatible_con_destino_confirmado(
             continue
         calle, numero, sufijo = partes
         comunas_sufijo = comunas_en_sufijo(sufijo)
+        if comunas_sufijo is None and numero == numero_confirmado:
+            comunas_sufijo = _comunas_sufijo_con_normalizacion_segura(sufijo)
         if (comunas_sufijo is None
                 or not _numero_compatible_con_confirmado(numero, numero_confirmado)
                 or not _calles_compatibles_con_confirmada(calle, calle_confirmada)):
