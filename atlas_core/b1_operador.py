@@ -31,7 +31,7 @@ from __future__ import annotations
 import re
 import unicodedata
 from dataclasses import dataclass, field
-from datetime import datetime, timedelta, timezone
+from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from typing import Mapping, Protocol
 
@@ -230,6 +230,76 @@ _FOLIO_GUIA_CORREGIR = [
     re.compile(r"^LA\s+GUIA\s+" + _GUIA_ACTUAL + r"\s+TIENE\s+COMO\s+(?:NUMERO|FOLIO)\s+CORRECTO\s+"
                + _FOLIO_NUEVO + r"(?:" + _SIN_OTROS_CAMBIOS + r")?$"),
 ]
+# FECHA DE EMISIÓN de una guía dicha por un humano: "la fecha de emisión de
+# la guía N es 19-10-2026", "corrige la fecha de la guía N al 19 de octubre de
+# 2026", "la guía N fue emitida el 19/10/2026". Mismo canal que peso y
+# material (DOCUMENTO_CORREGIR_CAMPO, campo `fecha`, DD-MM-AAAA); la fecha
+# sólo se normaliza si es inequívoca (`_fecha_emision_declarada`).
+_FECHA = r"(?:LA\s+)?FECHA(?:\s+DE\s+EMISION)?(?:\s+(?:CORRECTA|REAL|VERDADERA))?"
+_FECHA_ES = r"(?:\s+(?:ES(?:\s+(?:EL|DEL))?|SERA|DEBE\s+SER|DEBERIA\s+SER|CORRESPONDE\s+(?:A|AL))\s+|\s*:\s*)"
+_FECHA_GUIA = [
+    re.compile(r"^" + _FECHA + r"\s+(?:DE\s+LA\s+|DE\s+)" + _GUIA + _FECHA_ES + r"(?P<fecha>.+)$"),
+    re.compile(r"^EN\s+LA\s+" + _GUIA + r"\s*,?\s*" + _FECHA + _FECHA_ES + r"(?P<fecha>.+)$"),
+    re.compile(r"^(?:CORRIGE|CORREGIR|CAMBIA|CAMBIAR|FIJA|FIJAR)\s+" + _FECHA + r"\s+(?:DE\s+LA\s+|DE\s+)" + _GUIA
+               + r"\s+(?:A|AL|POR|EN|COMO)\s+(?:EL\s+|LA\s+FECHA\s+)?(?P<fecha>.+)$"),
+    re.compile(r"^(?:LA\s+)?" + _GUIA + r"\s+(?:FUE\s+EMITIDA|SE\s+EMITIO|ES\s+DE\s+FECHA|TIENE\s+FECHA(?:\s+DE\s+EMISION)?)"
+               r"\s+(?:EL\s+|DEL?\s+|:\s*)?(?P<fecha>.+)$"),
+]
+# Una frase de fecha que nombra varias guías nunca se reduce a una sola.
+_FECHA_VARIAS_GUIAS = re.compile(
+    r"\b(?:FECHAS?(?:\s+DE\s+EMISION)?|EMITIDAS?|EMITIO|EMITIERON)\b.*\bGUIAS?\b|\bGUIAS?\b.*\b(?:FECHAS?|EMITIDAS?|EMITIERON)\b")
+_MESES = {"ENERO": 1, "FEBRERO": 2, "MARZO": 3, "ABRIL": 4, "MAYO": 5, "JUNIO": 6, "JULIO": 7, "AGOSTO": 8,
+          "SEPTIEMBRE": 9, "SETIEMBRE": 9, "OCTUBRE": 10, "NOVIEMBRE": 11, "DICIEMBRE": 12}
+_NOMBRE_MES = {n: m for m, n in _MESES.items() if m != "SETIEMBRE"}
+_FECHA_DMY = re.compile(r"^(?P<d>\d{1,2})(?P<s>[-/.])(?P<m>\d{1,2})(?P=s)(?P<a>\d{4})$")
+_FECHA_ISO = re.compile(r"^(?P<a>\d{4})-(?P<m>\d{1,2})-(?P<d>\d{1,2})$")
+_FECHA_TEXTO = re.compile(r"^(?P<d>\d{1,2})\s+(?:DE\s+)?(?P<mes>[A-Z]+)\s+(?:DE(?:L)?\s+)?(?P<a>\d{4})$")
+_FECHA_SIN_ANIO = re.compile(r"^\d{1,2}(?:[-/.]\d{1,2}(?:[-/.]\d{1,2})?|\s+(?:DE\s+)?[A-Z]+)$")
+
+
+def _fecha_emision_declarada(original: str, *, hoy: date | None = None) -> str:
+    """Fecha inequívoca -> DD-MM-AAAA (formato del canal). Numérica se lee
+    día-mes-año (convención de las guías y del dataset); también ISO
+    AAAA-MM-DD y «19 de octubre de 2026». Sin año, con año de dos cifras,
+    relativa («ayer») o con más de una fecha: ambigua. Fecha imposible o
+    posterior a hoy: inválida. Nunca se completa ni se adivina."""
+    texto = " ".join(_plano(original).split()).strip(" .,;")
+    texto = re.sub(r"^(?:EL\s+)?(?:DIA\s+)?(?:(?:LUNES|MARTES|MIERCOLES|JUEVES|VIERNES|SABADO|DOMINGO),?\s+)?", "", texto)
+    ejemplo = "Indícala con día, mes y año, por ejemplo «19-10-2026» o «19 de octubre de 2026». No se corrigió nada."
+    m = _FECHA_DMY.match(texto) or _FECHA_ISO.match(texto) or _FECHA_TEXTO.match(texto)
+    if m is None:
+        if _FECHA_SIN_ANIO.match(texto) or re.fullmatch(r"\d{1,2}[-/.]\d{1,2}[-/.]\d{2}", texto):
+            raise ErrorContratoInterpretacion(f"La fecha «{original.strip()}» es ambigua: falta el año completo. {ejemplo}")
+        raise ErrorContratoInterpretacion(f"No entendí la fecha «{original.strip()}» como una sola fecha exacta. {ejemplo}")
+    if "mes" in m.groupdict():
+        mes = _MESES.get(m.group("mes"))
+        if mes is None:
+            raise ErrorContratoInterpretacion(f"No reconozco el mes de «{original.strip()}». {ejemplo}")
+    else:
+        mes = int(m.group("m"))
+    try:
+        fecha = date(int(m.group("a")), mes, int(m.group("d")))
+    except ValueError:
+        raise ErrorContratoInterpretacion(f"La fecha «{original.strip()}» no existe en el calendario. {ejemplo}") from None
+    from atlas_core.campos_documentales import _fecha_emision_valida
+    normalizada = fecha.strftime("%d-%m-%Y")
+    if not _fecha_emision_valida(normalizada):
+        raise ErrorContratoInterpretacion(f"La fecha «{original.strip()}» está fuera del rango admitido. {ejemplo}")
+    if fecha > (hoy or date.today()):
+        raise ErrorContratoInterpretacion(
+            f"La fecha «{original.strip()}» es posterior a hoy: una guía no puede emitirse en el futuro. No se corrigió nada.")
+    return normalizada
+
+
+def _fecha_emision_legible(valor: object) -> str:
+    texto = str(valor or "").strip()
+    try:
+        fecha = datetime.strptime(texto, "%d-%m-%Y").date()
+    except ValueError:
+        return f"«{texto}»" if texto else "sin fecha"
+    return f"{texto} ({fecha.day} de {_NOMBRE_MES[fecha.month].lower()} de {fecha.year})"
+
+
 # Miles sólo con punto en grupos de 3 ("12.450"); coma, decimales u otra
 # unidad (toneladas) son ambiguos y se rechazan.
 _PESO_KG = re.compile(r"^(?P<n>[1-9]\d{0,2}(?:\.\d{3})+|[1-9]\d*)\s*(?:KG|KGS|KILOS?|KILOGRAMOS?)?$")
@@ -825,6 +895,23 @@ def _intencion_estado_lote(original: str, plano: str) -> Intencion | None:
     return None
 
 
+def _intencion_fecha_guia(texto: str, original: str, plano: str) -> Intencion | None:
+    if _VERBO_LECTURA.match(plano):
+        return None
+    if _FECHA_VARIAS_GUIAS.search(plano) and len(set(_NUMERO_GUIA.findall(plano))) >= 2:
+        raise ErrorContratoInterpretacion(
+            "La instrucción de fecha nombra más de una guía. Corrige la fecha de una guía por instrucción, "
+            "por ejemplo «La fecha de emisión de la guía 482492 es 19-10-2026». No se corrigió nada.")
+    for patron in _FECHA_GUIA:
+        m = patron.match(plano)
+        if m:
+            return Intencion("DOCUMENTO_CORREGIR_CAMPO", {
+                "numero_guia": m.group("guia"), "campo": "fecha",
+                "valor": _fecha_emision_declarada(original[m.start("fecha"):m.end("fecha")]),
+                "referencia": " ".join(str(texto).split())[:500]})
+    return None
+
+
 def interpretar_determinista(texto: str) -> Intencion | None:
     """Sólo patrones de alta certeza; ante la duda devuelve None."""
     from atlas_core.operaciones_conversacionales import _interpretar
@@ -870,6 +957,9 @@ def interpretar_determinista(texto: str) -> Intencion | None:
         if len(guias) >= 2:
             return Intencion("VIAJE_AGRUPAR_GUIAS", {"guias": guias})
     if not es_pregunta:
+        fecha = _intencion_fecha_guia(texto, original, plano)
+        if fecha is not None:
+            return fecha
         for patron in _CHOFER_GUIA:
             m = patron.match(plano)
             if m:
@@ -1178,6 +1268,16 @@ _RECHAZO_PESO = {
 }
 
 
+_RECHAZO_FECHA = {
+    "ENTIDAD_AMBIGUA": "La guía {guia} tiene más de un documento en Atlas; no corrijo la fecha de una guía ambigua. "
+                       "No se corrigió nada.",
+    "ENTIDAD_NO_ENCONTRADA": "No encontré la guía {guia} en Atlas. No se corrigió nada.",
+    "CAMPO_FIJADO_POR_DECISION_HUMANA": "La fecha de la guía {guia} ya fue fijada por una decisión de Revisión de "
+                                        "Atlas; corrígela desde esa decisión. No se corrigió nada.",
+    "PRECONDICION_FALLIDA": "No corregí la fecha de la guía {guia}: {m}",
+}
+
+
 _SUGERENCIA_MATERIAL = "Si conoces el material, escríbelo así: «el material de la guía {guia} es …»."
 
 
@@ -1303,6 +1403,12 @@ def _describir_preview(preview: Mapping[str, object]) -> str:
                  f"{_material_legible(propuesto.get('descripcion_material'))}. Origen: indicado por el usuario "
                  "(decisión humana). Sólo cambia el material de esta guía y su tipo de carga derivado; "
                  "el documento original no se modifica.")
+    elif accion == "DOCUMENTO_CORREGIR_CAMPO" and entidad.get("campo") == "fecha":
+        texto = (f"Corregir la fecha de emisión de la guía {entidad.get('numero_guia')} (transporte "
+                 f"{entidad.get('numero_transporte') or 'sin transporte'}): fecha anterior "
+                 f"{_fecha_emision_legible((actual or {}).get('fecha'))}, fecha propuesta "
+                 f"{_fecha_emision_legible(propuesto.get('fecha'))}. Origen: indicado por el usuario (decisión humana). "
+                 "Sólo cambia la fecha de esta guía; el documento original y su lectura OCR no se modifican.")
     elif accion == "DOCUMENTO_RECUPERAR_MATERIAL":
         texto = (f"Material de la guía {entidad.get('numero_guia')}: actual "
                  f"{_material_legible((actual or {}).get('descripcion_material'))}, propuesto "
@@ -2669,6 +2775,9 @@ class OperadorB1:
             if intencion.accion == "DOCUMENTO_CORREGIR_CAMPO" and parametros.get("campo") == "peso_kg":
                 mensaje = _RECHAZO_PESO.get(str(preview.get("codigo")), "{m}").format(
                     guia=parametros.get("numero_guia"), m=mensaje)
+            elif intencion.accion == "DOCUMENTO_CORREGIR_CAMPO" and parametros.get("campo") == "fecha":
+                mensaje = _RECHAZO_FECHA.get(str(preview.get("codigo")), "{m}. No se corrigió nada.").format(
+                    guia=parametros.get("numero_guia"), m=mensaje)
             elif intencion.accion == ACCION_CHOFER_OPERACIONAL:
                 mensaje = _RECHAZO_CHOFER.get(str(preview.get("codigo")), "{m}. No se corrigió nada.").format(
                     guia=parametros.get("numero_guia"), m=mensaje)
@@ -2891,6 +3000,12 @@ class OperadorB1:
                         "mensaje": (f"Listo: la guía {pendiente['parametros']['numero_guia']} quedó con material "
                                     f"{_material_legible((resultado.get('despues') or {}).get('descripcion_material'))} "
                                     f"(antes {_material_legible((resultado.get('antes') or {}).get('descripcion_material'))}). "
+                                    "La corrección queda registrada y Atlas no la reemplazará con una nueva lectura.")}
+            if pendiente["accion"] == "DOCUMENTO_CORREGIR_CAMPO" and pendiente["parametros"].get("campo") == "fecha":
+                return {"estado": "EJECUTADA", "accion": pendiente["accion"], "resultado": resultado,
+                        "mensaje": (f"Listo: la guía {pendiente['parametros']['numero_guia']} quedó con fecha de emisión "
+                                    f"{_fecha_emision_legible((resultado.get('despues') or {}).get('fecha'))} "
+                                    f"(antes {_fecha_emision_legible((resultado.get('antes') or {}).get('fecha'))}). "
                                     "La corrección queda registrada y Atlas no la reemplazará con una nueva lectura.")}
             if pendiente["accion"] == "DOCUMENTO_RECUPERAR_MATERIAL":
                 despues = resultado.get("despues") or {}

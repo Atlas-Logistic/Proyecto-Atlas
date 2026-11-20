@@ -1482,6 +1482,8 @@ def _plan_documento_campo(ctx: _Contexto, p: dict) -> Plan:
         sin_cambios = False
     if campo == "numero_transporte":
         return _plan_documento_transporte(ctx, p, fila, sin_cambios=sin_cambios)
+    if campo == "fecha":
+        return _plan_documento_fecha(ctx, fila, actual, valor, sin_cambios=sin_cambios)
     obsoletas = [d for d in ctx.decisiones() if _decision_obsoleta_por_campo(d, archivo, campo, valor)]
     return Plan(
         entidad={"tipo": "DOCUMENTO", "id": archivo, "numero_guia": fila.get("numero_guia", ""),
@@ -1499,6 +1501,121 @@ def _plan_documento_campo(ctx: _Contexto, p: dict) -> Plan:
         archivos=("dataset", "bandeja", "ledger_decisiones"),
         datos={"archivo": archivo, "guia": str(fila.get("numero_guia", "")),
                "transporte": str(fila.get("numero_transporte", ""))},
+    )
+
+
+def _fecha_dmy(valor: object) -> date | None:
+    try:
+        return datetime.strptime(str(valor or "").strip(), "%d-%m-%Y").date()
+    except ValueError:
+        return None
+
+
+def _precondiciones_cambio_fecha(ctx: _Contexto, fila: Mapping[str, str], nueva: str) -> dict[str, object]:
+    """Dependencias de la fecha de emisión que viven fuera de la fila.
+
+    Se recalculan solas con la reconciliación focal y el reporte: el viaje
+    (su fecha sale de sus guías), las tarjetas de la guía y la patente
+    operacional por asignación vigente que se PROYECTA sobre la patente
+    impresa. Bloquean, porque este canal no las rehace:
+    - una agrupación de viaje confirmada por una persona, que exigió la
+      misma fecha en todos sus transportes;
+    - una patente que el procesamiento ESCRIBIÓ en la guía por la asignación
+      vigente del chofer y que, con la nueva fecha, la asignación ya no
+      respalda (la guía quedaría antes de esa asignación)."""
+    from atlas_core.agrupacion_viajes import agrupaciones_activas
+    from atlas_core.equipo_operacional import (
+        ResolutorEquipoOperacional, sustituciones_automaticas_patente,
+    )
+    archivo, transporte = str(fila.get("archivo", "")), _transporte(fila)
+    fecha_nueva = _fecha_dmy(nueva)
+    if transporte:
+        agrupaciones = [a for a in agrupaciones_activas(ctx.actual)
+                        if transporte in {str(t).strip() for t in a.get("transportes") or []}]
+        if agrupaciones:
+            raise ErrorAccionOperacional(
+                "PRECONDICION_FALLIDA",
+                f"el transporte {transporte} participa en una agrupación de viaje confirmada, que exige la misma "
+                "fecha en todos sus documentos; cambiar la fecha de una sola guía la dejaría inconsistente. "
+                "No se corrigió nada.",
+            )
+    resolutor = ResolutorEquipoOperacional(carpeta_catalogos=ctx.catalogos,
+                                           ruta_ledger=ctx.archivos["ledger_decisiones"])
+    antes = sustituciones_automaticas_patente(fila, resolutor=resolutor)
+    procesamiento = {c: d for c, d in antes.items() if d.get("origen") == "PROCESAMIENTO"}
+    if procesamiento:
+        vigentes = resolutor._vigentes
+        for campo, datos in sorted(procesamiento.items()):
+            vigente = vigentes.get(str(datos["valor_operacional"]))
+            desde = datetime.fromisoformat(vigente[2]).date() if vigente else None
+            if desde is None or fecha_nueva is None or fecha_nueva < desde:
+                raise ErrorAccionOperacional(
+                    "PRECONDICION_FALLIDA",
+                    f"la patente {_NOMBRE_CAMPO_PATENTE.get(campo, campo)} {datos['valor_operacional']} se aplicó "
+                    "a esta guía por la asignación vigente del chofer, y con la fecha "
+                    f"{nueva} esa asignación ya no la respalda"
+                    + (f" (vigente desde el {desde.strftime('%d-%m-%Y')})" if desde else "")
+                    + ". Este canal no rehace la patente. No se corrigió nada.",
+                )
+    proyectadas = {c: d for c, d in antes.items() if d.get("origen") == "PROYECCION"}
+    despues = {c: d for c, d in resolutor.discrepancias({**fila, "fecha": nueva}).items()
+               if d.get("fuente") == "ASIGNACION_VIGENTE"}
+    cambios_equipo = []
+    for campo in sorted(set(proyectadas) | set(despues)):
+        previo = (proyectadas.get(campo) or {}).get("valor_operacional") or ""
+        nuevo = (despues.get(campo) or {}).get("valor_operacional") or ""
+        if previo != nuevo:
+            impresa = _patente_legible(fila.get(campo))
+            cambios_equipo.append(
+                f"Con la nueva fecha, la patente operacional del {_NOMBRE_CAMPO_PATENTE.get(campo, campo)} pasa de "
+                f"{previo or impresa} a {nuevo or impresa} según la asignación vigente del chofer; "
+                "la incidencia de patente se recalcula.")
+    viaje = [dict(f) for f in ctx.filas() if transporte and _transporte(f) == transporte]
+    otras = sorted({(str(f.get("numero_guia", "")).strip(), str(f.get("fecha", "")).strip())
+                    for f in viaje if str(f.get("archivo", "")) != archivo
+                    and _fecha_dmy(f.get("fecha")) is not None and str(f.get("fecha", "")).strip() != nueva})
+    return {"viaje": viaje, "otras": otras, "cambios_equipo": cambios_equipo}
+
+
+def _patente_legible(valor: object) -> str:
+    texto = str(valor or "").strip()
+    return texto if texto and texto.upper() not in {"NO ENCONTRADO", "REVISAR", "ILEGIBLE"} else "sin patente"
+
+
+def _plan_documento_fecha(ctx: _Contexto, fila: dict[str, str], actual: str, nueva: str, *,
+                          sin_cambios: bool) -> Plan:
+    archivo, guia, transporte = str(fila.get("archivo", "")), str(fila.get("numero_guia", "")), _transporte(fila)
+    dependencias = ({"viaje": [], "otras": [], "cambios_equipo": []} if sin_cambios
+                    else _precondiciones_cambio_fecha(ctx, fila, nueva))
+    obsoletas = [] if sin_cambios else [
+        d for d in ctx.decisiones() if _decision_obsoleta_por_campo(d, archivo, "fecha", nueva)]
+    consecuencias = []
+    if dependencias["otras"]:
+        consecuencias.append(
+            f"Atención: en el transporte {transporte} " + ", ".join(
+                f"la guía {g} tiene fecha {f}" for g, f in dependencias["otras"])
+            + "; el viaje quedará en revisión por fechas distintas hasta que coincidan.")
+    consecuencias.extend(dependencias["cambios_equipo"])
+    consecuencias.extend([
+        "El valor queda protegido en el ledger: un reproceso/OCR no lo revierte.",
+        "Se recalculan las tarjetas de esta guía, la fecha del viaje y el reporte, sin reconciliación global.",
+    ])
+    return Plan(
+        entidad={"tipo": "DOCUMENTO", "id": archivo, "numero_guia": guia, "numero_transporte": transporte,
+                 "campo": "fecha"},
+        valor_actual={"fecha": actual}, valor_propuesto={"fecha": nueva},
+        # Las filas del viaje: si otra guía del transporte cambia entre el
+        # preview y la confirmación, el aviso mostrado ya no es cierto.
+        estado_base={"fila": fila, "viaje": dependencias["viaje"]}, sin_cambios=sin_cambios,
+        afectados={"guias": [guia], "numero_transporte": transporte,
+                   "guias_del_viaje_con_otra_fecha": [{"numero_guia": g, "fecha": f} for g, f in dependencias["otras"]],
+                   "decisiones_obsoletas": [{"decision_id": d.get("decision_id"), "tipo": d.get("tipo"),
+                                             "valor_documental": d.get("valor_documental")} for d in obsoletas]},
+        consecuencias=consecuencias,
+        revalidaciones=["RETIRO_DECISIONES_OBSOLETAS", "RECONCILIAR_BANDEJA", "MANTENIMIENTO_FOCAL_GUIA",
+                        "REGENERAR_REPORTE_VIAJES"],
+        archivos=("dataset", "bandeja", "ledger_decisiones"),
+        datos={"archivo": archivo, "guia": guia, "transporte": transporte},
     )
 
 
