@@ -125,7 +125,8 @@ def test_obra_inexistente_se_abstiene_sin_crear(entorno, b1):  # noqa: F811
     r = b1.atender("c", "La obra de la guía 500001 es Obra Vieja")
     assert r["estado"] == "ACLARACION_REQUERIDA"
     assert {c["obra_id"] for c in r["candidatos"]} == {OBRA_ID, "obra-vieja-colina"}  # sugerencias, no elección
-    assert "No creo obras nuevas" in r["mensaje"]
+    # Ofrece el registro oficial, pero no crea ni corrige nada por sí mismo.
+    assert "No se corrigió ni se creó nada" in r["mensaje"] and "registra la obra OBRA VIEJA" in r["mensaje"]
     r = b1.atender("c", "La obra de la guía 500001 es Torre Inventada")
     assert r["estado"] == "ACLARACION_REQUERIDA" and r["candidatos"] == []
     assert b1.pendiente("c") is None and b1.atender("c", "sí")["estado"] == "SIN_PREVIEW_PENDIENTE"

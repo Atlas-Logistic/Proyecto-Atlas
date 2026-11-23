@@ -1249,6 +1249,12 @@ def resolver_decision_destino(decisiones: list[Mapping[str, object]], guia: str)
                 "de un viaje ya calculado está mal, usa «Corregir destino» en la Logística del viaje.")
 
 
+def _clave_obra(nombre: str) -> str:
+    """Clave de comparación de obras de resolver_obra (LTDA = LIMITADA)."""
+    from atlas_core.catalogo_obras_destinos import normalizar_nombre_obra
+    return re.sub(r"\bLTDA\b", "LIMITADA", normalizar_nombre_obra(nombre))
+
+
 def resolver_obra(obras: list, mencion: str) -> dict:
     """{'estado': RESUELTO|AMBIGUO|DESCONOCIDO, 'obra_id', 'nombre', 'candidatos'}.
     Sólo coincidencia exacta normalizada con el nombre canónico o un alias de
@@ -2155,6 +2161,9 @@ class OperadorB1:
             with bloqueo_sesion(self._actual, "b1_operador_conversaciones"):
                 estado = self._leer()
                 decision_id, texto = separar_contexto_revision(texto)
+                # El ofrecimiento de registrar una obra vale sólo para el mensaje
+                # inmediatamente siguiente, en la misma conversación y tarjeta.
+                oferta_obra = self._tomar_oferta_obra(estado, conversacion_id)
                 if es_confirmacion_discrepancia(texto):
                     self._olvidar_investigacion(estado, conversacion_id)
                     return self._confirmar(estado, conversacion_id, discrepancia_rut=True)
@@ -2169,6 +2178,9 @@ class OperadorB1:
                     self._fijar_pendiente(estado, conversacion_id, None)
                     return {"estado": "CANCELADA" if tenia else "SIN_PREVIEW_PENDIENTE",
                             "mensaje": "Operación pendiente descartada." if tenia else "No había nada pendiente."}
+                registro = self._registro_obra_ofrecida(estado, conversacion_id, decision_id, texto, oferta_obra)
+                if registro is not None:
+                    return registro
                 if decision_id:
                     return self._instruccion_revision(estado, conversacion_id, decision_id, texto)
                 por_folio = self._instruccion_folio_transporte(estado, conversacion_id, texto)
@@ -2204,6 +2216,90 @@ class OperadorB1:
             isinstance(a, dict) and a.get("tipo") == TIPO and (a.get("documento") or {}).get("archivo") in archivos
             for a in vista["ledger"].get("aplicaciones") or [])
 
+    # ------------------------------------------------- obra nueva ofrecida
+
+    def _ofrecer_registro_obra(self, estado: dict, conversacion_id: str, mencion: str, parametros: Mapping[str, object],
+                               candidatos: list, revision: tuple[Mapping[str, object], str] | None,
+                               texto: str) -> dict | None:
+        """La obra pedida para una guía no existe en el catálogo de OBRAS.
+        No se crea nada: se ofrece el registro oficial (OBRA_REGISTRAR, con
+        cliente explícito, preview y confirmación) y, sólo si la persona lo
+        pide en el mensaje siguiente, la corrección de la guía queda encadenada
+        con su propia vista previa y confirmación. None si la orden no
+        identifica un documento único (se responde como antes)."""
+        from atlas_core.catalogo_clientes import CatalogoClientes
+        guia, archivo = str(parametros.get("numero_guia") or ""), str(parametros.get("archivo") or "")
+        filas = [f for f in self.capa._ctx.filas()
+                 if (str(f.get("archivo") or "").strip() == archivo if archivo
+                     else str(f.get("numero_guia") or "").strip() == guia)]
+        if len(filas) != 1:
+            return None
+        documento = f"la guía {guia}" if guia.isdigit() else "este documento"
+        compacta = re.sub(r"[^A-Z0-9]", "", _clave_obra(mencion))
+        casi = [o for o in self.capa._ctx.catalogo_obras().listar_obras()
+                if o.estado_vigencia == "ACTIVO" and o.estado not in {"RECHAZADA", "INACTIVA"} and compacta
+                and compacta in {re.sub(r"[^A-Z0-9]", "", _clave_obra(x)) for x in (o.nombre_canonico, *o.aliases_documentales)}]
+        if casi:
+            # Sólo difiere en puntuación o espacios de una obra existente: se
+            # propone ésa; registrar otra sería un duplicado.
+            listado = "; ".join(o.nombre_canonico for o in casi)
+            return {"estado": "ACLARACION_REQUERIDA", "accion": "DOCUMENTO_ASIGNAR_OBRA",
+                    "candidatos": [{"obra_id": o.obra_id, "nombre": o.nombre_canonico} for o in casi],
+                    "mensaje": f"«{mencion}» no coincide exactamente con una obra, pero equivale a: {listado}. "
+                               f"Repite la corrección de {documento} con ese nombre. No se corrigió ni se creó nada."}
+        clientes = CatalogoClientes(self.capa._ctx.archivos["clientes"]).listar()
+        del_documento = resolver_cliente(clientes, str(filas[0].get("cliente") or ""))
+        cliente = str(del_documento["nombre"]) if del_documento["estado"] == "RESUELTO" else ""
+        es_cliente = resolver_cliente(clientes, mencion)["estado"] == "RESUELTO"
+        decision_id = str(revision[0].get("decision_id") or "") if revision else ""
+        self._fijar(estado, conversacion_id, "oferta_obra", {
+            "obra": mencion, "decision_id": decision_id, "documento": documento,
+            "siguiente": {"decision_id": decision_id, "texto": revision[1] if revision else str(texto),
+                          **({"alternativa": f"La obra de la guía {guia} es {mencion}"}
+                             if revision and guia.isdigit() else {})},
+            "creado_en": self.reloj().isoformat()})
+        listado = "; ".join(str(c["nombre"]) for c in candidatos)
+        orden = f"registra la obra {mencion} para el cliente {cliente or '<cliente existente>'}"
+        mensaje = (f"«{mencion}» no está registrada en el catálogo de obras"
+                   + (f" (sí existe como cliente, y un cliente no es una obra)" if es_cliente else "")
+                   + (f". ¿Te refieres a alguna de estas? {listado}" if candidatos else "")
+                   + f". No se corrigió ni se creó nada. Si es una obra nueva, escribe: «{orden}». Te mostraré el "
+                   f"registro para que lo confirmes y, después, la corrección de {documento} por separado.")
+        return {"estado": "ACLARACION_REQUERIDA", "accion": "DOCUMENTO_ASIGNAR_OBRA", "candidatos": candidatos,
+                "registro_ofrecido": {"obra": mencion, **({"cliente": cliente} if cliente else {})},
+                "mensaje": mensaje}
+
+    def _tomar_oferta_obra(self, estado: dict, conversacion_id: str) -> dict | None:
+        oferta = (estado.get("conversaciones", {}).get(conversacion_id) or {}).get("oferta_obra")
+        if oferta is not None:
+            self._fijar(estado, conversacion_id, "oferta_obra", None)
+        return oferta if isinstance(oferta, dict) else None
+
+    def _registro_obra_ofrecida(self, estado: dict, conversacion_id: str, decision_id: str, texto: str,
+                                oferta: dict | None) -> dict | None:
+        """«registra la obra X …» justo después de ofrecerla para una guía:
+        el registro sigue el canal oficial (preview + confirmación) y deja
+        encadenada la corrección de la guía, que se confirma por separado.
+        Cualquier otro mensaje sigue su curso normal."""
+        if oferta is None or str(oferta.get("decision_id") or "") != decision_id:
+            return None
+        try:
+            intencion = interpretar_determinista(texto)
+        except ErrorContratoInterpretacion:
+            return None
+        if (intencion is None or intencion.accion != "OBRA_REGISTRAR"
+                or _clave_obra(str(intencion.parametros.get("nombre_obra") or "")) != _clave_obra(str(oferta["obra"]))):
+            return None
+        siguiente = oferta["siguiente"]
+        respuesta = self._instruccion(estado, conversacion_id, texto)
+        if respuesta.get("estado") == "SIN_CAMBIOS":
+            # Ya registrada (p. ej. por otra persona): se reutiliza, sin duplicar.
+            return self._continuar_correccion(estado, conversacion_id, siguiente, {
+                "estado": "EJECUTADA", "mensaje": f"La obra {oferta['obra']} ya existe; no se crea otra."})
+        return self._dejar_siguiente(estado, conversacion_id, respuesta, dict(siguiente),
+                                     f"Al confirmar el registro te mostraré la corrección de {oferta['documento']} "
+                                     "para que la confirmes por separado.")
+
     def _dejar_siguiente(self, estado: dict, conversacion_id: str, respuesta: dict, siguiente: dict, aviso: str) -> dict:
         """Una orden con dos correcciones: cada una conserva su propia vista
         previa, confirmación y auditoría; si no se confirma, la otra no ocurre."""
@@ -2220,6 +2316,9 @@ class OperadorB1:
         decision_id = str(siguiente.get("decision_id") or "")
         respuesta = (self._instruccion_revision(estado, conversacion_id, decision_id, texto) if decision_id
                      else self._instruccion(estado, conversacion_id, texto))
+        if respuesta.get("codigo") == "REVISION_NO_PENDIENTE" and siguiente.get("alternativa"):
+            # La confirmación anterior retiró la tarjeta: misma corrección por número de guía.
+            respuesta = self._instruccion(estado, conversacion_id, str(siguiente["alternativa"]))
         return {**respuesta, "aplicado_previo": resultado.get("mensaje", ""),
                 "mensaje": f"{resultado.get('mensaje', '')} {respuesta.get('mensaje', '')}".strip()}
 
@@ -2427,6 +2526,11 @@ class OperadorB1:
         if "obra" in intencion.menciones:
             mencion = intencion.menciones["obra"]
             resolucion = resolver_obra(self.capa._ctx.catalogo_obras().listar_obras(), mencion)
+            if resolucion["estado"] == "DESCONOCIDO" and intencion.accion == "DOCUMENTO_ASIGNAR_OBRA":
+                oferta = self._ofrecer_registro_obra(estado, conversacion_id, mencion, parametros,
+                                                     resolucion["candidatos"], revision, texto)
+                if oferta is not None:
+                    return oferta
             if resolucion["estado"] != "RESUELTO":
                 candidatos = resolucion["candidatos"]
                 listado = "; ".join(str(c["nombre"]) for c in candidatos)
