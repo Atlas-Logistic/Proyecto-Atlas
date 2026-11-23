@@ -1,4 +1,4 @@
-﻿"""Interpretación acotada del error documental de equipo para integrar en B1.
+"""Interpretación acotada del error documental de equipo para integrar en B1.
 
 Devuelve únicamente los parámetros de una acción oficial. El llamador debe
 usar CapaAccionesOperacionales.previsualizar y su confirmación habitual; este
@@ -28,6 +28,18 @@ def interpretar_error_equipo(texto: str) -> IntencionErrorEquipo | None:
     plano = unicodedata.normalize("NFKD", original.upper())
     plano = "".join(c for c in plano if not unicodedata.combining(c))
     plano = plano.strip().rstrip(".!")
+    especifica = re.fullmatch(
+        r"(?:CORRIGE|CORREGIR|CONFIRMA|CONFIRMAR) (?:EL )?ERROR (?:DOCUMENTAL|(?:DE )?OCR) "
+        r"(?:DE |EN )?(?:LA )?GUIA\s*(?:N[°º]?\s*)?(?P<guia>\d{3,12})[,:]? "
+        r"(?:LA )?PATENTE (?:(?:DEL|DE LA|DE) )?(?P<tipo>TRACTO|CAMION|RAMPLA|CARRO) "
+        r"(?:ES|A|POR) (?P<patente>[A-Z0-9]{6})", plano)
+    if especifica:
+        tipo = especifica.group("tipo")
+        return IntencionErrorEquipo(
+            accion="DOCUMENTO_CONFIRMAR_ERROR_DOCUMENTAL_AZA",
+            parametros={"numero_guia": especifica.group("guia"), "referencia": original[:500],
+                        "campo_declarado": "patente_tracto" if tipo in {"TRACTO", "CAMION"} else "patente_rampla",
+                        "patente_declarada": especifica.group("patente")})
     patron = (
         r"(?:CONFIRMA|CONFIRMAR) (?:EL )?ERROR DOCUMENTAL(?: DE AZA| AZA)? "
         r"(?:DE |EN )?(?:LA )?GUIA\s*(?:N[°º]?\s*)?(?P<guia>\d{3,12}) "

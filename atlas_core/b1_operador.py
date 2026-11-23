@@ -97,6 +97,8 @@ class Intencion:
     # Cambio de estado de VARIOS choferes: {"nombres": [...]} o {"grupo": "SIN_VIAJES"}
     # (+ "cantidad" si el humano la dijo). Sólo lo produce el intérprete determinista.
     lote: dict[str, object] = field(default_factory=dict)
+    campo_error_equipo: str = ""
+    patente_error_equipo: str = ""
     fuente: str = "DETERMINISTA"
 
 
@@ -999,6 +1001,16 @@ def interpretar_determinista(texto: str) -> Intencion | None:
     original, plano = _limpio(texto)
     if not plano:
         return None
+    from atlas_core.intenciones_equipo_operacional import interpretar_error_equipo
+    equipo = interpretar_error_equipo(texto)
+    if equipo and equipo.parametros.get("campo_declarado"):
+        return Intencion(equipo.accion, {k: v for k, v in equipo.parametros.items()
+                                        if k not in {"campo_declarado", "patente_declarada"}},
+                         campo_error_equipo=equipo.parametros["campo_declarado"],
+                         patente_error_equipo=equipo.parametros["patente_declarada"])
+    if re.search(r"\bERROR\b", plano) and re.search(r"\bPATENTE\b", plano) and re.search(r"\bGUIA\b", plano):
+        raise ErrorContratoInterpretacion(
+            "Indica una sola guia, tipo de vehiculo y patente en una declaracion explicita de error documental u OCR. No se cambio nada.")
     m = _DESTRUCTIVA.match(plano)
     if m:
         resto = m.group("resto")
@@ -1452,7 +1464,12 @@ def _guia_legible(numero: object) -> str:
 def _describir_preview(preview: Mapping[str, object]) -> str:
     accion, entidad = preview.get("accion"), preview.get("entidad") or {}
     actual, propuesto = preview.get("valor_actual"), preview.get("valor_propuesto") or {}
-    if accion == "CHOFER_ASIGNAR_VEHICULO":
+    if accion == "DOCUMENTO_CONFIRMAR_ERROR_DOCUMENTAL_AZA":
+        d = (propuesto.get("discrepancias") or [{}])[0]
+        texto = (f"Guía {entidad.get('numero_guia')}, {d.get('campo')}: valor documental "
+                 f"{d.get('valor_documental')}, patente operacional vigente {d.get('valor_operacional')}; "
+                 f"corrección propuesta {d.get('valor_operacional')}. Se conservan documento y OCR originales.")
+    elif accion == "CHOFER_ASIGNAR_VEHICULO":
         texto = (f"Asociar {propuesto.get('tipo')} {propuesto.get('patente')} al chofer "
                  f"{entidad.get('chofer')} (RUT {propuesto.get('rut_chofer')}).")
     elif accion == "CHOFER_CAMBIAR_ESTADO":
@@ -2292,7 +2309,10 @@ class OperadorB1:
             return None
         from atlas_core.acciones_operacionales import catalogo_acciones
         propuesta = self.proveedor.interpretar(str(texto), catalogo_acciones())
-        return None if propuesta is None else intencion_desde_modelo(propuesta)
+        interpretada = None if propuesta is None else intencion_desde_modelo(propuesta)
+        if interpretada and interpretada.accion == "DOCUMENTO_CONFIRMAR_ERROR_DOCUMENTAL_AZA":
+            return None  # Sólo la declaración explícita determinista autoriza esta ruta.
+        return interpretada
 
     def _tiene_destino_confirmado(self, parametros: Mapping[str, object]) -> bool:
         from atlas_core.destino_operacional import TIPO
@@ -3126,6 +3146,17 @@ class OperadorB1:
             return {"estado": "ACLARACION_REQUERIDA", "accion": intencion.accion, "mensaje": (
                 f"Dijiste {intencion.tipo_vehiculo_declarado}, pero {parametros.get('patente')} es "
                 f"{preview['valor_propuesto']['tipo']} en el catálogo. Revisa la patente.")}
+        if intencion.accion == "DOCUMENTO_CONFIRMAR_ERROR_DOCUMENTAL_AZA":
+            discrepancias = (preview.get("valor_propuesto") or {}).get("discrepancias") or []
+            campo = intencion.campo_error_equipo
+            patente = intencion.patente_error_equipo
+            if (len(discrepancias) != 1 or discrepancias[0].get("campo") != campo
+                    or discrepancias[0].get("valor_operacional") != patente):
+                self._fijar_pendiente(estado, conversacion_id, None)
+                return {"estado": "RECHAZADA", "accion": intencion.accion,
+                        "codigo": "PROPUESTA_NO_COINCIDE", "mensaje": (
+                            "La patente propuesta debe coincidir con la asignación vigente confirmada y ser la única "
+                            "discrepancia documental de esta acción. No se cambió nada.")}
         publico = {k: v for k, v in preview.items() if k != "token"}
         if intencion.accion == ACCION_CHOFER_OPERACIONAL:
             return self._pendiente_chofer_operacional(estado, conversacion_id, preview, parametros, str(texto)[:500])
