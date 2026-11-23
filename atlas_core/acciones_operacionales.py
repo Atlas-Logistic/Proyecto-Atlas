@@ -155,6 +155,29 @@ def _rechazo(error: ErrorAccionOperacional, **extra) -> dict[str, object]:
 _CONTROL = re.compile(r"[\x00-\x1f\x7f]")
 _ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$")
 
+# Identidades técnicas con las que el Motor, Desktop, Mobile, Cloud o PULL
+# firman sus propias escrituras. Nunca son una persona confirmando.
+_IDENTIDADES_TECNICAS = frozenset({"SISTEMA", "MOTOR", "MOBILE", "DESKTOP", "PULL", "CLOUD", "WORKER", "OCR", "B1"})
+_PREFIJOS_TECNICOS = ("ATLAS", "MOTOR", "SISTEMA", "CLOUD", "PULL", "MOBILE", "WORKER", "OCR", "B1")
+
+
+def _confirmante_humano(confirmado: object, *, origen: object = ORIGEN_HUMANO) -> bool:
+    """Única validación de «confirmado por una persona» del canal. Reutiliza
+    la regla de identidad humana del ledger (`_actor_es_humano`: ATLAS* y B1
+    no son personas) y además rechaza las demás identidades técnicas del
+    sistema (con cualquier separador o sufijo: MOTOR_RECUPERACION_INCREMENTAL,
+    atlas-automatico, Sistema…), toda identidad «automática» y una ejecución
+    con origen SISTEMA, que por definición no tiene una persona detrás."""
+    from atlas_core.decisiones_pendientes import _actor_es_humano
+    texto = str(confirmado or "").strip()
+    if not _ID.fullmatch(texto) or not _actor_es_humano(texto) or origen == ORIGEN_SISTEMA:
+        return False
+    plano = re.sub(r"[^A-Z0-9]+", "_", texto.upper()).strip("_")
+    partes = set(plano.split("_"))
+    return not (plano in _IDENTIDADES_TECNICAS or "AUTOMATIC" in plano.replace("_", "")
+                or any(plano == p or plano.startswith(p + "_") for p in _PREFIJOS_TECNICOS)
+                or partes & {"AUTOMATICO", "AUTOMATICA", "AUTOMATIC", "BOT", "ROBOT"})
+
 
 @dataclass(frozen=True)
 class Parametro:
@@ -3487,7 +3510,7 @@ class CapaAccionesOperacionales:
                 conflictos = []
                 from atlas_core.decisiones_pendientes import _actor_es_humano
                 confirmante = marca.get("confirmado_por")
-                if not isinstance(confirmante, str) or not _ID.fullmatch(confirmante) or not _actor_es_humano(confirmante):
+                if not isinstance(confirmante, str) or not _confirmante_humano(confirmante, origen=marca.get("origen")):
                     conflictos.append("CONFIRMACION_HUMANA_NO_VERIFICABLE")
                 if len(entradas) > 1:
                     conflictos.append("TOKEN_DUPLICADO_EN_LEDGER")
@@ -3541,7 +3564,7 @@ class CapaAccionesOperacionales:
                     raise ErrorAccionOperacional("RECUPERACION_NO_DISPONIBLE", "no hay huellas previas verificables")
                 actor, confirmante, origen = marca.get("actor"), marca.get("confirmado_por"), marca.get("origen")
                 from atlas_core.decisiones_pendientes import _actor_es_humano
-                if not isinstance(actor, str) or not isinstance(confirmante, str) or not _ID.fullmatch(confirmante) or not _actor_es_humano(confirmante) or origen not in ORIGENES:
+                if not isinstance(actor, str) or not isinstance(confirmante, str) or not _confirmante_humano(confirmante, origen=origen) or origen not in ORIGENES:
                     raise ErrorAccionOperacional("RECUPERACION_NO_DISPONIBLE", "falta la confirmación humana original verificable")
                 if marca["huellas_antes"] != self._huellas_publicacion():
                     raise ErrorAccionOperacional("PUBLICACION_INCOMPLETA", "hay archivos modificados; no se restaura ni desbloquea")
@@ -3644,8 +3667,8 @@ class CapaAccionesOperacionales:
                     raise ErrorAccionOperacional("RECUPERACION_NO_DISPONIBLE", "sin huellas verificables")
                 actor, confirmante, origen = marca.get("actor"), marca.get("confirmado_por"), marca.get("origen")
                 from atlas_core.decisiones_pendientes import _actor_es_humano, NOMBRE_LOCK_DECISIONES_PENDIENTES
-                if (not isinstance(actor, str) or not isinstance(confirmante, str) or not _ID.fullmatch(confirmante)
-                        or not _actor_es_humano(confirmante) or origen not in ORIGENES):
+                if (not isinstance(actor, str) or not isinstance(confirmante, str) or not _confirmante_humano(confirmante, origen=origen)
+                        or origen not in ORIGENES):
                     raise ErrorAccionOperacional("RECUPERACION_NO_DISPONIBLE", "confirmación humana no verificable")
                 accion = preview.get("accion")
                 if accion not in {"DOCUMENTO_CORREGIR_NUMERO_GUIA", "DOCUMENTO_ASIGNAR_OBRA"}:
@@ -3750,8 +3773,8 @@ class CapaAccionesOperacionales:
                     raise ErrorAccionOperacional("RECUPERACION_NO_DISPONIBLE", "sin huellas verificables")
                 actor, confirmante, origen = marca.get("actor"), marca.get("confirmado_por"), marca.get("origen")
                 from atlas_core.decisiones_pendientes import _actor_es_humano
-                if (not isinstance(actor, str) or not isinstance(confirmante, str) or not _ID.fullmatch(confirmante)
-                        or not _actor_es_humano(confirmante) or origen not in ORIGENES):
+                if (not isinstance(actor, str) or not isinstance(confirmante, str) or not _confirmante_humano(confirmante, origen=origen)
+                        or origen not in ORIGENES):
                     raise ErrorAccionOperacional("RECUPERACION_NO_DISPONIBLE", "confirmación humana no verificable")
                 if marca["huellas_antes"] == self._huellas_publicacion():
                     return self.recuperar_publicacion_sin_cambios(token)
@@ -3837,8 +3860,8 @@ class CapaAccionesOperacionales:
                     raise ErrorAccionOperacional("RECUPERACION_NO_DISPONIBLE", "sin huellas verificables")
                 actor, confirmante, origen = marca.get("actor"), marca.get("confirmado_por"), marca.get("origen")
                 from atlas_core.decisiones_pendientes import _actor_es_humano
-                if (not isinstance(actor, str) or not isinstance(confirmante, str) or not _ID.fullmatch(confirmante)
-                        or not _actor_es_humano(confirmante) or origen not in ORIGENES):
+                if (not isinstance(actor, str) or not isinstance(confirmante, str) or not _confirmante_humano(confirmante, origen=origen)
+                        or origen not in ORIGENES):
                     raise ErrorAccionOperacional("RECUPERACION_NO_DISPONIBLE", "confirmación humana no verificable")
                 huellas = marca["huellas_antes"]
                 if huellas == self._huellas_publicacion():
@@ -4247,11 +4270,14 @@ class CapaAccionesOperacionales:
             raise ErrorAccionOperacional("PREVIEW_EXPIRADO", "el preview expiró; solicite uno nuevo")
         definicion = self._definicion(preview["accion"])
         confirmado = str(confirmado_por or "").strip()
-        if definicion.riesgo in (OPERACIONAL_REVERSIBLE, SENSIBLE) and not _ID.fullmatch(confirmado):
-            raise ErrorAccionOperacional("CONFIRMACION_REQUERIDA", "falta la confirmación humana explícita")
-        if _publicacion_protegida(definicion.nombre, preview.get("parametros")):
-            from atlas_core.decisiones_pendientes import _actor_es_humano
-            if not _actor_es_humano(confirmado):
+        if definicion.riesgo in (OPERACIONAL_REVERSIBLE, SENSIBLE):
+            if not _ID.fullmatch(confirmado):
+                raise ErrorAccionOperacional("CONFIRMACION_REQUERIDA", "falta la confirmación humana explícita")
+            # Toda acción que exige confirmación humana (no sólo las de
+            # publicación protegida): una identidad técnica o automática
+            # nunca cuenta como persona (caso DOCUMENTO_CONFIRMAR_ERROR_
+            # DOCUMENTAL_AZA con confirmado_por=ATLAS_AUTOMATICO).
+            if not _confirmante_humano(confirmado, origen=origen):
                 raise ErrorAccionOperacional("CONFIRMACION_REQUERIDA", "el confirmante debe ser una persona")
         if definicion.riesgo == SENSIBLE and (origen != ORIGEN_HUMANO or not autorizacion_sensible):
             raise ErrorAccionOperacional(
