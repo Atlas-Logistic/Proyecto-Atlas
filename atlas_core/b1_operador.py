@@ -397,8 +397,12 @@ _REVISION_CAMPOS = {
 _REVISION_CAMPOS["rut_chofer"] = (r"RUT(?:\s+DEL\s+CHOFER)?|CHOFER|CONDUCTOR(?:A)?", *_REVISION_CAMPOS["chofer"][1:])
 # Tarjetas de relación obra-destino (DESTINO_SIN_CONFIRMAR): mismo destino operacional.
 _REVISION_CAMPOS["destino_entrega"] = _REVISION_CAMPOS["despachar_a_crudo"]
+# Tarjeta ORIGEN_NO_CONFIRMADO: la planta se elige entre las confirmadas del catálogo.
+_REVISION_CAMPOS["planta_origen"] = (
+    r"PLANTA(?:\s+DE\s+ORIGEN)?|ORIGEN", "La planta de origen de la guía {guia} es {valor}", None,
+    "la planta de origen", "la planta es AZA COLINA")
 _REVISION_CAMPOS_CHOFER = {"chofer", "rut_chofer"}
-_REVISION_NO_SOPORTADO = {"planta_origen": "la planta de origen"}
+_REVISION_NO_SOPORTADO: dict[str, str] = {}
 _REVISION_TIPOS_DESTINO = {"DESTINO_NO_RESUELTO"}
 # Únicas acciones de B1 que una tarjeta puede usar (correcciones ya existentes).
 _REVISION_ACCIONES = {"DOCUMENTO_CORREGIR_CAMPO", "DOCUMENTO_ASIGNAR_OBRA", "DECISION_APLICAR",
@@ -588,6 +592,10 @@ def ajustar_a_revision(intencion: Intencion, decision: Mapping[str, object], ins
         guia_orden = str(intencion.menciones.get("guia_destino") or "")
         admitida = decision.get("tipo") in _REVISION_TIPOS_DESTINO and "REGISTRAR_DIRECCION" in (
             decision.get("acciones_permitidas") or [])
+    elif intencion.accion == "DECISION_APLICAR" and p.get("accion_decision") == "SELECCIONAR_OTRA_PLANTA":
+        guia_orden = str(intencion.menciones.get("guia_origen") or "")
+        admitida = decision.get("tipo") == "ORIGEN_NO_CONFIRMADO" and "SELECCIONAR_OTRA_PLANTA" in (
+            decision.get("acciones_permitidas") or [])
     else:
         return aclaracion_revision(decision)
     if not guia.isdigit() and guia_orden == "999999999999":
@@ -656,6 +664,27 @@ _CLIENTE_GUIA = [
     re.compile(r"^(?:CORRIGE|CORREGIR|CAMBIA|CAMBIAR|FIJA|FIJAR)\s+" + _CLIENTE + r"\s+(?:DE\s+LA\s+|DE\s+)" + _GUIA
                + r"\s*:\s*(?P<cliente>[^\s,].*)$"),
 ]
+# NÚMERO DE TRANSPORTE y PLANTA DE ORIGEN de una guía, con las mismas formas
+# naturales que el cliente («el X de la guía N es V», «en la guía N, el X es
+# V», «corrige el X de la guía N a V»). El transporte usa la ruta oficial
+# DOCUMENTO_CORREGIR_CAMPO (10 dígitos exactos, ceros iniciales incluidos);
+# la planta, la revisión de origen pendiente (DECISION_APLICAR).
+_TRANSPORTE_DOC = r"(?:EL\s+)?(?:NUMERO\s+DE\s+)?TRANSPORTE(?:\s+(?:CORRECTO|REAL|VERDADERO))?"
+_PLANTA_DOC = (r"(?:(?:LA|EL)\s+)?(?:PLANTA(?:\s+DE\s+ORIGEN)?|ORIGEN)"
+               r"(?:\s+(?:CORRECT[OA]|REAL|VERDADER[OA]))?")
+
+
+def _formas_campo_guia(dato: str) -> list[re.Pattern]:
+    return [
+        re.compile(r"^" + dato + r"\s+(?:DE\s+LA\s+|DE\s+)" + _GUIA + r"\s*,?" + _CLIENTE_ES + r"(?P<v>[^\s,].*)$"),
+        re.compile(r"^EN\s+LA\s+" + _GUIA + r"\s*,?\s*" + dato + _CLIENTE_ES + r"(?P<v>[^\s,].*)$"),
+        re.compile(r"^(?:CORRIGE|CORREGIR|CAMBIA|CAMBIAR|FIJA|FIJAR)\s+" + dato + r"\s+(?:DE\s+LA\s+|DE\s+)" + _GUIA
+                   + r"\s*(?:\s(?:A|POR|EN|AL\s+VALOR)\s+|:\s*)(?P<v>[^\s,].*)$"),
+    ]
+
+
+_TRANSPORTE_GUIA = _formas_campo_guia(_TRANSPORTE_DOC)
+_PLANTA_GUIA = _formas_campo_guia(_PLANTA_DOC)
 # Confirmación administrativa específica de una discrepancia de RUT: nunca
 # basta un "sí" cuando el RUT impreso contradice al chofer propuesto.
 _CONFIRMAR_DISCREPANCIA = re.compile(r"^CONFIRMO\s+(?:LA\s+)?DISCREPANCIA(?:\s+(?:DE(?:L)?\s+)?RUT)?$")
@@ -1027,6 +1056,21 @@ def interpretar_determinista(texto: str) -> Intencion | None:
                     "numero_guia": m.group("guia"), "campo": "cliente",
                     "valor": " ".join(original[m.start("cliente"):m.end("cliente")].split()).strip(" ,:"),
                     "referencia": " ".join(str(texto).split())[:500]})
+        for patron in _TRANSPORTE_GUIA:
+            m = patron.match(plano)
+            if m:
+                # El número tal como se escribió: nunca se rellenan ni quitan
+                # ceros (se valida después, con su explicación).
+                return Intencion("DOCUMENTO_CORREGIR_CAMPO", {
+                    "numero_guia": m.group("guia"), "campo": "numero_transporte",
+                    "valor": re.sub(r"[\s.\-]", "", original[m.start("v"):m.end("v")]).strip(" ,:"),
+                    "referencia": " ".join(str(texto).split())[:500]})
+        for patron in _PLANTA_GUIA:
+            m = patron.match(plano)
+            if m:
+                return Intencion("DECISION_APLICAR", {"accion_decision": "SELECCIONAR_OTRA_PLANTA"},
+                                 {"guia_origen": m.group("guia"),
+                                  "planta": " ".join(original[m.start("v"):m.end("v")].split()).strip(" ,:.")})
         for patron in _PESO_GUIA:
             m = patron.match(plano)
             if m:
@@ -1138,7 +1182,8 @@ class ErrorContratoInterpretacion(ValueError):
 
 # mención -> parámetro de la acción que resuelve (nunca se pasa cruda).
 _MENCIONES_PERMITIDAS = {"chofer": "chofer", "guia_destino": "decision_id", "obra": "obra_id",
-                         "destino": "destino_id", "cliente": "cliente_id"}
+                         "destino": "destino_id", "cliente": "cliente_id",
+                         "guia_origen": "decision_id", "planta": "planta_id_elegida"}
 _SOSPECHOSO = re.compile(
     r"(^[A-Za-z]:[\\/])|(\.\.[\\/])|(^[\\/])|(\\\\)|[;|&`$<>{}]|"
     r"\b(?:rm|del|rmdir|powershell|cmd|bash|sh|python|py|pip|import|exec|eval|subprocess|os\.system|"
@@ -1247,6 +1292,40 @@ def resolver_decision_destino(decisiones: list[Mapping[str, object]], guia: str)
                     "resuélvela desde Revisión de Atlas.")
     return "", (f"La guía {guia} no tiene una revisión de destino pendiente en la bandeja. Si el destino "
                 "de un viaje ya calculado está mal, usa «Corregir destino» en la Logística del viaje.")
+
+
+def resolver_planta(plantas: list, mencion: str) -> dict:
+    """{'estado': RESUELTO|AMBIGUO|DESCONOCIDO, 'planta_id', 'nombre', 'candidatos'}.
+    Sólo plantas CONFIRMADAS y ACTIVAS del catálogo: coincidencia exacta del
+    nombre normalizado o, si no la hay, de la comuna cuando una sola planta
+    está en ella («Colina» -> AZA COLINA). Nunca crea ni elige entre varias."""
+    from atlas_core.catalogo_plantas import normalizar_nombre_planta
+    clave = normalizar_nombre_planta(mencion)
+    vigentes = [p for p in plantas if p.estado_calidad == "CONFIRMADA" and p.estado_vigencia == "ACTIVA"]
+    exactas = [p for p in vigentes if clave and normalizar_nombre_planta(p.nombre) == clave]
+    if not exactas:
+        exactas = [p for p in vigentes if clave and normalizar_nombre_planta(p.comuna) == clave]
+    if len(exactas) == 1:
+        return {"estado": "RESUELTO", "planta_id": exactas[0].planta_id, "nombre": exactas[0].nombre}
+    return {"estado": "AMBIGUO" if exactas else "DESCONOCIDO",
+            "candidatos": [{"nombre": p.nombre} for p in (exactas or vigentes)][:10]}
+
+
+def resolver_decision_origen(decisiones: list[Mapping[str, object]], guia: str) -> tuple[Mapping[str, object] | None, str]:
+    """(decisión, "") si la guía tiene EXACTAMENTE una revisión de origen
+    pendiente que admite elegir planta; si no, (None, aclaración)."""
+    candidatas = [
+        d for d in decisiones
+        if str((d.get("documento") or {}).get("numero_guia", "")).strip() == guia
+        and d.get("tipo") == "ORIGEN_NO_CONFIRMADO" and d.get("estado", "PENDIENTE") == "PENDIENTE"
+        and "SELECCIONAR_OTRA_PLANTA" in (d.get("acciones_permitidas") or [])
+    ]
+    if len(candidatas) == 1:
+        return candidatas[0], ""
+    if len(candidatas) > 1:
+        return None, (f"La guía {guia} tiene más de una revisión de origen pendiente; resuélvela desde "
+                      "Revisión de Atlas. No se corrigió nada.")
+    return None, ""
 
 
 def _clave_obra(nombre: str) -> str:
@@ -1972,6 +2051,15 @@ _PRESENTACION_CAMPO = {
                           "El texto leído en la guía se conserva como respaldo."],
         "aplicado": "queda con el destino",
     },
+    "planta_origen": {
+        "etiqueta": "Planta de origen", "clave": "planta_origen",
+        "respaldo": ("Se confirma la planta desde la revisión de origen pendiente; la ruta calculada con otra "
+                     "planta deja de publicarse hasta recalcularse y la evidencia GPS/documental se conserva."),
+        "consecuencias": ["Se aplica la revisión de origen pendiente con una planta confirmada del catálogo.",
+                          "Si cambia la planta, la ruta calculada con la anterior deja de publicarse.",
+                          "La evidencia GPS y documental original se conserva."],
+        "aplicado": "queda con la planta de origen",
+    },
 }
 
 
@@ -2523,6 +2611,31 @@ class OperadorB1:
                 return {"estado": "ACLARACION_REQUERIDA", "accion": intencion.accion, "candidatos": [],
                         "mensaje": aclaracion}
             parametros["decision_id"] = decision_id
+        if "guia_origen" in intencion.menciones:
+            return self._planta_origen(estado, conversacion_id, intencion, parametros, texto)
+        if intencion.accion == "DOCUMENTO_CORREGIR_CAMPO" and parametros.get("campo") == "numero_transporte":
+            if not re.fullmatch(r"\d{10}", str(parametros.get("valor") or "")):
+                return {"estado": "ACLARACION_REQUERIDA", "accion": intencion.accion, "candidatos": [], "mensaje": (
+                    f"El número de transporte debe tener exactamente 10 dígitos, con sus ceros iniciales "
+                    f"(por ejemplo 0000371852); recibí «{parametros.get('valor')}». No completo ni quito ceros. "
+                    "No se corrigió nada.")}
+        if intencion.accion == "DOCUMENTO_CORREGIR_CAMPO" and parametros.get("campo") == "cliente":
+            from atlas_core.catalogo_clientes import CatalogoClientes
+            mencion = str(parametros.get("valor") or "")
+            resolucion = resolver_cliente(CatalogoClientes(self.capa._ctx.archivos["clientes"]).listar(), mencion)
+            if resolucion["estado"] != "RESUELTO":
+                candidatos = resolucion.get("candidatos") or []
+                listado = "; ".join(str(c["nombre"]) for c in candidatos)
+                mensaje = (f"«{mencion}» coincide con más de un cliente: {listado}. Indica cuál. No se corrigió nada."
+                           if resolucion["estado"] == "AMBIGUO" else
+                           f"«{mencion}» no es un cliente registrado en el catálogo de clientes"
+                           + (f". ¿Te refieres a alguno de estos? {listado}" if candidatos else "")
+                           + ". Corregir la guía no crea clientes: regístralo primero por el flujo de clientes "
+                             "y repite la corrección. No se corrigió nada.")
+                return {"estado": "ACLARACION_REQUERIDA", "accion": intencion.accion,
+                        "candidatos": [{"nombre": c["nombre"]} for c in candidatos], "mensaje": mensaje}
+            # Se escribe la razón social canónica, no el texto tal como se dijo.
+            parametros["valor"] = resolucion["nombre"]
         if "obra" in intencion.menciones:
             mencion = intencion.menciones["obra"]
             resolucion = resolver_obra(self.capa._ctx.catalogo_obras().listar_obras(), mencion)
@@ -2788,6 +2901,68 @@ class OperadorB1:
             estado, conversacion_id, guia, decision_id, rechazo, referencia=referencia,
             direccion=resultado["direccion"], comuna=resultado["comuna"], antes=documental,
             evidencia=evidencia_visible, accion_origen=ACCION_DESTINO_CONFIRMADO_PREVIO)
+
+    def _planta_origen(self, estado: dict, conversacion_id: str, intencion: Intencion, parametros: dict,
+                       texto: str) -> dict:
+        """«La planta de origen de la guía N es X»: única ruta oficial segura =
+        la revisión ORIGEN_NO_CONFIRMADO pendiente de esa guía (DECISION_APLICAR
+        con SELECCIONAR_OTRA_PLANTA), con una planta CONFIRMADA y ACTIVA. Sin
+        esa revisión no se cambia un origen ya determinado."""
+        from atlas_core.catalogo_plantas import CatalogoPlantas
+        accion, guia = intencion.accion, str(intencion.menciones.get("guia_origen") or "")
+        mencion = str(intencion.menciones.get("planta") or "")
+
+        def aclaracion(mensaje: str, candidatos: list | None = None) -> dict:
+            return {"estado": "ACLARACION_REQUERIDA", "accion": accion, "candidatos": candidatos or [],
+                    "mensaje": mensaje}
+
+        ruta = self.capa._ctx.catalogos / "plantas.json"
+        planta = resolver_planta(CatalogoPlantas(ruta).listar() if ruta.is_file() else [], mencion)
+        if planta["estado"] != "RESUELTO":
+            listado = "; ".join(c["nombre"] for c in planta["candidatos"])
+            return aclaracion((f"«{mencion}» coincide con más de una planta: {listado}. Indica cuál."
+                               if planta["estado"] == "AMBIGUO" else
+                               f"«{mencion}» no es una planta confirmada del catálogo"
+                               + (f"; las plantas confirmadas son: {listado}" if listado else "")
+                               + ". No creo plantas.") + " No se corrigió nada.", planta["candidatos"])
+        decisiones = self.capa._ctx.decisiones()
+        if parametros.get("decision_id"):  # desde la propia tarjeta (ya validada)
+            decision = next((d for d in decisiones if d.get("decision_id") == parametros["decision_id"]), None)
+            motivo = "" if decision is not None else "Esta revisión ya no está pendiente. No se corrigió nada."
+        else:
+            decision, motivo = resolver_decision_origen(decisiones, guia)
+        filas = [f for f in self.capa._ctx.filas() if str(f.get("numero_guia") or "").strip() == guia]
+        if decision is None:
+            if motivo:
+                return aclaracion(motivo)
+            actual = ", ".join(sorted({f"{f.get('planta_origen_nombre') or 'sin planta'} "
+                                       f"({f.get('origen_determinado_por') or 'sin fuente'})" for f in filas}))
+            return aclaracion(
+                f"La guía {guia} no tiene una revisión de origen pendiente"
+                + (f"; su origen actual es {actual}" if actual else "")
+                + ". Atlas sólo cambia la planta de origen desde esa revisión (con su evidencia GPS y "
+                  "documental); no existe una corrección oficial de un origen ya determinado. No se corrigió nada.")
+        archivo = str((decision.get("documento") or {}).get("archivo") or "")
+        propias = [f for f in filas if str(f.get("archivo") or "") == archivo] or filas
+        antes = str(propias[0].get("planta_origen_nombre") or "") if len(propias) == 1 else ""
+        parametros = {"decision_id": str(decision["decision_id"]), "accion_decision": "SELECCIONAR_OTRA_PLANTA",
+                      "planta_id_elegida": planta["planta_id"]}
+        referencia = " ".join(str(texto).split())[:500]
+        preview = self.capa.previsualizar("DECISION_APLICAR", parametros, actor=ACTOR_B1, origen=ORIGEN_B1,
+                                          referencia=referencia)
+        if preview.get("estado") == "SIN_CAMBIOS":
+            return {"estado": "SIN_CAMBIOS", "accion": accion,
+                    "mensaje": f"La revisión de origen de la guía {guia} ya estaba aplicada; no hay nada que confirmar."}
+        if preview.get("estado") != "PREVIEW" or preview.get("riesgo") == SENSIBLE:
+            return {"estado": "RECHAZADA", "accion": accion, "codigo": preview.get("codigo"),
+                    "mensaje": f"No hice cambios en la guía {guia}: " + str(preview.get("mensaje") or "la corrección no "
+                                                                         "se puede preparar ahora") + "."}
+        presentacion = {"campo": "planta_origen", "numero_guia": guia, "antes": antes, "despues": planta["nombre"]}
+        self._fijar_pendiente(estado, conversacion_id, {
+            "token": preview["token"], "accion": "DECISION_APLICAR", "parametros": parametros,
+            "referencia": referencia, "creado_en": self.reloj().isoformat(), "presentacion": presentacion})
+        return {"estado": "PREVIEW_PENDIENTE", "accion": "DECISION_APLICAR",
+                "preview": _preview_publico(presentacion, preview), "mensaje": _mensaje_preview(presentacion)}
 
     def _preview_destino(self, estado: dict, conversacion_id: str, guia: str, decision_id: str, rechazo, *,
                          referencia: str, direccion: str, comuna: str, antes: str, evidencia: str,

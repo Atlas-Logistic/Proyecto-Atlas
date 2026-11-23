@@ -1438,6 +1438,41 @@ def _validar_tipo_patente_para_campo(ctx: _Contexto, campo: str, valor: str) -> 
     )
 
 
+def _validar_cliente_catalogado(ctx: _Contexto, fila: Mapping[str, str], valor: str) -> None:
+    """El cliente de una guía sólo se corrige a un cliente ACTIVO que ya existe
+    en el catálogo, escrito con su razón social canónica. El reparador acepta
+    cualquier texto y retira CLIENTE_NUEVA_ENTIDAD_NO_CATALOGADA: sin esta
+    guardia, un nombre inventado quedaría como cliente válido. Tampoco se
+    acepta si el RUT de cliente de la guía pertenece a OTRO cliente activo
+    (el documento quedaría contradictorio)."""
+    from atlas_core.catalogo_clientes import CatalogoClientes, normalizar_nombre_cliente, normalizar_rut_cliente
+    clave = normalizar_nombre_cliente(valor)
+    activos = [c for c in CatalogoClientes(ctx.archivos["clientes"]).listar() if c.estado_vigencia == "ACTIVO"]
+    coincidentes = [c for c in activos if clave and clave in {
+        normalizar_nombre_cliente(x) for x in (c.razon_social, c.nombre_comercial, *c.aliases) if x}]
+    if not coincidentes:
+        raise ErrorAccionOperacional("ENTIDAD_NO_ENCONTRADA",
+                                     f"{valor!r} no es un cliente activo del catálogo; no se crean clientes al corregir")
+    if len(coincidentes) > 1:
+        raise ErrorAccionOperacional("ENTIDAD_AMBIGUA", f"{valor!r} coincide con más de un cliente activo")
+    cliente = coincidentes[0]
+    if valor != cliente.razon_social:
+        raise ErrorAccionOperacional("PARAMETRO_INVALIDO",
+                                     f"use la razón social del catálogo: {cliente.razon_social}")
+    def rut_o_vacio(texto: object) -> str:
+        try:
+            return normalizar_rut_cliente(str(texto or ""))
+        except Exception:  # noqa: BLE001 -- RUT ilegible o "No encontrado": no prueba nada
+            return ""
+
+    rut = rut_o_vacio(fila.get("rut_cliente", ""))
+    duenos = {c.cliente_id: c.razon_social for c in activos if rut and rut_o_vacio(c.rut) == rut}
+    if duenos and cliente.cliente_id not in duenos:
+        raise ErrorAccionOperacional(
+            "CONFLICTO", f"el RUT de cliente de la guía ({fila.get('rut_cliente')}) pertenece a "
+                         f"{', '.join(sorted(duenos.values()))}; corrija primero el RUT del cliente")
+
+
 def _plan_documento_campo(ctx: _Contexto, p: dict) -> Plan:
     from atlas_core.investigacion_documental import archivos_en_investigacion
     from atlas_core.reprocesamiento_reparador import CAMPOS_DOCUMENTALES_CONTROLADOS, reparar_documento_focal_con_valores_conocidos
@@ -1449,6 +1484,8 @@ def _plan_documento_campo(ctx: _Contexto, p: dict) -> Plan:
     # Antes de comparar con el valor actual: repetir una patente ya mal
     # ubicada debe explicar el tipo, no responder «sin cambios».
     _validar_tipo_patente_para_campo(ctx, campo, valor)
+    if campo == "cliente":
+        _validar_cliente_catalogado(ctx, fila, valor)
     actual = str(fila.get(campo, "")).strip()
     if actual == valor:
         sin_cambios = True

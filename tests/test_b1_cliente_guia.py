@@ -149,6 +149,10 @@ def cliente_ilegible(entorno):
         escritor = csv.DictWriter(archivo, fieldnames=COLUMNAS, delimiter=";")
         escritor.writeheader()
         escritor.writerows(filas)
+    # El cliente corregido debe existir en el catálogo: B1 no escribe clientes inventados.
+    from atlas_core.catalogo_clientes import CatalogoClientes, EstadoCalidadCliente
+    CatalogoClientes(entorno["cat"] / "clientes.json").crear(
+        razon_social=CLIENTE, rut="96.792.430-K", fuente="TEST", estado_calidad=EstadoCalidadCliente.CONFIRMADO)
     entorno["b1"] = OperadorB1(entorno["raiz"], usuario="JAVIER", capa=CapaAccionesOperacionales(
         entorno["raiz"], fabrica_escritor=lambda: _EscritorDisponible()))
     return entorno
