@@ -338,6 +338,13 @@ class DocumentoViaje:
     evidencia: dict[str, str]
     destino_operacional_confirmado: bool = False
     identidad_entrega_confirmada: tuple[str, str, str] | None = None
+    material_humano_confirmado: bool = False
+
+    @property
+    def material_publicable(self) -> str:
+        if self.material_humano_confirmado:
+            return self.descripcion_material
+        return valor_publicable(self.descripcion_material, evaluar_credibilidad_material)
 
 
 # Bloque ORIGEN DE VIAJE: jerarquía de confianza de la fuente que determinó
@@ -519,7 +526,7 @@ class Viaje:
         # otro). Sin recuperación posible: DUDOSO/INVÁLIDO -> `VALOR_NO_
         # DETERMINADO` directo.
         return _valores_unicos(
-            valor_publicable(d.descripcion_material, evaluar_credibilidad_material) for d in self.documentos
+            d.material_publicable for d in self.documentos
         )
 
     @property
@@ -986,7 +993,7 @@ class Viaje:
                 "numero_guia": d.numero_guia,
                 "cliente": valor_publicable(d.cliente, evaluar_credibilidad_entidad_nombre),
                 "obra_destino": valor_publicable(d.obra_destino, evaluar_credibilidad_entidad_nombre),
-                "descripcion_material": valor_publicable(d.descripcion_material, evaluar_credibilidad_material),
+                "descripcion_material": d.material_publicable,
                 "despachar_a_crudo": valor_publicable(d.despachar_a_crudo, evaluar_credibilidad_direccion),
                 "peso_kg": d.peso_kg,
             }
@@ -1061,7 +1068,7 @@ def _documento_desde_fila(
     original = fila.get("_evidencia_documental_original")
     evidencia_fila = original if isinstance(original, Mapping) else fila
     evidencia = {str(clave): str(valor or "") for clave, valor in evidencia_fila.items()
-                 if clave != "_identidad_entrega_confirmada"}
+                 if clave not in {"_identidad_entrega_confirmada", "_material_humano_confirmado"}}
     chofer_original = str(fila.get("chofer", "")).strip()
     chofer = (
         normalizador_chofer(chofer_original)
@@ -1161,6 +1168,7 @@ def _documento_desde_fila(
         evidencia=evidencia,
         destino_operacional_confirmado=isinstance(original, Mapping),
         identidad_entrega_confirmada=fila.get("_identidad_entrega_confirmada"),
+        material_humano_confirmado=fila.get("_material_humano_confirmado") is True,
     )
 
 
@@ -1171,7 +1179,7 @@ def _deduplicar_filas(
     unicas: dict[tuple[tuple[str, str], ...], Mapping[str, object]] = {}
     for fila in filas:
         huella = tuple(
-            sorted((str(k), str(v or "")) for k, v in fila.items() if k != "_identidad_entrega_confirmada")
+            sorted((str(k), str(v or "")) for k, v in fila.items() if k not in {"_identidad_entrega_confirmada", "_material_humano_confirmado"})
         )
         unicas.setdefault(huella, fila)
     return [unicas[huella] for huella in sorted(unicas)]

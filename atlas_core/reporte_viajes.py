@@ -617,6 +617,14 @@ def generar_reporte_viajes(
     # La decision humana es una proyeccion operacional, nunca una edicion del CSV documental.
     from atlas_core.destino_operacional import proyectar_destino
     from atlas_core.identidad_entrega_confirmada import identidades_confirmadas
+    from atlas_core.campos_documentales import material_confirmado_vigente
+    ledger_material = ledger_decisiones
+    if ruta_ledger is not None and Path(ruta_ledger) != origen.parent / "decisiones_aplicadas.json":
+        try:
+            ledger_material = json.loads(Path(ruta_ledger).read_text(encoding="utf-8-sig"))
+        except (OSError, ValueError):
+            # El ledger opcional externo ya admite ausencia o corrupci?n.
+            ledger_material = {}
     identidades_entrega = identidades_confirmadas(filas, ledger_decisiones, catalogos)
     filas_operacionales = []
     for fila in filas:
@@ -626,6 +634,8 @@ def generar_reporte_viajes(
         clave_entrega = tuple(str(fila.get(c) or "").strip() for c in ("archivo", "numero_guia", "numero_transporte"))
         if clave_entrega in identidades_entrega and proyectada == fila:
             proyectada["_identidad_entrega_confirmada"] = identidades_entrega[clave_entrega]
+        if material_confirmado_vigente(ledger_material, fila) is not None:
+            proyectada["_material_humano_confirmado"] = True
         filas_operacionales.append(proyectada)
     viajes, sin_transporte = agrupar_viajes(
         filas_operacionales, normalizador_chofer=normalizador, resolver_patente=resolver_patente,
