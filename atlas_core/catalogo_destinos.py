@@ -252,8 +252,10 @@ def _coincide_con_numeracion_b_ocho(calle: str, texto: str, comuna_confirmada: s
 # con el mismo largo, al menos un dígito y terminando en dígito (una letra
 # final, "12B", es numeración real). Sólo con comuna confirmada aportada por
 # el llamador y presente en el texto: dirección + número + comuna convergen.
-_LETRAS_OCR_COMO_DIGITO = str.maketrans({"O": "0", "B": "8", "S": "5", "I": "1", "L": "1", "Z": "2"})
-_TOKEN_NUMERACION_MIXTA = re.compile(r"\b(?=[0-9OBSILZ]*\d)[0-9OBSILZ]*[OBSILZ][0-9OBSILZ]*\d\b")
+# Caso real 484007 ("CAMINO LO RUIZ 29Q1 ... RENCA" vs confirmado 2901): la Q es la misma confusión OCR con 0
+# que la O; entra en la misma tabla, con las mismas exigencias (número EXACTO confirmado y comuna presente).
+_LETRAS_OCR_COMO_DIGITO = str.maketrans({"O": "0", "Q": "0", "B": "8", "S": "5", "I": "1", "L": "1", "Z": "2"})
+_TOKEN_NUMERACION_MIXTA = re.compile(r"\b(?=[0-9OQBSILZ]*\d)[0-9OQBSILZ]*[OQBSILZ][0-9OQBSILZ]*\d\b")
 
 
 def _comuna_confirmada_en_texto(comuna_confirmada: str, texto: str) -> bool:
@@ -385,7 +387,12 @@ _ABREVIATURAS_VIA = {
     "PSJE": "PASAJE", "PJE": "PASAJE", "GRAL": "GENERAL", "STA": "SANTA", "STO": "SANTO",
 }
 _MARCADORES_NUMERO = frozenset({"N", "NO", "NRO", "NUM", "NUMERO"})
-_NUMERACION_FINAL_IL = re.compile(r"^\d{2,}[0-9IL]*[IL]$")
+# I/L final leída por OCR ("290I"). Casos reales 492111 ("VISTA CLARA 23SI CERRILLOS" vs confirmado 2351) y
+# 484655 ("SANTA ISABEL 58S ... LAMPA" vs 585): la letra final puede ser también S (5), y venir junto con otra
+# letra OCR DENTRO de la numeración (la S de la regla mixta, que por sí sola exige terminar en dígito). En el
+# medio se admiten las letras de `_LETRAS_OCR_COMO_DIGITO`; al final nunca B ni Z ("12B" es numeración real).
+# Las exigencias no cambian: equivalencia EXACTA con el número confirmado y comuna confirmada en el texto.
+_NUMERACION_FINAL_IL = re.compile(r"^\d{2,}[0-9OQBSILZ]*[ILS]$")
 
 
 def forma_comparable_direccion(texto: str) -> str:
