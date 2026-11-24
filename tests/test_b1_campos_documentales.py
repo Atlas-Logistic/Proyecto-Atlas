@@ -255,7 +255,7 @@ def test_planta_inexistente_no_se_inventa(con_origen):
     assert b1.pendiente("p") is None and _huellas(e["raiz"]) == antes
 
 
-def test_sin_revision_de_origen_pendiente_se_bloquea_sin_tocar_el_origen(con_origen):
+def test_sin_revision_de_origen_pendiente_ofrece_correccion_sin_tocar_el_origen(con_origen):
     e, b1 = con_origen, con_origen["b1"]
     fila = origen._fila_csv(archivo="464901.jpeg", numero_guia="464901", numero_transporte="0000000901",
                             planta_origen_id=e["planta_colina"].planta_id, planta_origen_nombre="AZA COLINA",
@@ -264,7 +264,6 @@ def test_sin_revision_de_origen_pendiente_se_bloquea_sin_tocar_el_origen(con_ori
     origen._escribir_csv(e["dataset"], filas)
     antes = _huellas(e["raiz"])
     r = b1.atender("p", "La planta de origen de la guía 464901 es Renca")
-    assert r["estado"] == "ACLARACION_REQUERIDA", r
-    assert "no tiene una revisión de origen pendiente" in r["mensaje"]
-    assert "AZA COLINA (GPS)" in r["mensaje"] and "No se corrigió nada" in r["mensaje"]
+    assert r["estado"] == "PREVIEW_PENDIENTE", r
+    assert "AZA COLINA" in r["mensaje"] and "AZA RENCA" in r["mensaje"]
     assert _huellas(e["raiz"]) == antes and b1.capa.auditoria() == []

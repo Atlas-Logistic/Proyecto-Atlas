@@ -2088,6 +2088,12 @@ def _mensaje_preview(presentacion: Mapping[str, str]) -> str:
     campo = _campo_presentacion(presentacion)
     etiqueta = campo["etiqueta"]
     evidencia = f"Evidencia: {presentacion['evidencia']}\n" if presentacion.get("evidencia") else ""
+    if presentacion.get("origen_directo"):
+        return (f"Empresa: {presentacion['empresa']}\nGuía: {presentacion['numero_guia']}\n"
+                f"Planta de origen actual: {presentacion['antes'] or 'sin dato'}\n"
+                f"Planta de origen propuesta: {presentacion['despues']}\n"
+                + "".join(f"- {c}\n" for c in presentacion.get("consecuencias") or [])
+                + "¿Confirmas? (sí / no)")
     return (f"Guía: {presentacion['numero_guia']}\n"
             f"{etiqueta} actual: {presentacion['antes'] or 'sin dato'}\n"
             f"{etiqueta} {'propuesta' if etiqueta == 'Obra' else 'propuesto'}: {presentacion['despues']}\n"
@@ -2108,6 +2114,10 @@ def _preview_publico(presentacion: Mapping[str, str], preview: Mapping[str, obje
     }
     if presentacion.get("evidencia"):
         publico["evidencia"] = presentacion["evidencia"]
+    if presentacion.get("origen_directo"):
+        publico["entidad"]["empresa"] = presentacion["empresa"]
+        publico["consecuencias"] = list(preview.get("consecuencias") or [])
+        publico["afectados"]["total_guias"] = len((preview.get("afectados") or {}).get("guias") or []) or 1
     return publico
 
 
@@ -2924,10 +2934,7 @@ class OperadorB1:
 
     def _planta_origen(self, estado: dict, conversacion_id: str, intencion: Intencion, parametros: dict,
                        texto: str) -> dict:
-        """«La planta de origen de la guía N es X»: única ruta oficial segura =
-        la revisión ORIGEN_NO_CONFIRMADO pendiente de esa guía (DECISION_APLICAR
-        con SELECCIONAR_OTRA_PLANTA), con una planta CONFIRMADA y ACTIVA. Sin
-        esa revisión no se cambia un origen ya determinado."""
+        """Corrige por revisión pendiente o por la acción focal de origen."""
         from atlas_core.catalogo_plantas import CatalogoPlantas
         accion, guia = intencion.accion, str(intencion.menciones.get("guia_origen") or "")
         mencion = str(intencion.menciones.get("planta") or "")
@@ -2955,13 +2962,26 @@ class OperadorB1:
         if decision is None:
             if motivo:
                 return aclaracion(motivo)
-            actual = ", ".join(sorted({f"{f.get('planta_origen_nombre') or 'sin planta'} "
-                                       f"({f.get('origen_determinado_por') or 'sin fuente'})" for f in filas}))
-            return aclaracion(
-                f"La guía {guia} no tiene una revisión de origen pendiente"
-                + (f"; su origen actual es {actual}" if actual else "")
-                + ". Atlas sólo cambia la planta de origen desde esa revisión (con su evidencia GPS y "
-                  "documental); no existe una corrección oficial de un origen ya determinado. No se corrigió nada.")
+            parametros = {"numero_guia": guia, "planta_id": planta["planta_id"]}
+            referencia = " ".join(str(texto).split())[:500]
+            nombre_accion = "DOCUMENTO_CORREGIR_PLANTA_ORIGEN"
+            preview = self.capa.previsualizar(nombre_accion, parametros, actor=ACTOR_B1,
+                                              origen=ORIGEN_B1, referencia=referencia)
+            if preview.get("estado") == "SIN_CAMBIOS":
+                return {"estado": "SIN_CAMBIOS", "accion": nombre_accion,
+                        "mensaje": f"La guía {guia} ya tiene esa planta; no hay nada que confirmar."}
+            if preview.get("estado") != "PREVIEW":
+                return aclaracion(f"No hice cambios en la guía {guia}: {preview.get('mensaje') or 'no se puede preparar la corrección'}.")
+            presentacion = {"campo": "planta_origen", "numero_guia": guia,
+                            "antes": (preview.get("valor_actual") or {}).get("planta_origen", ""),
+                            "despues": planta["nombre"], "origen_directo": True,
+                            "empresa": (preview.get("entidad") or {}).get("empresa", ""),
+                            "consecuencias": list(preview.get("consecuencias") or [])}
+            self._fijar_pendiente(estado, conversacion_id, {
+                "token": preview["token"], "accion": nombre_accion, "parametros": parametros,
+                "referencia": referencia, "creado_en": self.reloj().isoformat(), "presentacion": presentacion})
+            return {"estado": "PREVIEW_PENDIENTE", "accion": nombre_accion,
+                    "preview": _preview_publico(presentacion, preview), "mensaje": _mensaje_preview(presentacion)}
         archivo = str((decision.get("documento") or {}).get("archivo") or "")
         propias = [f for f in filas if str(f.get("archivo") or "") == archivo] or filas
         antes = str(propias[0].get("planta_origen_nombre") or "") if len(propias) == 1 else ""
@@ -3435,6 +3455,11 @@ class OperadorB1:
                 if (presentacion.get("campo") or "obra_destino") == "obra_destino":
                     presentacion = {**presentacion,
                                     "antes": str((nuevo.get("valor_actual") or {}).get("obra_destino") or "")}
+                elif presentacion.get("origen_directo"):
+                    presentacion = {**presentacion,
+                                    "antes": str((nuevo.get("valor_actual") or {}).get("planta_origen") or ""),
+                                    "empresa": str((nuevo.get("entidad") or {}).get("empresa") or ""),
+                                    "consecuencias": list(nuevo.get("consecuencias") or [])}
                 self._fijar_pendiente(estado, conversacion_id, {**pendiente, "token": nuevo["token"],
                                                                "creado_en": self.reloj().isoformat(),
                                                                "presentacion": presentacion})

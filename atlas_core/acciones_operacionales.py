@@ -107,7 +107,7 @@ TIPO_LEDGER_CORRECCION = "CORRECCION_DOCUMENTAL_OPERADOR"
 
 _ACCIONES_CIERRAN_TARJETA_DESTINO = frozenset({"DOCUMENTO_CORREGIR_NUMERO_GUIA", "DOCUMENTO_CORREGIR_DESTINO_OPERACIONAL"})
 _ACCIONES_PUBLICACION_BASE = frozenset({"DOCUMENTO_CORREGIR_NUMERO_GUIA", "DOCUMENTO_ASIGNAR_OBRA",
-                                        "DOCUMENTO_CORREGIR_DESTINO_OPERACIONAL"})
+                                        "DOCUMENTO_CORREGIR_DESTINO_OPERACIONAL", "DOCUMENTO_CORREGIR_PLANTA_ORIGEN"})
 
 
 def _publicacion_protegida(accion: object, parametros: object) -> bool:
@@ -1367,6 +1367,208 @@ def _decision_obsoleta_por_campo(decision: Mapping[str, object], archivo: str, c
 
 def _transporte(fila: Mapping[str, str]) -> str:
     return str(fila.get("numero_transporte", "")).strip()
+
+
+def _eventos_viaje_origen(ctx: _Contexto, transporte: str, guias: set[str]) -> list[dict]:
+    """Eventos ACTIVOS del transporte. Un evento es una marca del viaje
+    (estadía, observación, devolución, doble vuelta) que no depende de la
+    planta de origen: se conserva y se informa. Se bloquea sólo un registro
+    ilegible o un evento cuyo vínculo con el viaje es inconsistente (vínculo
+    incompleto o guías que no pertenecen a este transporte)."""
+    from atlas_core.agrupacion_viajes import _clave as clave_transporte
+    registro = _leer_json(ctx.archivos["eventos_operacionales"], {"eventos": []})
+    if not isinstance(registro, dict) or not isinstance(registro.get("eventos"), list):
+        raise ErrorAccionOperacional("ESTADO_ILEGIBLE", "el registro de eventos es inválido")
+    if any(not isinstance(e, dict) for e in registro["eventos"]):
+        raise ErrorAccionOperacional("ESTADO_ILEGIBLE", "el registro de eventos contiene entradas inválidas")
+    activos = [e for e in registro["eventos"] if e.get("estado", "ACTIVO") == "ACTIVO"
+               and clave_transporte(e.get("numero_transporte", "")) == clave_transporte(transporte)]
+    for evento in activos:
+        numeros = evento.get("numeros_guia")
+        if numeros is None:
+            numeros = []
+        if (evento.get("vinculo_completo") is False or not isinstance(numeros, list)
+                or not {str(n).strip() for n in numeros} <= guias):
+            raise ErrorAccionOperacional(
+                "PRECONDICION_FALLIDA",
+                f"el evento {evento.get('tipo_evento') or 'operacional'} del transporte no está vinculado "
+                "de forma consistente a sus guías; revíselo antes de corregir el origen")
+    return activos
+
+
+def _plan_documento_planta_origen(ctx: _Contexto, p: dict) -> Plan:
+    """Origen de un viaje ya determinado, corregido desde una de sus guías.
+
+    El origen es del viaje físico (transporte): todas sus guías cambian
+    juntas para que viaje, entregas y rutas no queden con dos orígenes. Se
+    abstiene ante cualquier dependencia que la corrección no puede mantener
+    coherente: revisión de origen pendiente (se usa esa tarjeta), agrupación
+    activa, destino confirmado por una persona (su ruta guardada se calculó
+    desde la planta anterior), documento en investigación, guías sin folio o
+    repetidas, transporte no válido y eventos con vínculo inconsistente."""
+    from atlas_core.aislamiento_empresas import empresa_de_raiz, empresa_proceso
+    from atlas_core.agrupacion_viajes import _clave as clave_transporte
+    from atlas_core.catalogo_plantas import CatalogoPlantas
+    from atlas_core.destino_operacional import identidades_destino_confirmado
+    from atlas_core.investigacion_documental import archivos_en_investigacion
+
+    empresa = empresa_de_raiz(ctx.raiz)
+    if empresa != empresa_proceso():
+        raise ErrorAccionOperacional("EMPRESA_INCOMPATIBLE", "la empresa de la raíz no corresponde al proceso")
+    fila = _fila_documento(ctx, str(p["numero_guia"]), str(p.get("archivo", "")))
+    archivo, guia, transporte = str(fila.get("archivo", "")).strip(), str(fila.get("numero_guia", "")).strip(), _transporte(fila)
+    if not archivo or not guia.isdigit():
+        raise ErrorAccionOperacional("PRECONDICION_FALLIDA", "la guía requiere archivo y folio identificables")
+    if not transporte.isdigit():
+        raise ErrorAccionOperacional("PRECONDICION_FALLIDA",
+                                     "la guía no tiene un número de transporte válido; corrija primero el transporte")
+    try:
+        destinos_confirmados = identidades_destino_confirmado(ctx.archivos["ledger_decisiones"])
+        plantas = CatalogoPlantas(ctx.catalogos / "plantas.json").listar()
+        en_investigacion = archivos_en_investigacion(ctx.raiz)
+    except (OSError, ValueError) as error:
+        raise ErrorAccionOperacional("ESTADO_ILEGIBLE",
+                                     "no se pudo verificar el catálogo, el ledger o las investigaciones") from error
+    planta = next((x for x in plantas if x.planta_id == p["planta_id"] and
+                   x.estado_calidad == "CONFIRMADA" and x.estado_vigencia == "ACTIVA"), None)
+    if planta is None:
+        raise ErrorAccionOperacional("ENTIDAD_NO_ENCONTRADA", "la planta no está confirmada y activa")
+    viaje = [f for f in ctx.filas() if clave_transporte(_transporte(f)) == clave_transporte(transporte)]
+    identidades = [(str(f.get("archivo", "")).strip(), str(f.get("numero_guia", "")).strip()) for f in viaje]
+    if any(not a or not g.isdigit() for a, g in identidades):
+        raise ErrorAccionOperacional("PRECONDICION_FALLIDA",
+                                     "otra guía del transporte no tiene archivo o folio identificable")
+    guias = [g for _, g in identidades]
+    if len(set(guias)) != len(guias) or len({a for a, _ in identidades}) != len(identidades):
+        raise ErrorAccionOperacional("ENTIDAD_AMBIGUA", "el transporte tiene guías o documentos repetidos")
+    for a, g in identidades:
+        if a in en_investigacion:
+            raise ErrorAccionOperacional("PRECONDICION_FALLIDA", f"la guía {g} del viaje está en investigación")
+        if (a, g) in destinos_confirmados:
+            raise ErrorAccionOperacional(
+                "PRECONDICION_FALLIDA",
+                f"la guía {g} del viaje tiene destino operacional confirmado por una persona; su ruta "
+                "guardada se calculó desde la planta anterior y requiere revisión conjunta")
+    conjunto = set(guias)
+    if any(d.get("tipo") == "ORIGEN_NO_CONFIRMADO" and d.get("estado", "PENDIENTE") == "PENDIENTE"
+           and str((d.get("documento") or {}).get("numero_guia", "")).strip() in conjunto
+           for d in ctx.decisiones()):
+        raise ErrorAccionOperacional("PRECONDICION_FALLIDA",
+                                     "el viaje tiene una revisión de origen pendiente; corríjalo desde esa revisión")
+    eventos = _eventos_viaje_origen(ctx, transporte, conjunto)
+    registro_grupos = _leer_json(ctx.archivos["agrupaciones_viaje"], {"schema_version": 1, "agrupaciones": []})
+    if (not isinstance(registro_grupos, dict) or registro_grupos.get("schema_version") != 1
+            or not isinstance(registro_grupos.get("agrupaciones"), list)):
+        raise ErrorAccionOperacional("ESTADO_ILEGIBLE", "el registro de agrupaciones es inválido")
+    if any(not isinstance(a, dict) or (a.get("estado") == "ACTIVA" and not isinstance(a.get("transportes"), list))
+           for a in registro_grupos["agrupaciones"]):
+        raise ErrorAccionOperacional("ESTADO_ILEGIBLE", "el registro de agrupaciones contiene entradas inválidas")
+    agrupaciones = [a for a in registro_grupos["agrupaciones"] if a.get("estado") == "ACTIVA"]
+    if any(clave_transporte(transporte) in {clave_transporte(t) for t in a.get("transportes") or []}
+           for a in agrupaciones):
+        raise ErrorAccionOperacional("PRECONDICION_FALLIDA", "el transporte pertenece a una agrupación activa")
+    anterior = {"planta_origen": str(fila.get("planta_origen_nombre") or ""),
+                "planta_id": str(fila.get("planta_origen_id") or "")}
+    propuesto = {"planta_origen": planta.nombre, "planta_id": planta.planta_id}
+    documentos = [{"archivo": str(f.get("archivo", "")).strip(), "numero_guia": str(f.get("numero_guia", "")).strip(),
+                   "planta_origen": str(f.get("planta_origen_nombre") or ""),
+                   "planta_id": str(f.get("planta_origen_id") or ""),
+                   "origen_determinado_por": str(f.get("origen_determinado_por") or ""),
+                   "evidencia_origen": str(f.get("evidencia_origen") or ""),
+                   "distancia_km": str(f.get("distancia_km") or ""),
+                   "estado_ruta": str(f.get("estado_ruta") or "")}
+                  for f in sorted(viaje, key=lambda f: str(f.get("numero_guia", "")))]
+    cambian = [d for d in documentos if d["planta_id"] != planta.planta_id]
+    consecuencias = []
+    if len(documentos) > 1:
+        consecuencias.append(f"El origen es del viaje: cambia en sus {len(documentos)} guías ("
+                             + ", ".join(d["numero_guia"] for d in documentos) + ").")
+    for d in cambian:
+        km = f"{d['distancia_km']} km" if d["distancia_km"] else "sin ruta calculada"
+        consecuencias.append(f"Guía {d['numero_guia']}: {d['planta_origen'] or 'sin origen'} → {planta.nombre}; "
+                             f"la ruta anterior ({km}) se invalida y se recalcula desde la nueva planta.")
+    consecuencias.append("Si la ruta no puede calcularse queda pendiente; no se conserva una distancia obsoleta.")
+    humanas = [d["numero_guia"] for d in cambian if d["origen_determinado_por"] == "CONFIRMACION_HUMANA"]
+    if humanas:
+        consecuencias.append("Reemplaza el origen confirmado antes por una persona en la guía "
+                             + ", ".join(humanas) + ".")
+    if eventos:
+        consecuencias.append("Se conservan los eventos del viaje: "
+                             + ", ".join(sorted({str(e.get("tipo_evento") or "EVENTO") for e in eventos})) + ".")
+    consecuencias.append("El documento, el OCR y la evidencia de origen anterior se conservan.")
+    return Plan(entidad={"tipo": "DOCUMENTO", "id": archivo, "numero_guia": guia,
+                         "numero_transporte": transporte, "empresa": empresa},
+                valor_actual=anterior, valor_propuesto=propuesto,
+                estado_base={"fila": fila, "viaje": viaje, "planta": vars(planta),
+                             "eventos": eventos, "agrupaciones": agrupaciones},
+                sin_cambios=not cambian and all(d["origen_determinado_por"] == "CONFIRMACION_HUMANA"
+                                                for d in documentos),
+                afectados={"guias": [d["numero_guia"] for d in documentos], "numero_transporte": transporte,
+                           "empresa": empresa, "documentos": documentos},
+                consecuencias=consecuencias,
+                revalidaciones=["RECALCULAR_RUTA", "RECONCILIAR_BANDEJA", "REGENERAR_REPORTE_VIAJES"],
+                archivos=("dataset", "bandeja", "ledger_decisiones"),
+                datos={"archivo": archivo, "guia": guia, "transporte": transporte, "empresa": empresa,
+                       "documentos": documentos})
+
+
+def _aplicar_documento_planta_origen(ctx: _Contexto, p: dict, plan: Plan, actor: str) -> dict:
+    from atlas_core.agrupacion_viajes import _clave as clave_transporte
+    from atlas_core.revalidacion_documental import (_leer_filas, _escribir_filas_completas,
+        invalidar_derivados_ruta, derivar_estado_ruta_tras_cambio_origen,
+        revalidar_ruta_sin_destino_calculado_sin_ocr, revalidar_indicadores_documentales_sin_ocr)
+    archivo, guia = plan.datos["archivo"], plan.datos["guia"]
+    documentos = plan.datos["documentos"]
+    base = {str(f.get("archivo", "")).strip(): f for f in plan.estado_base["viaje"]}
+    nueva = plan.valor_propuesto["planta_id"]
+    with bloqueo_sesion(ctx.actual, "revalidacion_dataset"):
+        filas = _leer_filas(ctx.archivos["dataset"], completas=True)
+        viaje = [f for f in filas if clave_transporte(_transporte(f)) == clave_transporte(plan.datos["transporte"])]
+        if len(viaje) != len(base) or any(base.get(str(f.get("archivo", "")).strip()) != f for f in viaje):
+            raise ErrorAccionOperacional("PRECONDICION_FALLIDA", "el viaje cambió desde la confirmación")
+        for fila in viaje:
+            # Sólo una planta que realmente cambia invalida la ruta: una
+            # distancia calculada desde la planta anterior nunca se publica.
+            if str(fila.get("planta_origen_id") or "") != nueva:
+                fila.update(invalidar_derivados_ruta())
+                fila.update(estado_ruta="REQUIERE_REVISION", motivo_ruta="ORIGEN_MODIFICADO_RUTA_PENDIENTE")
+            fila.update(planta_origen_id=nueva, planta_origen_nombre=plan.valor_propuesto["planta_origen"],
+                        origen_determinado_por="CONFIRMACION_HUMANA",
+                        evidencia_origen=f"ACCION_OPERACIONAL:{ctx.token}")
+            fila.update(derivar_estado_ruta_tras_cambio_origen(fila))
+        _escribir_filas_completas(ctx.archivos["dataset"], filas)
+    with bloqueo_sesion(ctx.actual, "aplicar_decision_obra"):
+        ledger = _leer_json(ctx.archivos["ledger_decisiones"], {"schema_version": 1, "aplicaciones": []})
+        ledger.setdefault("aplicaciones", []).append({
+            "decision_id": f"ACCION_OPERACIONAL:{ctx.token}", "tipo": "CORRECCION_ORIGEN_OPERACIONAL",
+            "accion": "CORREGIR_PLANTA_ORIGEN", "actor": actor, "confirmado_por": ctx.confirmado_por,
+            "fecha": ctx.reloj().astimezone(timezone.utc).isoformat(),
+            "empresa": plan.datos["empresa"], "documento": {"archivo": archivo, "numero_guia": guia,
+                                                             "numero_transporte": plan.datos["transporte"]},
+            "origen_anterior": plan.valor_actual, "origen_confirmado": plan.valor_propuesto,
+            "evidencia_anterior": plan.estado_base["fila"].get("evidencia_origen", ""),
+            # Estado previo de CADA guía del viaje (origen, fuente, evidencia y
+            # ruta): la corrección queda auditable y reversible por documento.
+            "documentos_viaje": documentos,
+            "referencia": str(p.get("referencia", "")),
+        })
+        escribir_json_atomico(ctx.archivos["ledger_decisiones"], ledger)
+    guias = {d["numero_guia"] for d in documentos}
+    revalidar_ruta_sin_destino_calculado_sin_ocr(
+        ruta_dataset=ctx.archivos["dataset"], carpeta_catalogos=ctx.catalogos,
+        proveedor_rutas=ctx.proveedor_rutas, proveedor_rutas_fallback=ctx.proveedor_rutas_fallback,
+        guias_objetivo=guias)
+    indicadores = revalidar_indicadores_documentales_sin_ocr(ruta_dataset=ctx.archivos["dataset"],
+                                                              guias_objetivo=guias)
+    for d in documentos:
+        actual = _fila_documento(ctx, d["numero_guia"], d["archivo"])
+        if (actual.get("planta_origen_id") != nueva
+                or actual.get("origen_determinado_por") != "CONFIRMACION_HUMANA"):
+            raise ErrorAccionOperacional("PERSISTENCIA_NO_VERIFICADA",
+                                         f"la planta no quedó guardada en la guía {d['numero_guia']}")
+    return {"despues": plan.valor_propuesto, "reconciliar": True, "guias_revalidar": [],
+            "revalidacion_focal": indicadores,
+            "omitir_convergencia_mobile": True, "regenerar_reporte": True}
 
 
 def _precondiciones_cambio_transporte(ctx: _Contexto, fila: Mapping[str, str], nuevo: str) -> dict[str, object]:
@@ -3303,6 +3505,11 @@ ACCIONES: dict[str, DefinicionAccion] = {d.nombre: d for d in (
                       "valor": _P("texto", True, max_largo=200), "archivo": _P("archivo_documento", max_largo=260),
                       "referencia": _REF},
                      _plan_documento_campo, _aplicar_documento_campo),
+    DefinicionAccion("DOCUMENTO_CORREGIR_PLANTA_ORIGEN", OPERACIONAL_REVERSIBLE,
+                     "Corrige el origen operacional de una guía a una planta confirmada y activa.",
+                     {"numero_guia": _P("guia", True), "planta_id": _P("id", True),
+                      "archivo": _P("archivo_documento", max_largo=260), "referencia": _REF},
+                     _plan_documento_planta_origen, _aplicar_documento_planta_origen, escritor_global=True),
     DefinicionAccion("DOCUMENTO_CORREGIR_IDENTIDAD_CHOFER", OPERACIONAL_REVERSIBLE,
                      "Corrige conjuntamente chofer y RUT documental con una identidad activa existente del catálogo.",
                      {"numero_guia": _P("guia", True), "chofer": _P("texto", True, max_largo=120),
@@ -3503,6 +3710,7 @@ class CapaAccionesOperacionales:
                 esperadas = {"DOCUMENTO_CORREGIR_NUMERO_GUIA": "CORREGIR_NUMERO_GUIA",
                              "DOCUMENTO_ASIGNAR_OBRA": "CORREGIR_CAMPO",
                              "DOCUMENTO_CORREGIR_DESTINO_OPERACIONAL": "CORREGIR_DESTINO_OPERACIONAL",
+                             "DOCUMENTO_CORREGIR_PLANTA_ORIGEN": "CORREGIR_PLANTA_ORIGEN",
                              "DOCUMENTO_CORREGIR_CAMPO": "CORREGIR_CAMPO"}
                 accion = preview.get("accion")
                 if accion not in esperadas:
@@ -3532,7 +3740,9 @@ class CapaAccionesOperacionales:
                                 (entrada.get("campo") != entidad.get("campo")
                                  or entrada.get("valor_corregido") != propuesto.get(entidad.get("campo"))))
                             or (accion == "DOCUMENTO_CORREGIR_DESTINO_OPERACIONAL" and
-                                entrada.get("destino_operacional") != propuesto)):
+                                entrada.get("destino_operacional") != propuesto)
+                            or (accion == "DOCUMENTO_CORREGIR_PLANTA_ORIGEN" and
+                                entrada.get("origen_confirmado") != propuesto)):
                         conflictos.append("ACCION_O_VALOR_NO_COINCIDE")
                 archivos = {k: {"antes": anteriores[k], "actual": actuales[k],
                                  "estado": "SIN_CAMBIOS" if anteriores[k] == actuales[k] else "MODIFICADO"}
@@ -4247,6 +4457,9 @@ class CapaAccionesOperacionales:
                     return self.recuperar_campo_documental(token)
                 if preview["accion"] == "DOCUMENTO_CORREGIR_DESTINO_OPERACIONAL":
                     return self.recuperar_destino_tras_ledger(token)
+                if preview["accion"] == "DOCUMENTO_CORREGIR_PLANTA_ORIGEN":
+                    return {"estado": "FALLIDA", "token": token, "codigo": "PUBLICACION_INCOMPLETA",
+                            "mensaje": "La corrección de origen quedó interrumpida; requiere recuperación controlada."}
                 resultado = self.recuperar_dataset_antes_del_ledger(token)
                 if resultado.get("codigo") == "PUBLICACION_INCOMPLETA":
                     return self.recuperar_folio_obra_tras_ledger(token)
@@ -4327,7 +4540,7 @@ class CapaAccionesOperacionales:
                     "ESCRITOR_OCUPADO",
                     "otro proceso (p. ej. el PULL) tiene el escritor global; reintente con el mismo token")
             self._ctx.puede_escribir = lambda: escritor.vigente
-            if adicional:
+            if adicional or definicion.nombre == "DOCUMENTO_CORREGIR_PLANTA_ORIGEN":
                 plan = self._planificar(definicion, parametros)
                 if _huella(plan.estado_base) != preview["huella_base"]:
                     nuevo = self._construir_preview(definicion, parametros, plan, actor=preview["solicitado_por"],
@@ -4365,6 +4578,9 @@ class CapaAccionesOperacionales:
             # Con el escritor global perdido, restaurar el respaldo podría
             # pisar lo que otro escritor ya persistió: no se restaura.
             restaurar = self._ctx.puede_escribir is None or self._ctx.puede_escribir()
+            if not restaurar and definicion.nombre == "DOCUMENTO_CORREGIR_PLANTA_ORIGEN":
+                return {"estado": "FALLIDA", "token": token, "codigo": "PUBLICACION_INCOMPLETA",
+                        "mensaje": "Se perdió el escritor durante la corrección; la lectura queda bloqueada."}
             if restaurar:
                 self._restaurar(respaldo)
             codigo = error.codigo if isinstance(error, ErrorAccionOperacional) else "ERROR_SERVICIO"
@@ -4384,6 +4600,11 @@ class CapaAccionesOperacionales:
         retirar = salida.get("retirar_obsoletas")
         red_seguridad = _retirar_obsoletas_por_campo(self._ctx, *retirar) if retirar else []
         reconciliacion = self._reconciliar(guias_objetivo=set(plan.afectados.get('guias') or []) or None) if salida.get("reconciliar") else None
+        if (definicion.nombre == "DOCUMENTO_CORREGIR_PLANTA_ORIGEN"
+                and (reconciliacion or {}).get("motivo") == "ERROR_RECONCILIACION"):
+            return {"estado": "FALLIDA", "token": token, "accion": definicion.nombre,
+                    "codigo": "PUBLICACION_INCOMPLETA", "reconciliacion": reconciliacion,
+                    "mensaje": "No se actualizó la bandeja; la lectura queda bloqueada para recuperación controlada."}
         if retirar:
             red_seguridad += _retirar_obsoletas_por_campo(self._ctx, *retirar)
         ids_despues = self._ids_decisiones_documento(plan)
@@ -4402,6 +4623,13 @@ class CapaAccionesOperacionales:
             revalidacion["reporte"] = self._regenerar_reporte() if salida.get("regenerar_reporte") else None
         finally:
             self._antes_de_publicar_reporte = None
+        if definicion.nombre == "DOCUMENTO_CORREGIR_PLANTA_ORIGEN" and (
+                (reconciliacion or {}).get("motivo") == "ERROR_RECONCILIACION"
+                or (revalidacion["guias"] or {}).get("motivo") == "ERROR_REVALIDACION"
+                or not (revalidacion["reporte"] or {}).get("regenerado")):
+            return {"estado": "FALLIDA", "token": token, "accion": definicion.nombre,
+                    "codigo": "PUBLICACION_INCOMPLETA", "revalidacion": revalidacion,
+                    "mensaje": "La corrección requiere completar la publicación; la lectura queda bloqueada."}
         if (preview.get("confirmacion_recuperable") and salida.get("regenerar_reporte")
                 and not (revalidacion["reporte"] or {}).get("regenerado")):
             # No cerrar la marca ni auditar como aplicada una recuperación
