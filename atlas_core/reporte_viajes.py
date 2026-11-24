@@ -626,14 +626,21 @@ def generar_reporte_viajes(
             # El ledger opcional externo ya admite ausencia o corrupci?n.
             ledger_material = {}
     identidades_entrega = identidades_confirmadas(filas, ledger_decisiones, catalogos)
+    from atlas_core.identidad_destino import IndiceIdentidadDestinos, identidad_de_fila
+    indice_destinos = IndiceIdentidadDestinos.desde_carpeta(catalogos)
     filas_operacionales = []
     for fila in filas:
         proyectada = proyectar_destino(fila, ledger_decisiones)
-        if proyectada != fila:
+        documental = proyectada == fila
+        if not documental:
             proyectada["_evidencia_documental_original"] = dict(fila)
         clave_entrega = tuple(str(fila.get(c) or "").strip() for c in ("archivo", "numero_guia", "numero_transporte"))
-        if clave_entrega in identidades_entrega and proyectada == fila:
+        if clave_entrega in identidades_entrega and documental:
             proyectada["_identidad_entrega_confirmada"] = identidades_entrega[clave_entrega]
+        # Identidad física sólo de la lectura documental: un destino
+        # proyectado por una decisión humana conserva su propia regla.
+        if documental and (identidad := identidad_de_fila(fila, indice_destinos)) is not None:
+            proyectada["_identidad_destino"] = (identidad.clave, identidad.direccion, identidad.comuna)
         if material_confirmado_vigente(ledger_material, fila) is not None:
             proyectada["_material_humano_confirmado"] = True
         filas_operacionales.append(proyectada)

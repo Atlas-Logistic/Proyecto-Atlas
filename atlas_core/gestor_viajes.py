@@ -339,6 +339,11 @@ class DocumentoViaje:
     destino_operacional_confirmado: bool = False
     identidad_entrega_confirmada: tuple[str, str, str] | None = None
     material_humano_confirmado: bool = False
+    # Identidad física del destino (clave, dirección y comuna canónicas del
+    # catálogo) que la lectura documental ya acredita, independiente de su
+    # escritura OCR -- ver `atlas_core.identidad_destino`. Sólo agrupa
+    # entregas y elige representación; nunca cambia ruta ni evidencia.
+    identidad_destino: tuple[str, str, str] | None = None
 
     @property
     def material_publicable(self) -> str:
@@ -637,7 +642,12 @@ class Viaje:
             clave_mayoritaria, votos = conteo.most_common(1)[0]
             if votos > len(valores_confiables) - votos:
                 return next(v for v in valores_confiables if _clave_normalizada(v) == clave_mayoritaria)
-            return ""
+            # Sin mayoría, la identidad física común (mismo criterio que
+            # `entregas._destino_operacional_consolidado`) decide qué se
+            # presenta; sin identidad común, vacío como siempre.
+            from atlas_core.entregas import representacion_canonica
+
+            return representacion_canonica(documentos)
         valores = _valores_unicos(getattr(d, campo) for d in documentos)
         return valores[0] if len(valores) == 1 else ""
 
@@ -1058,6 +1068,13 @@ class Viaje:
         }
 
 
+# Anotaciones de proyección que `reporte_viajes` agrega a la fila: no son
+# evidencia documental ni forman parte de la huella de deduplicación.
+_CLAVES_PROYECCION_PRIVADAS = frozenset({
+    "_identidad_entrega_confirmada", "_material_humano_confirmado", "_identidad_destino",
+})
+
+
 def _documento_desde_fila(
     fila: Mapping[str, object],
     *,
@@ -1068,7 +1085,7 @@ def _documento_desde_fila(
     original = fila.get("_evidencia_documental_original")
     evidencia_fila = original if isinstance(original, Mapping) else fila
     evidencia = {str(clave): str(valor or "") for clave, valor in evidencia_fila.items()
-                 if clave not in {"_identidad_entrega_confirmada", "_material_humano_confirmado"}}
+                 if clave not in _CLAVES_PROYECCION_PRIVADAS}
     chofer_original = str(fila.get("chofer", "")).strip()
     chofer = (
         normalizador_chofer(chofer_original)
@@ -1169,6 +1186,7 @@ def _documento_desde_fila(
         destino_operacional_confirmado=isinstance(original, Mapping),
         identidad_entrega_confirmada=fila.get("_identidad_entrega_confirmada"),
         material_humano_confirmado=fila.get("_material_humano_confirmado") is True,
+        identidad_destino=fila.get("_identidad_destino"),
     )
 
 
@@ -1179,7 +1197,7 @@ def _deduplicar_filas(
     unicas: dict[tuple[tuple[str, str], ...], Mapping[str, object]] = {}
     for fila in filas:
         huella = tuple(
-            sorted((str(k), str(v or "")) for k, v in fila.items() if k not in {"_identidad_entrega_confirmada", "_material_humano_confirmado"})
+            sorted((str(k), str(v or "")) for k, v in fila.items() if k not in _CLAVES_PROYECCION_PRIVADAS)
         )
         unicas.setdefault(huella, fila)
     return [unicas[huella] for huella in sorted(unicas)]

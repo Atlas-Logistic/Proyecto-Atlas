@@ -328,6 +328,35 @@ def _documento_compatible_con_destino_confirmado(
     return compatibles > 0 and comunas == {comuna}
 
 
+def _clave_identidad(documento: "DocumentoViaje") -> str:
+    identidad = getattr(documento, "identidad_destino", None)
+    return str(identidad[0]) if identidad else ""
+
+
+def representacion_canonica(documentos) -> str:
+    """Texto que representa el destino común de `documentos` cuando sus
+    lecturas no coinciden y ninguna es mayoría: todos deben compartir la
+    misma identidad física. Se prefiere una lectura documental confiable
+    que ya contenga literal la dirección canónica; si ninguna la trae, la
+    dirección canónica del catálogo. '' sin identidad común."""
+    documentos = list(documentos)
+    claves = {_clave_identidad(d) for d in documentos}
+    if not documentos or len(claves) != 1 or "" in claves:
+        return ""
+    canonica = str(documentos[0].identidad_destino[1] or "").strip()
+    from atlas_core.catalogo_destinos import normalizar_nombre_destino
+
+    canonica_n = normalizar_nombre_destino(canonica)
+    for documento in documentos:
+        texto = str(getattr(documento, "direccion_entrega", "") or "").strip()
+        if (_presente(texto) and canonica_n
+                and evaluar_credibilidad_direccion(texto).nivel == NivelCredibilidad.CONFIABLE
+                and re.search(rf"(?<![A-Z0-9]){re.escape(canonica_n)}(?![A-Z0-9])",
+                              normalizar_nombre_destino(texto))):
+            return texto
+    return canonica
+
+
 def _destino_compatible(a: "DocumentoViaje", b: "DocumentoViaje") -> bool:
     """True sólo si ambos documentos comparten al menos un nivel de señal
     de destino poblado y coinciden (con tolerancia a un typo de OCR de un
@@ -363,6 +392,16 @@ def _destino_compatible(a: "DocumentoViaje", b: "DocumentoViaje") -> bool:
         comuna_a = _clave(getattr(a, "localidad_entrega", ""))
         comuna_b = _clave(getattr(b, "localidad_entrega", ""))
         return bool(direccion_a and comuna_a and direccion_a == direccion_b and comuna_a == comuna_b)
+    # Caso real 0000371984 (485458/485459): "SANTA ISABEL S85 ..." y
+    # "SANTAISABEL 585 ..." son la misma dirección impresa con dos errores
+    # OCR distintos. La identidad física (`atlas_core.identidad_destino`:
+    # destino confirmado del catálogo con la equivalencia vigente, número
+    # como ancla y misma comuna) ya los reconoce como un solo lugar; el
+    # texto sólo es su representación. Sólo agrega evidencia positiva:
+    # sin identidad común se aplica la regla documental de siempre.
+    clave_a, clave_b = _clave_identidad(a), _clave_identidad(b)
+    if clave_a and clave_a == clave_b:
+        return True
     # Un codigo territorial comun no puede prevalecer sobre dos destinos
     # operacionales distintos. Comparar calle y localidad antes de agrupar;
     # conservar la tolerancia OCR solo cuando el numero coincide.
@@ -545,7 +584,9 @@ def _destino_operacional_consolidado(documentos) -> str:
         clave_mayoritaria, votos = conteo.most_common(1)[0]
         if votos > len(valores_confiables) - votos:
             return next(v for v in valores_confiables if _clave(v) == clave_mayoritaria)
-        return valores_confiables[0]
+        # Sin mayoría (p. ej. 0000371984: una lectura de cada variante OCR)
+        # la identidad física común decide qué se muestra.
+        return representacion_canonica(documentos) or valores_confiables[0]
     return _primer_presente([getattr(d, "despachar_a_crudo", "") for d in documentos])
 
 
