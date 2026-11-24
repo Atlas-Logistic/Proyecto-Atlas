@@ -19,6 +19,9 @@ Semántica (mínima y reversible):
   ningún transporte ya pertenece a otra agrupación o tiene eventos
   operacionales propios (estadías, etc., que están indexados por
   transporte y quedarían huérfanos).
+- La separación (`evaluar_separacion`/`separar_agrupacion`) saca
+  transportes COMPLETOS de una agrupación sin borrar el registro, y
+  `revertir_separacion` la deshace.
 """
 from __future__ import annotations
 
@@ -207,3 +210,292 @@ def registrar_agrupacion(
         contenido["agrupaciones"].append(agrupacion)
         escribir_json_atomico(ruta, contenido)
         return agrupacion, True
+
+
+# =============================================================== SEPARACIÓN
+#
+# Deshace (total o parcialmente) una agrupación confirmada por un humano.
+# Distingue los dos niveles de identidad:
+# - TRANSPORTE AZA: la carga que AZA despachó; sus guías son indivisibles
+#   (nunca se reparten entre viajes Atlas).
+# - VIAJE FÍSICO ATLAS: uno o más transportes AZA completos.
+# Por eso sólo se separan transportes COMPLETOS de una agrupación ACTIVA. Una
+# guía que "no pertenece" a su propio transporte es un error documental (su
+# número de transporte), que se corrige por la vía documental, no aquí.
+#
+# El registro nunca se borra: la agrupación queda SEPARADA (con quién, cuándo
+# y desde qué acción) y, si quedan 2+ transportes, nace una agrupación ACTIVA
+# derivada con los restantes. Revertir reactiva la original y retira la
+# derivada (REVERTIDA), también sin borrar nada.
+
+ESTADO_SEPARADA = "SEPARADA"
+ESTADO_REVERTIDA = "REVERTIDA"
+
+
+def _transporte_valido(transporte: str) -> bool:
+    return bool(re.fullmatch(r"\d{4,15}", transporte or ""))
+
+
+def _guias_de_transporte(filas: Iterable[Mapping[str, str]], transporte: str) -> list[str]:
+    return [str(f.get("numero_guia", "") or "").strip() for f in filas
+            if _clave(f.get("numero_transporte")) == transporte]
+
+
+def _lista_guias(guias: Iterable[str], *, articulo: bool = True) -> str:
+    guias = list(guias)
+    if len(guias) == 1:
+        return f"{'La guía' if articulo else 'la guía'} {guias[0]}"
+    return f"{'Las guías' if articulo else 'las guías'} {', '.join(guias[:-1])} y {guias[-1]}"
+
+
+@dataclass
+class EvaluacionSeparacion:
+    guias: list[str]
+    agrupacion: dict = field(default_factory=dict)
+    transportes_separados: list[str] = field(default_factory=list)
+    transportes_restantes: list[str] = field(default_factory=list)
+    guias_por_transporte: dict[str, list[str]] = field(default_factory=dict)
+    ya_separadas: bool = False
+    motivo_rechazo: str = ""
+    codigo: str = "PRECONDICION_FALLIDA"
+
+    @property
+    def grupos_resultantes(self) -> list[list[str]]:
+        """Viajes físicos resultantes (listas ordenadas de transportes): cada
+        transporte separado queda como viaje propio y los restantes siguen
+        juntos (si son 2+) o solos."""
+        grupos = [[t] for t in self.transportes_separados]
+        if self.transportes_restantes:
+            grupos.append(list(self.transportes_restantes))
+        return sorted(grupos, key=lambda g: g[0])
+
+
+def _rechazo(evaluacion: EvaluacionSeparacion, motivo: str, codigo: str = "PRECONDICION_FALLIDA") -> EvaluacionSeparacion:
+    evaluacion.motivo_rechazo, evaluacion.codigo = motivo, codigo
+    return evaluacion
+
+
+def evaluar_separacion(
+    *, guias: Iterable[str], filas: Iterable[Mapping[str, str]], agrupaciones: Iterable[Mapping[str, object]],
+    guia_viaje: str = "",
+) -> EvaluacionSeparacion:
+    """Decide si las guías pueden sacarse del viaje agrupado en que están.
+    Nunca escribe. `guia_viaje` (opcional) es otra guía del MISMO viaje que
+    debe quedar en él, para identificarlo sin ambigüedad.
+
+    Rechaza (motivo + código) toda situación sin resultado único: guía
+    inexistente o repetida, transporte inválido, guías de viajes distintos,
+    transporte AZA nombrado sólo en parte, documento sin folio en un
+    transporte del viaje, registro de agrupaciones contradictorio, o todos
+    los transportes de un viaje de 3+ (no se sabe cuáles siguen juntos)."""
+    guias = sorted({str(g).strip() for g in guias if str(g).strip()})
+    guia_viaje = str(guia_viaje or "").strip()
+    evaluacion = EvaluacionSeparacion(guias=guias)
+    if not guias:
+        return _rechazo(evaluacion, "Indica al menos una guía a separar.", "PARAMETRO_INVALIDO")
+    filas = list(filas)
+    agrupaciones = [a for a in agrupaciones if isinstance(a, Mapping)]
+    transporte_por_guia: dict[str, str] = {}
+    for guia in [*guias, *([guia_viaje] if guia_viaje else [])]:
+        propias = [f for f in filas if str(f.get("numero_guia", "") or "").strip() == guia]
+        if not propias:
+            return _rechazo(evaluacion, f"La guía {guia} no existe en el dataset.", "ENTIDAD_NO_ENCONTRADA")
+        if len(propias) > 1:
+            return _rechazo(evaluacion, f"La guía {guia} aparece en {len(propias)} documentos; no se puede saber "
+                                        "cuál separar. Corrige primero el folio repetido.", "ENTIDAD_AMBIGUA")
+        transporte = _clave(propias[0].get("numero_transporte"))
+        if not _transporte_valido(transporte):
+            return _rechazo(evaluacion, f"La guía {guia} no tiene un número de transporte AZA válido; "
+                                        "corrígelo primero.")
+        transporte_por_guia[guia] = transporte
+    # Registro contradictorio: un transporte en dos agrupaciones activas.
+    apariciones: dict[str, int] = {}
+    for agrupacion in agrupaciones:
+        for t in {_clave(x) for x in agrupacion.get("transportes") or []}:
+            apariciones[t] = apariciones.get(t, 0) + 1
+    contradictorios = sorted(t for t in set(transporte_por_guia.values()) if apariciones.get(t, 0) > 1)
+    if contradictorios:
+        return _rechazo(evaluacion, f"El transporte {', '.join(contradictorios)} figura en dos agrupaciones "
+                                    "activas; el registro es inconsistente y requiere revisión técnica.",
+                        "ESTADO_ILEGIBLE")
+    separados = sorted({transporte_por_guia[g] for g in guias})
+    mapa = mapa_transporte_a_grupo(agrupaciones)
+    if not any(t in mapa for t in separados):
+        # Ningún transporte agrupado: cada viaje Atlas ES su transporte AZA.
+        for t in separados:
+            otras = sorted(set(_guias_de_transporte(filas, t)) - set(guias))
+            if otras:
+                propias = [g for g in guias if transporte_por_guia[g] == t]
+                return _rechazo(evaluacion, (
+                    f"{_lista_guias(propias)} y {_lista_guias(otras, articulo=False)} forman el transporte AZA "
+                    f"{t}: Atlas trata un transporte AZA como un solo viaje físico y nunca lo divide. Si una guía "
+                    "tiene mal leído su número de transporte, corrige ese número (con su propia vista previa)."))
+        evaluacion.ya_separadas = True  # cada guía ya está en un viaje propio
+        evaluacion.transportes_separados = separados
+        evaluacion.guias_por_transporte = {t: sorted(_guias_de_transporte(filas, t)) for t in separados}
+        return evaluacion
+    sueltos = [t for t in separados if t not in mapa]
+    if sueltos:
+        sueltas = [g for g in guias if transporte_por_guia[g] in sueltos]
+        return _rechazo(evaluacion, f"{_lista_guias(sueltas)} ya forma un viaje propio (transporte "
+                                    f"{', '.join(sueltos)}); separa sólo guías de un mismo viaje agrupado.",
+                        "ENTIDAD_AMBIGUA")
+    principales = {mapa[t] for t in separados}
+    if len(principales) > 1:
+        return _rechazo(evaluacion, "Las guías indicadas pertenecen a viajes agrupados distintos; separa las de "
+                                    "un viaje a la vez.", "ENTIDAD_AMBIGUA")
+    principal = principales.pop()
+    agrupacion = next(a for a in agrupaciones if principal in {_clave(t) for t in a.get("transportes") or []})
+    transportes = sorted({_clave(t) for t in agrupacion.get("transportes") or []})
+    evaluacion.agrupacion = dict(agrupacion)
+    evaluacion.guias_por_transporte = {t: sorted(_guias_de_transporte(filas, t)) for t in transportes}
+    for t in transportes:
+        documentos = evaluacion.guias_por_transporte[t]
+        if not documentos:
+            return _rechazo(evaluacion, f"El transporte {t} del viaje no tiene documentos en el dataset; "
+                                        "el viaje requiere revisión antes de separarlo.")
+        if any(not g for g in documentos) or len(set(documentos)) != len(documentos):
+            return _rechazo(evaluacion, f"El transporte {t} del viaje tiene documentos sin folio o con folio "
+                                        "repetido; corrígelos antes de separar (ninguna guía puede perderse).",
+                            "ENTIDAD_AMBIGUA")
+    for t in separados:
+        faltan = sorted(set(evaluacion.guias_por_transporte[t]) - set(guias))
+        if faltan:
+            propias = [g for g in guias if transporte_por_guia[g] == t]
+            return _rechazo(evaluacion, (
+                f"{_lista_guias(propias)} comparte el transporte AZA {t} con "
+                f"{_lista_guias(faltan, articulo=False)}; un transporte AZA no se divide. Para sacar ese "
+                f"transporte del viaje nombra todas sus guías ({', '.join(sorted(set(propias) | set(faltan)))}). "
+                "Si una guía tiene mal leído su número de transporte, corrige ese número."))
+    restantes = [t for t in transportes if t not in separados]
+    if not restantes:
+        if len(transportes) > 2:
+            return _rechazo(evaluacion, (
+                f"Nombraste las guías de los {len(transportes)} transportes del viaje; no se sabe cuáles deben "
+                "seguir juntos. Indica sólo las guías que salen del viaje."), "ENTIDAD_AMBIGUA")
+        # Dos transportes nombrados completos: deshacer la agrupación (cada
+        # transporte vuelve a ser su propio viaje). Único resultado posible.
+        separados, restantes = separados[1:], separados[:1]
+    if guia_viaje and guia_viaje not in guias:
+        referencia = transporte_por_guia[guia_viaje]
+        if referencia not in transportes:
+            return _rechazo(evaluacion, f"La guía {guia_viaje} no pertenece al viaje agrupado de las guías "
+                                        "indicadas.", "ENTIDAD_AMBIGUA")
+        if referencia in separados:
+            return _rechazo(evaluacion, f"La guía {guia_viaje} está en un transporte que se separa; no puede "
+                                        "identificar el viaje que queda.", "ENTIDAD_AMBIGUA")
+    evaluacion.transportes_separados, evaluacion.transportes_restantes = separados, restantes
+    return evaluacion
+
+
+def separar_agrupacion(
+    carpeta_actual: str | Path, *, agrupacion_id: str, transportes_esperados: Iterable[str],
+    transportes_separados: Iterable[str], guias_restantes: Iterable[str], actor: str, confirmado_por: str,
+    fuente: str, referencia: str = "", reloj=lambda: datetime.now(timezone.utc),
+) -> tuple[dict, dict | None]:
+    """Marca SEPARADA la agrupación ACTIVA (que debe seguir teniendo
+    exactamente `transportes_esperados`) y, si quedan 2+ transportes, crea la
+    agrupación ACTIVA derivada con ellos. Devuelve (original, derivada|None).
+    Nunca borra registros."""
+    esperados = sorted({_clave(t) for t in transportes_esperados if _clave(t)})
+    separados = sorted({_clave(t) for t in transportes_separados if _clave(t)})
+    restantes = [t for t in esperados if t not in separados]
+    if not separados or not set(separados) < set(esperados):
+        raise ValueError("los transportes a separar deben ser parte (no todos) de la agrupación")
+    ruta = ruta_registro(carpeta_actual)
+    with bloqueo_sesion(ruta.parent, "agrupaciones_viaje"):
+        contenido = _leer(ruta)
+        activas = [a for a in contenido["agrupaciones"] if isinstance(a, dict) and a.get("estado") == "ACTIVA"]
+        original = next((a for a in activas if a.get("agrupacion_id") == agrupacion_id), None)
+        if original is None or sorted({_clave(t) for t in original.get("transportes") or []}) != esperados:
+            raise ValueError("la agrupación cambió desde la vista previa")
+        ahora = reloj().astimezone(timezone.utc).isoformat()
+        derivada = None
+        if len(restantes) >= 2:
+            ocupados = set(mapa_transporte_a_grupo(a for a in activas if a is not original))
+            if ocupados & set(restantes):
+                raise ValueError("algún transporte restante ya pertenece a otra agrupación activa")
+            derivada = {
+                "agrupacion_id": identificador_agrupacion(restantes), "estado": "ACTIVA",
+                "tipo": original.get("tipo") or "VIAJE_FISICO_MULTITRANSPORTE", "transportes": restantes,
+                "transporte_principal": restantes[0],
+                "guias": sorted({str(g).strip() for g in guias_restantes if str(g).strip()}),
+                # La unión de los restantes la confirmó quien confirmó la original.
+                "actor": original.get("actor", ""), "confirmado_por": original.get("confirmado_por", ""),
+                "fuente": original.get("fuente", ""), "referencia": original.get("referencia", ""),
+                "fecha": original.get("fecha", ""),
+                "derivada_de": {"agrupacion_id": agrupacion_id, "separacion": fuente, "fecha": ahora},
+            }
+        original["estado"] = ESTADO_SEPARADA
+        original["separacion"] = {
+            "fecha": ahora, "actor": actor, "confirmado_por": confirmado_por, "fuente": fuente,
+            "referencia": referencia, "transportes_separados": separados, "transportes_restantes": restantes,
+            "agrupacion_derivada": derivada["agrupacion_id"] if derivada else None,
+        }
+        if derivada is not None:
+            contenido["agrupaciones"].append(derivada)
+        escribir_json_atomico(ruta, contenido)
+        return original, derivada
+
+
+def _reversion_posible(agrupaciones: list[dict], original: Mapping[str, object]) -> bool:
+    separacion = original.get("separacion") or {}
+    derivada_id = separacion.get("agrupacion_derivada")
+    transportes = {_clave(t) for t in original.get("transportes") or []}
+    activas = [a for a in agrupaciones if a.get("estado") == "ACTIVA"]
+    derivada = next((a for a in activas if a.get("agrupacion_id") == derivada_id), None) if derivada_id else None
+    if derivada_id and (derivada is None or sorted({_clave(t) for t in derivada.get("transportes") or []})
+                        != sorted({_clave(t) for t in separacion.get("transportes_restantes") or []})):
+        return False
+    return not any(transportes & {_clave(t) for t in a.get("transportes") or []}
+                   for a in activas if a is not derivada)
+
+
+def ultima_separacion_reversible(carpeta_actual: str | Path, transporte: str) -> dict | None:
+    """Agrupación SEPARADA más reciente que contenía `transporte`, si su
+    resultado sigue intacto (derivada aún ACTIVA con los mismos transportes
+    y ningún transporte de la original en otra agrupación activa)."""
+    clave = _clave(transporte)
+    try:
+        agrupaciones = [a for a in _leer(ruta_registro(carpeta_actual))["agrupaciones"] if isinstance(a, dict)]
+    except (OSError, ValueError):
+        return None
+    candidatas = [a for a in agrupaciones if a.get("estado") == ESTADO_SEPARADA
+                  and clave in {_clave(t) for t in a.get("transportes") or []}]
+    if not candidatas:
+        return None
+    original = max(candidatas, key=lambda a: str((a.get("separacion") or {}).get("fecha", "")))
+    return dict(original) if _reversion_posible(agrupaciones, original) else None
+
+
+def revertir_separacion(
+    carpeta_actual: str | Path, *, agrupacion_id: str, fecha_separacion: str, actor: str, confirmado_por: str,
+    fuente: str, referencia: str = "", reloj=lambda: datetime.now(timezone.utc),
+) -> dict:
+    """Reactiva la agrupación SEPARADA (id + fecha de su separación) y marca
+    REVERTIDA su derivada. Exige que el resultado de la separación siga
+    intacto. Devuelve la agrupación reactivada."""
+    ruta = ruta_registro(carpeta_actual)
+    with bloqueo_sesion(ruta.parent, "agrupaciones_viaje"):
+        contenido = _leer(ruta)
+        agrupaciones = [a for a in contenido["agrupaciones"] if isinstance(a, dict)]
+        original = next((a for a in agrupaciones if a.get("agrupacion_id") == agrupacion_id
+                         and a.get("estado") == ESTADO_SEPARADA
+                         and (a.get("separacion") or {}).get("fecha") == fecha_separacion), None)
+        if original is None or not _reversion_posible(agrupaciones, original):
+            raise ValueError("la separación ya no se puede revertir: el registro cambió desde la vista previa")
+        ahora = reloj().astimezone(timezone.utc).isoformat()
+        derivada_id = (original.get("separacion") or {}).get("agrupacion_derivada")
+        for a in agrupaciones:
+            if derivada_id and a.get("agrupacion_id") == derivada_id and a.get("estado") == "ACTIVA":
+                a["estado"] = ESTADO_REVERTIDA
+                a["reversion"] = {"fecha": ahora, "actor": actor, "confirmado_por": confirmado_por,
+                                  "fuente": fuente}
+        historial = list(original.get("historial") or [])
+        historial.append({"separacion": original.pop("separacion"), "revertida": {
+            "fecha": ahora, "actor": actor, "confirmado_por": confirmado_por, "fuente": fuente,
+            "referencia": referencia}})
+        original["historial"] = historial
+        original["estado"] = "ACTIVA"
+        escribir_json_atomico(ruta, contenido)
+        return original

@@ -2968,7 +2968,13 @@ def _simular_viaje_agrupado(filas: list[dict[str, str]], transportes: list[str],
                                agrupaciones_transporte={t: transportes[0] for t in transportes})
     if len(viajes) != 1:
         raise ErrorAccionOperacional("PRECONDICION_FALLIDA", "la simulación no produjo un único viaje")
-    viaje = viajes[0]
+    return _detalle_viaje(viajes[0], transportes)
+
+
+def _detalle_viaje(viaje, transportes: list[str]) -> dict:
+    """Cargas por transporte AZA, entregas con su ruta, peso total y estado
+    de un viaje simulado con `agrupar_viajes` (lo mismo que publicará el
+    reporte)."""
     cargas = []
     for transporte in transportes:
         docs = [d for d in viaje.documentos if d.evidencia.get("numero_transporte", "").strip() == transporte]
@@ -2996,6 +3002,283 @@ def _aplicar_viaje_agrupar(ctx: _Contexto, p: dict, plan: Plan, actor: str) -> d
     )
     return {"despues": {"agrupacion_id": agrupacion["agrupacion_id"], "transportes_aza": agrupacion["transportes"],
                         "numero_transporte_principal": agrupacion["transporte_principal"]},
+            "reconciliar": True, "guias_revalidar": list(plan.datos["guias"]), "regenerar_reporte": True}
+
+
+# =============================================================== SEPARACIÓN DE VIAJE
+#
+# Saca transportes AZA COMPLETOS de un viaje agrupado por un humano (ver
+# `agrupacion_viajes.evaluar_separacion`). La vista previa muestra el viaje
+# original y los viajes resultantes simulados con el mismo `agrupar_viajes`
+# del reporte (cargas, entregas, rutas, pesos, estado). Nada que cuelgue del
+# viaje se mueve ni se inventa: eventos (estadías, observaciones,
+# adicionales), revisiones "sin incidencia" y pesos confirmados quedan donde
+# están; si un evento quedaría repartido entre dos viajes o colgado de un
+# transporte que ya no es la clave de su viaje, la separación se bloquea.
+
+
+def _registro_eventos_estricto(ctx: _Contexto) -> dict:
+    registro = _leer_json(ctx.archivos["eventos_operacionales"], {"eventos": [], "revisiones_incidencias": []})
+    if (not isinstance(registro, dict) or not isinstance(registro.get("eventos"), list)
+            or any(not isinstance(e, dict) for e in registro["eventos"])
+            or not isinstance(registro.get("revisiones_incidencias", []), list)):
+        raise ErrorAccionOperacional("ESTADO_ILEGIBLE", "el registro de eventos operacionales es inválido")
+    return registro
+
+
+def _registro_agrupaciones_estricto(ctx: _Contexto) -> list[dict]:
+    registro = _leer_json(ctx.archivos["agrupaciones_viaje"], {"schema_version": 1, "agrupaciones": []})
+    if (not isinstance(registro, dict) or registro.get("schema_version") != 1
+            or not isinstance(registro.get("agrupaciones"), list)
+            or any(not isinstance(a, dict) for a in registro["agrupaciones"])
+            or any(a.get("estado") == "ACTIVA" and not isinstance(a.get("transportes"), list)
+                   for a in registro["agrupaciones"])):
+        raise ErrorAccionOperacional("ESTADO_ILEGIBLE", "el registro de agrupaciones es inválido")
+    return registro["agrupaciones"]
+
+
+def _viajes_simulados(ctx: _Contexto, filas: list[dict[str, str]], grupos: list[list[str]]) -> list[dict]:
+    """Un viaje simulado por grupo de transportes (principal = el menor),
+    con la bandeja vigente y los pesos confirmados del ledger, exactamente
+    como los publicará el reporte."""
+    from atlas_core.agrupacion_viajes import _clave as clave_transporte
+    from atlas_core.gestor_viajes import agrupar_viajes, pesos_viaje_confirmados_por_ledger
+    pendientes = {str((d.get("documento") or {}).get("numero_guia", "")).strip() for d in ctx.decisiones()
+                  if d.get("estado", "PENDIENTE") == "PENDIENTE"} - {""}
+    ledger = _leer_json(ctx.archivos["ledger_decisiones"], {"aplicaciones": []})
+    pesos = pesos_viaje_confirmados_por_ledger(ledger if isinstance(ledger, dict) else {})
+    salida = []
+    for grupo in grupos:
+        claves = [clave_transporte(t) for t in grupo]
+        involucradas = [f for f in filas if clave_transporte(f.get("numero_transporte")) in set(claves)]
+        viajes, _ = agrupar_viajes(
+            involucradas, guias_revision_humana=pendientes,
+            agrupaciones_transporte={t: claves[0] for t in claves} if len(claves) > 1 else None,
+            pesos_viaje_confirmados={t: p for t, p in pesos.items() if clave_transporte(t) in set(claves)})
+        if len(viajes) != 1:
+            raise ErrorAccionOperacional("PRECONDICION_FALLIDA", "la simulación no produjo un único viaje por grupo")
+        viaje = viajes[0]
+        salida.append({"viaje_id": viaje.viaje_id, "numero_transporte": viaje.numero_transporte,
+                       "transportes_aza": list(viaje.transportes_aza) or [viaje.numero_transporte],
+                       "guias": list(viaje.numeros_guia),
+                       **_detalle_viaje(viaje, claves)})
+    return salida
+
+
+def _dependencias_viaje(ctx: _Contexto, transportes: list[str], grupos: list[list[str]],
+                        guias_por_transporte: Mapping[str, list[str]]) -> dict:
+    """Eventos, revisiones de incidencias y pesos confirmados de los
+    transportes del viaje, frente a los viajes resultantes `grupos`.
+    Devuelve {'conservados', 'bloqueos', 'avisos', 'base'}."""
+    from atlas_core.agrupacion_viajes import _clave as clave_transporte
+    from atlas_core.gestor_viajes import pesos_viaje_confirmados_por_ledger
+    claves = {clave_transporte(t) for t in transportes}
+    grupo_de_guia = {g: i for i, grupo in enumerate(grupos) for t in grupo for g in guias_por_transporte.get(t, [])}
+    principal_de_grupo = [grupo[0] for grupo in grupos]
+    registro = _registro_eventos_estricto(ctx)
+    conservados, bloqueos, avisos = [], [], []
+    eventos = [e for e in registro["eventos"] if clave_transporte(e.get("numero_transporte")) in claves]
+    for evento in eventos:
+        if evento.get("estado", "ACTIVO") != "ACTIVO":
+            continue
+        tipo = str(evento.get("tipo_evento") or "evento").replace("_", " ").lower()
+        transporte = clave_transporte(evento.get("numero_transporte"))
+        nota = " ".join(str(evento.get("nota") or "").split())[:80]
+        etiqueta = f"marca «{tipo}» del transporte {transporte}" + (f" («{nota}»)" if nota else "")
+        numeros = evento.get("numeros_guia")
+        guias_evento = {str(n).strip() for n in numeros} - {""} if isinstance(numeros, list) else set()
+        if evento.get("vinculo_completo") is False or not guias_evento:
+            bloqueos.append(f"La {etiqueta} no está vinculada a guías concretas; no se puede saber a qué viaje "
+                            "resultante pertenece.")
+            continue
+        destinos = {grupo_de_guia.get(g) for g in guias_evento}
+        if None in destinos:
+            bloqueos.append(f"La {etiqueta} cita guías que no son de este viaje; revísela antes de separar.")
+            continue
+        if len(destinos) > 1:
+            bloqueos.append(f"La {etiqueta} corresponde a guías ({', '.join(sorted(guias_evento))}) que quedarían "
+                            "en viajes distintos; no se puede decidir a cuál pertenece.")
+            continue
+        destino = destinos.pop()
+        if transporte != principal_de_grupo[destino]:
+            bloqueos.append(f"La {etiqueta} quedaría en el viaje del transporte {principal_de_grupo[destino]}, pero "
+                            f"está registrada con el transporte {transporte}; requiere reasignarla antes de separar.")
+            continue
+        conservados.append({"tipo_evento": evento.get("tipo_evento"), "numero_transporte": transporte,
+                            "guias": sorted(guias_evento), "nota": nota})
+    revisiones = [r for r in registro.get("revisiones_incidencias") or []
+                  if isinstance(r, dict) and clave_transporte(r.get("numero_transporte")) in claves]
+    for revision in revisiones:
+        transporte = clave_transporte(revision.get("numero_transporte"))
+        sin_revision = [principal_de_grupo[i] for i, grupo in enumerate(grupos) if transporte not in grupo]
+        if sin_revision:
+            avisos.append(f"La revisión «sin incidencia» se conserva en el viaje del transporte {transporte}; "
+                          f"el viaje de {', '.join(sin_revision)} quedará como no revisado.")
+    ledger = _leer_json(ctx.archivos["ledger_decisiones"], {"aplicaciones": []})
+    pesos = {t: p for t, p in pesos_viaje_confirmados_por_ledger(ledger if isinstance(ledger, dict) else {}).items()
+             if clave_transporte(t) in claves}
+    for transporte, peso in sorted(pesos.items()):
+        avisos.append(f"El peso total confirmado ({peso} kg, transporte {transporte}) queda en el registro; sólo "
+                      "se aplica si el viaje resultante conserva ese total, si no se vuelve a evaluar.")
+    return {"conservados": conservados, "bloqueos": bloqueos, "avisos": avisos,
+            "base": {"eventos": eventos, "revisiones": revisiones, "pesos": pesos}}
+
+
+def _plan_viaje_separar(ctx: _Contexto, p: dict) -> Plan:
+    from atlas_core.agrupacion_viajes import evaluar_separacion
+    from atlas_core.aislamiento_empresas import empresa_de_raiz, empresa_proceso
+    empresa = empresa_de_raiz(ctx.raiz)
+    if empresa != empresa_proceso():
+        raise ErrorAccionOperacional("EMPRESA_INCOMPATIBLE", "la empresa de la raíz no corresponde al proceso")
+    guias = [str(g) for g in p["guias"]]
+    guia_viaje = str(p.get("guia_viaje") or "").strip()
+    if not 1 <= len(set(guias)) <= 10 or any(not re.fullmatch(r"\d{3,12}", g) for g in guias):
+        raise ErrorAccionOperacional("PARAMETRO_INVALIDO", "guias: entre 1 y 10 números de guía distintos")
+    filas = ctx.filas()
+    agrupaciones = [a for a in _registro_agrupaciones_estricto(ctx) if a.get("estado") == "ACTIVA"]
+    evaluacion = evaluar_separacion(guias=guias, filas=filas, agrupaciones=agrupaciones, guia_viaje=guia_viaje)
+    if evaluacion.motivo_rechazo:
+        raise ErrorAccionOperacional(evaluacion.codigo, evaluacion.motivo_rechazo)
+    if evaluacion.ya_separadas:
+        viajes = _viajes_simulados(ctx, filas, [[t] for t in evaluacion.transportes_separados])
+        return Plan(entidad={"tipo": "VIAJE_FISICO", "empresa": empresa, "guias": evaluacion.guias,
+                             "transportes": evaluacion.transportes_separados},
+                    valor_actual={"viajes": viajes}, valor_propuesto={"viajes": viajes},
+                    estado_base={"transportes": evaluacion.transportes_separados}, sin_cambios=True)
+    agrupacion = evaluacion.agrupacion
+    transportes = sorted(evaluacion.guias_por_transporte)
+    grupos = evaluacion.grupos_resultantes
+    todas = sorted({g for gs in evaluacion.guias_por_transporte.values() for g in gs})
+    original = _viajes_simulados(ctx, filas, [transportes])[0]
+    resultantes = _viajes_simulados(ctx, filas, grupos)
+    if sorted(g for v in resultantes for g in v["guias"]) != todas or sorted(original["guias"]) != todas:
+        raise ErrorAccionOperacional("PRECONDICION_FALLIDA",
+                                     "la simulación no conserva exactamente las guías del viaje; no se separa")
+    dependencias = _dependencias_viaje(ctx, transportes, grupos, evaluacion.guias_por_transporte)
+    if dependencias["bloqueos"]:
+        raise ErrorAccionOperacional("PRECONDICION_FALLIDA", "No se puede separar sin perder o reasignar datos del "
+                                     "viaje: " + " ".join(dependencias["bloqueos"]))
+    restantes = evaluacion.transportes_restantes
+    guias_restantes = sorted({g for t in restantes for g in evaluacion.guias_por_transporte[t]})
+    return Plan(
+        entidad={"tipo": "VIAJE_FISICO", "id": agrupacion.get("agrupacion_id"), "empresa": empresa,
+                 "viaje_id": original["viaje_id"], "numero_transporte": original["numero_transporte"],
+                 "transportes": transportes, "guias": evaluacion.guias},
+        valor_actual={"viaje": original},
+        valor_propuesto={"viajes": resultantes, "transportes_separados": evaluacion.transportes_separados,
+                         "eventos_conservados": dependencias["conservados"], "avisos": dependencias["avisos"]},
+        estado_base={"agrupacion": agrupacion, "dependencias": dependencias["base"],
+                     "filas": [f for f in filas if str(f.get("numero_transporte", "")).strip() in set(transportes)]},
+        afectados=_afectados_por_guias(ctx, set(todas)),
+        consecuencias=[
+            f"El viaje Atlas del transporte {original['numero_transporte']} ({' + '.join(transportes)}) pasa a ser "
+            f"{len(resultantes)} viajes; los transportes AZA no se dividen y cada guía conserva todos sus datos.",
+            "Se recalculan entregas, rutas, pesos e indicadores de los viajes resultantes en el reporte.",
+            "La agrupación anterior queda registrada como SEPARADA (con quién y cuándo); se puede revertir.",
+            *dependencias["avisos"],
+        ],
+        revalidaciones=["REGENERAR_REPORTE_VIAJES", "RECONCILIAR_BANDEJA", "MANTENIMIENTO_FOCAL_GUIAS"],
+        archivos=("agrupaciones_viaje", "bandeja"),
+        datos={"agrupacion_id": agrupacion.get("agrupacion_id"), "transportes": transportes,
+               "transportes_separados": evaluacion.transportes_separados, "guias_restantes": guias_restantes,
+               "guias": todas},
+    )
+
+
+def _aplicar_viaje_separar(ctx: _Contexto, p: dict, plan: Plan, actor: str) -> dict:
+    from atlas_core.agrupacion_viajes import separar_agrupacion
+    try:
+        original, derivada = separar_agrupacion(
+            ctx.actual, agrupacion_id=str(plan.datos["agrupacion_id"]), transportes_esperados=plan.datos["transportes"],
+            transportes_separados=plan.datos["transportes_separados"], guias_restantes=plan.datos["guias_restantes"],
+            actor=actor, confirmado_por=ctx.confirmado_por or actor, fuente=f"ACCION_OPERACIONAL:{ctx.token}",
+            referencia=str(p.get("referencia", "")), reloj=ctx.reloj)
+    except ValueError as error:
+        raise ErrorAccionOperacional("PRECONDICION_FALLIDA", str(error)) from error
+    return {"despues": {"agrupacion_separada": original["agrupacion_id"],
+                        "transportes_separados": original["separacion"]["transportes_separados"],
+                        "agrupacion_derivada": derivada["agrupacion_id"] if derivada else None,
+                        "viajes": [v["transportes_aza"] for v in plan.valor_propuesto["viajes"]]},
+            "reconciliar": True, "guias_revalidar": list(plan.datos["guias"]), "regenerar_reporte": True}
+
+
+def _plan_viaje_revertir_separacion(ctx: _Contexto, p: dict) -> Plan:
+    from atlas_core.agrupacion_viajes import (
+        _clave as clave_transporte, evaluar_agrupacion, ultima_separacion_reversible,
+    )
+    from atlas_core.aislamiento_empresas import empresa_de_raiz, empresa_proceso
+    empresa = empresa_de_raiz(ctx.raiz)
+    if empresa != empresa_proceso():
+        raise ErrorAccionOperacional("EMPRESA_INCOMPATIBLE", "la empresa de la raíz no corresponde al proceso")
+    guia = str(p["numero_guia"]).strip()
+    filas = ctx.filas()
+    propias = [f for f in filas if str(f.get("numero_guia", "")).strip() == guia]
+    if len(propias) != 1:
+        raise ErrorAccionOperacional("ENTIDAD_AMBIGUA" if propias else "ENTIDAD_NO_ENCONTRADA",
+                                     f"la guía {guia} debe existir en un único documento")
+    agrupaciones = _registro_agrupaciones_estricto(ctx)
+    original = ultima_separacion_reversible(ctx.actual, clave_transporte(propias[0].get("numero_transporte")))
+    if original is None:
+        raise ErrorAccionOperacional("ENTIDAD_NO_ENCONTRADA",
+                                     f"La guía {guia} no tiene una separación de viaje que se pueda revertir.")
+    separacion = original["separacion"]
+    transportes = sorted({clave_transporte(t) for t in original.get("transportes") or []})
+    derivada_id = separacion.get("agrupacion_derivada")
+    otras = [a for a in agrupaciones if a.get("estado") == "ACTIVA" and a.get("agrupacion_id") != derivada_id]
+    representantes = []
+    for t in transportes:
+        del_transporte = sorted(str(f.get("numero_guia", "")).strip() for f in filas
+                                if clave_transporte(f.get("numero_transporte")) == t)
+        if not del_transporte or not all(del_transporte):
+            raise ErrorAccionOperacional("PRECONDICION_FALLIDA", f"el transporte {t} no tiene guías identificables")
+        representantes.append(del_transporte[0])
+    eventos = _registro_eventos_estricto(ctx)["eventos"]
+    evaluacion = evaluar_agrupacion(guias=representantes, filas=filas, agrupaciones=otras, eventos=eventos)
+    if evaluacion.motivo_rechazo:
+        raise ErrorAccionOperacional("PRECONDICION_FALLIDA", "No se puede volver a unir el viaje: "
+                                     + evaluacion.motivo_rechazo)
+    restantes = list(separacion.get("transportes_restantes") or [])
+    actuales = [[t] for t in separacion.get("transportes_separados") or []]
+    actuales = sorted(actuales + ([restantes] if len(restantes) > 1 else [[t] for t in restantes]),
+                      key=lambda g: g[0])
+    viajes_actuales = _viajes_simulados(ctx, filas, actuales)
+    restaurado = _viajes_simulados(ctx, filas, [transportes])[0]
+    todas = sorted(restaurado["guias"])
+    return Plan(
+        entidad={"tipo": "VIAJE_FISICO", "id": original["agrupacion_id"], "empresa": empresa,
+                 "transportes": transportes, "guias": [guia]},
+        valor_actual={"viajes": viajes_actuales},
+        valor_propuesto={"viaje": restaurado, "separacion_revertida": separacion.get("fecha")},
+        estado_base={"agrupaciones": [a for a in agrupaciones if a.get("agrupacion_id") in
+                                      {original["agrupacion_id"], derivada_id}],
+                     "eventos": [e for e in eventos
+                                 if clave_transporte(e.get("numero_transporte")) in set(transportes)],
+                     "filas": [f for f in filas if clave_transporte(f.get("numero_transporte")) in set(transportes)]},
+        afectados=_afectados_por_guias(ctx, set(todas)),
+        consecuencias=[
+            f"Se revierte la separación del {str(separacion.get('fecha', ''))[:10]}: los transportes "
+            f"{' + '.join(transportes)} vuelven a ser UN viaje Atlas (principal {transportes[0]}).",
+            "Se recalculan entregas, rutas, pesos e indicadores en el reporte; el registro conserva la historia.",
+        ],
+        revalidaciones=["REGENERAR_REPORTE_VIAJES", "RECONCILIAR_BANDEJA", "MANTENIMIENTO_FOCAL_GUIAS"],
+        archivos=("agrupaciones_viaje", "bandeja"),
+        datos={"agrupacion_id": original["agrupacion_id"], "fecha_separacion": separacion.get("fecha"),
+               "guias": todas},
+    )
+
+
+def _aplicar_viaje_revertir_separacion(ctx: _Contexto, p: dict, plan: Plan, actor: str) -> dict:
+    from atlas_core.agrupacion_viajes import revertir_separacion
+    try:
+        agrupacion = revertir_separacion(
+            ctx.actual, agrupacion_id=str(plan.datos["agrupacion_id"]),
+            fecha_separacion=str(plan.datos["fecha_separacion"]), actor=actor,
+            confirmado_por=ctx.confirmado_por or actor, fuente=f"ACCION_OPERACIONAL:{ctx.token}",
+            referencia=str(p.get("referencia", "")), reloj=ctx.reloj)
+    except ValueError as error:
+        raise ErrorAccionOperacional("PRECONDICION_FALLIDA", str(error)) from error
+    return {"despues": {"agrupacion_id": agrupacion["agrupacion_id"], "transportes_aza": agrupacion["transportes"],
+                        "estado": agrupacion["estado"]},
             "reconciliar": True, "guias_revalidar": list(plan.datos["guias"]), "regenerar_reporte": True}
 
 
@@ -3563,6 +3846,15 @@ ACCIONES: dict[str, DefinicionAccion] = {d.nombre: d for d in (
                      "Declara que 2+ guías (y sus transportes AZA completos) son un mismo viaje físico.",
                      {"guias": _P("lista_texto", True, max_largo=12), "referencia": _REF},
                      _plan_viaje_agrupar, _aplicar_viaje_agrupar),
+    DefinicionAccion("VIAJE_SEPARAR_GUIAS", OPERACIONAL_REVERSIBLE,
+                     "Saca de un viaje agrupado por un humano los transportes AZA completos de 1-10 guías; "
+                     "cada transporte separado vuelve a ser su propio viaje.",
+                     {"guias": _P("lista_texto", True, max_largo=12), "guia_viaje": _P("guia"), "referencia": _REF},
+                     _plan_viaje_separar, _aplicar_viaje_separar),
+    DefinicionAccion("VIAJE_REVERTIR_SEPARACION", OPERACIONAL_REVERSIBLE,
+                     "Revierte la última separación de viaje de una guía si su resultado sigue intacto.",
+                     {"numero_guia": _P("guia", True), "referencia": _REF},
+                     _plan_viaje_revertir_separacion, _aplicar_viaje_revertir_separacion),
     DefinicionAccion("VIAJE_AGREGAR_OBSERVACION", OPERACIONAL_REVERSIBLE,
                      "Agrega una misma observación al viaje de 1 a 10 guías, conservando las anteriores y sin duplicar.",
                      {"guias": _P("lista_texto", True, max_largo=12), "texto": _P("texto", True, max_largo=300),

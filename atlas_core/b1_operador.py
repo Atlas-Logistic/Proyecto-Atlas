@@ -715,6 +715,41 @@ _COORDENADA_DESTINO = [
                r"(?P<destino>.+?)(?:\s+(?:EN|A|COMO)|\s*:)\s*" + _COORD + r"$"),
 ]
 _NEGACION_MISMO_VIAJE = re.compile(r"\bNO\s+(?:PERTENECEN|SON|CORRESPONDEN|VAN|IBAN|FUERON|ESTAN|ES)\b")
+# SEPARAR guías de un viaje agrupado (VIAJE_SEPARAR_GUIAS):
+#   "separa la guía N del viaje", "saca las guías N y M del viaje de la guía K",
+#   "la guía N no es del mismo viaje que la guía K", "las guías N y K no son del mismo viaje".
+_LISTA_GUIAS = r"\d{5,9}(?:\s*(?:,|\bY\b|\bE\b)\s*\d{5,9})*"
+_SEPARAR_GUIAS = re.compile(
+    r"^(?:POR\s+FAVOR\s+)?(?:SEPARA|SEPARAR|SEPARE|SACA|SACAR|SAQUE|QUITA|QUITAR|QUITE|DESAGRUPA|DESAGRUPAR|"
+    r"DESAGRUPE)\s+(?:LA\s+|LAS\s+)?GUIAS?\s+(?P<guias>" + _LISTA_GUIAS + r")\s+(?:DEL|DE\s+SU|DE\s+ESE|DE\s+ESTE)"
+    r"\s+VIAJE(?:\s+(?:AGRUPADO\s+)?(?:DE\s+LA|CON\s+LA|DONDE\s+ESTA\s+LA)\s+GUIA\s+(?P<ref>\d{5,9}))?$")
+_NO_ES_DEL_VIAJE = re.compile(
+    r"^LAS?\s+GUIAS?\s+(?P<guias>" + _LISTA_GUIAS + r")\s+NO\s+(?:ES|SON|PERTENECE|PERTENECEN|CORRESPONDE|"
+    r"CORRESPONDEN|VA|VAN|IBA|IBAN|FUE|FUERON)\s+(?:PARTE\s+)?(?:DEL|AL|DE\s+ESE|DE\s+ESTE)\s+(?:MISMO\s+)?VIAJE"
+    r"(?:\s+(?:DE|QUE|CON)\s+LA\s+GUIA\s+(?P<ref>\d{5,9}))?$")
+_REVERTIR_SEPARACION = re.compile(
+    r"^(?:DESHAZ|DESHACER|REVIERTE|REVERTIR|REVIERTA)\s+LA\s+SEPARACION\s+(?:DEL\s+VIAJE\s+)?DE\s+LA\s+GUIA\s+"
+    r"(?P<guia>\d{5,9})$")
+
+
+def _intencion_separar_viaje(plano: str) -> Intencion | None:
+    m = _REVERTIR_SEPARACION.match(plano)
+    if m:
+        return Intencion("VIAJE_REVERTIR_SEPARACION", {"numero_guia": m.group("guia")})
+    m = _SEPARAR_GUIAS.match(plano) or _NO_ES_DEL_VIAJE.match(plano)
+    if not m:
+        return None
+    guias = list(dict.fromkeys(re.findall(r"\d{5,9}", m.group("guias"))))
+    referencia = m.group("ref") or ""
+    if m.re is _NO_ES_DEL_VIAJE and not referencia:
+        # "las guías N y K no son del mismo viaje": la primera identifica el
+        # viaje que queda y se separa la otra; con más de dos no hay certeza.
+        if len(guias) != 2:
+            return None
+        referencia, guias = guias[0], guias[1:]
+    if referencia in guias:
+        return None
+    return Intencion("VIAJE_SEPARAR_GUIAS", {"guias": guias, **({"guia_viaje": referencia} if referencia else {})})
 _NUMERO_GUIA = re.compile(r"\b\d{5,9}\b")
 _COMUNA_EXPLICITA = re.compile(r"^(?P<dir>.+?)\s*,?\s+COMUNA\s+(?:DE\s+)?(?P<comuna>[A-Z ]+)$")
 _LECTURA_OBRAS = re.compile(r"^(?:BUSCA|BUSCAR|BUSCAME|MUESTRA|MUESTRAME)\s+LA\s+OBRA\b\s*(?P<nombre>.*)$")
@@ -1011,6 +1046,9 @@ def interpretar_determinista(texto: str) -> Intencion | None:
     if re.search(r"\bERROR\b", plano) and re.search(r"\bPATENTE\b", plano) and re.search(r"\bGUIA\b", plano):
         raise ErrorContratoInterpretacion(
             "Indica una sola guia, tipo de vehiculo y patente en una declaracion explicita de error documental u OCR. No se cambio nada.")
+    separacion = _intencion_separar_viaje(plano)
+    if separacion is not None:
+        return separacion
     m = _DESTRUCTIVA.match(plano)
     if m:
         resto = m.group("resto")
@@ -1503,6 +1541,25 @@ def _guia_legible(numero: object) -> str:
     return f"guía {texto}" if texto.isdigit() else "sin folio leído"
 
 
+def _viaje_legible(viaje: Mapping[str, object]) -> str:
+    """Un viaje simulado en una línea: transportes AZA con sus guías y
+    pesos, entregas con destino y ruta, peso total y estado."""
+    cargas = viaje.get("cargas") or []
+    partes = "; ".join(
+        f"transporte {c['numero_transporte']}: "
+        + ", ".join(f"guía {g['numero_guia']} {_peso_legible(g['peso_kg'])}" for g in c["guias"])
+        for c in cargas)
+    entregas = viaje.get("entregas") or []
+    texto = (f"viaje {viaje.get('numero_transporte')} [{partes}]; {len(entregas)} "
+             f"{_plural(len(entregas), 'entrega', 'entregas')}: " + ", ".join(
+                 f"guía {', '.join(e['guias'])} -> {e['destino'] or 'destino no disponible'}"
+                 f"{' (' + e['localidad'] + ')' if e['localidad'] else ''}"
+                 f"{' ' + _km_legible(e['distancia_km']) if e['distancia_km'] else ''}" for e in entregas))
+    motivos = viaje.get("motivos_revision") or []
+    return (texto + f"; peso total {_peso_legible(viaje.get('peso_total_kg'))}; estado "
+            f"{viaje.get('estado_resultante')}{' (' + ', '.join(motivos) + ')' if motivos else ''}.")
+
+
 def _describir_preview(preview: Mapping[str, object]) -> str:
     accion, entidad = preview.get("accion"), preview.get("entidad") or {}
     actual, propuesto = preview.get("valor_actual"), preview.get("valor_propuesto") or {}
@@ -1557,6 +1614,27 @@ def _describir_preview(preview: Mapping[str, object]) -> str:
             motivos = unico.get("motivos_revision") or []
             texto += (f" Peso total {_peso_legible(unico.get('peso_total_kg'))}. Estado resultante: "
                       f"{unico['estado_resultante']}{' (' + ', '.join(motivos) + ')' if motivos else ''}.")
+    elif accion == "VIAJE_SEPARAR_GUIAS":
+        original = (actual or {}).get("viaje") or {}
+        viajes = propuesto.get("viajes") or []
+        texto = (f"Separar el viaje Atlas del transporte {original.get('numero_transporte')} (empresa "
+                 f"{str(entidad.get('empresa') or '').upper()}). VIAJE ORIGINAL: {_viaje_legible(original)} RESULTARÁN "
+                 f"{len(viajes)} VIAJES: " + " ".join(f"{i}) {_viaje_legible(v)}" for i, v in enumerate(viajes, 1))
+                 + " Los transportes AZA no se dividen y cada guía conserva todos sus datos documentales.")
+        conservados = propuesto.get("eventos_conservados") or []
+        if conservados:
+            texto += " Se conservan sin cambios: " + "; ".join(
+                f"{str(e.get('tipo_evento') or '').replace('_', ' ').lower()} del transporte "
+                f"{e.get('numero_transporte')} (guía {', '.join(e.get('guias') or [])})" for e in conservados) + "."
+        for aviso in propuesto.get("avisos") or []:
+            texto += f" {aviso}"
+        texto += " Se puede revertir con «deshaz la separación de la guía N»."
+    elif accion == "VIAJE_REVERTIR_SEPARACION":
+        viajes = (actual or {}).get("viajes") or []
+        texto = (f"Revertir la separación del {str(propuesto.get('separacion_revertida') or '')[:10]} (empresa "
+                 f"{str(entidad.get('empresa') or '').upper()}). VIAJES ACTUALES: "
+                 + " ".join(f"{i}) {_viaje_legible(v)}" for i, v in enumerate(viajes, 1))
+                 + f" VIAJE RESULTANTE: {_viaje_legible(propuesto.get('viaje') or {})}")
     elif accion == "VIAJE_AGREGAR_OBSERVACION":
         detalle = propuesto.get("guias") or []
         agregar = [d for d in detalle if d.get("estado") == "AGREGAR"]
@@ -3306,6 +3384,13 @@ class OperadorB1:
                 mensaje = (f"Las guías {', '.join((preview.get('entidad') or {}).get('guias') or [])} ya pertenecen "
                            f"al mismo viaje (transporte principal {unico.get('numero_transporte_principal')}); "
                            "no hay nada que confirmar.")
+            if intencion.accion == "VIAJE_SEPARAR_GUIAS":
+                entidad = preview.get("entidad") or {}
+                mensaje = (f"{'La guía' if len(entidad.get('guias') or []) == 1 else 'Las guías'} "
+                           f"{', '.join(entidad.get('guias') or [])} ya "
+                           f"{'forma' if len(entidad.get('transportes') or []) == 1 else 'forman'} un viaje propio "
+                           f"(transporte {', '.join(entidad.get('transportes') or [])}); no está agrupada con otro "
+                           "transporte y no hay nada que separar.")
             return {"estado": "SIN_CAMBIOS", "accion": intencion.accion, "preview": publico, "mensaje": mensaje}
         if preview.get("riesgo") == SENSIBLE:
             return {"estado": "REQUIERE_AUTORIZACION_SENSIBLE", "accion": intencion.accion, "preview": publico,
