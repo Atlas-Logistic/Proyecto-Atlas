@@ -25,13 +25,30 @@ Las guías de otros viajes no se tocan.
 
 ## Bloqueos (no se escribe nada)
 
-- Alguna guía del viaje tiene un destino operacional confirmado por una persona. La ruta guardada en esa decisión se calculó desde la planta anterior, y la proyección del reporte la seguiría publicando.
 - El transporte pertenece a una agrupación activa.
 - Alguna guía del viaje está en investigación, no tiene folio o está repetida.
 - Hay un evento activo del transporte cuyo vínculo es inconsistente: vínculo incompleto, o guías que no pertenecen al viaje. Caso real: un evento cita el folio truncado «83487».
 - El registro de eventos, el de agrupaciones, el catálogo o el ledger están ilegibles.
 
 Los eventos con vínculo consistente (estadía, observación, devolución, doble vuelta) no dependen de la planta. Se conservan sin cambios y la vista previa los informa.
+
+## Destino confirmado por una persona
+
+Origen y destino son independientes: un destino confirmado ya no bloquea la corrección.
+
+- Se conservan íntegros la decisión (dirección y comuna), el cliente y la obra. No se crea una tarjeta nueva ni se vuelve a pedir la confirmación del destino.
+- Solo se invalida la ruta guardada, que salió de la planta anterior.
+- La ruta nueva se calcula desde la nueva planta hasta el **mismo** destino:
+  - si la ruta anterior tenía coordenadas, se conservan (junto con la región y los códigos territoriales) y solo se pide al proveedor el recorrido hasta ellas; el destino no se vuelve a geocodificar;
+  - si no las tenía, se usa el mismo cálculo de la confirmación (`calcular_ruta_operacional`), con la comuna confirmada como control.
+- Si el proveedor no responde, la ruta queda pendiente (`ORIGEN_MODIFICADO_RUTA_PENDIENTE`): se publican el destino y sus coordenadas, pero nunca los kilómetros anteriores.
+- En las decisiones con «conservar estado», la ruta sigue requiriendo comprobación; la distancia documental (calculada desde la planta anterior y protegida en el dataset) deja de publicarse.
+
+La ruta se guarda en `metricas_procesamiento_json.ruta_operacional_recalculada`, ligada a la decisión, la dirección, la comuna y la **planta de origen** (`planta_origen_id`). Se escribe en el mismo bloqueo que la planta nueva. La auditoría `recalculo_ruta_origen` registra la ruta anterior y la nueva.
+
+`proyectar_destino` publica una ruta solo si salió de la planta que el documento tiene hoy. Las rutas antiguas sin planta registrada valen mientras ninguna `CORRECCION_ORIGEN_OPERACIONAL` posterior a la decisión haya incluido el documento.
+
+Volver a la planta anterior es otra corrección igual: recalcula la ruta hacia las mismas coordenadas.
 
 ## Vista previa
 
@@ -42,7 +59,8 @@ La vista previa no escribe datos y muestra:
 - las guías del viaje afectadas;
 - la ruta anterior de cada guía, que se invalida;
 - los eventos que se conservan;
-- si se reemplaza un origen que una persona confirmó antes.
+- si se reemplaza un origen que una persona confirmó antes;
+- cada destino confirmado que se conserva, con su ruta anterior y el recálculo previsto.
 
 Requiere la confirmación de una persona: `_confirmante_humano` rechaza identidades técnicas.
 
@@ -65,7 +83,8 @@ El ledger registra una entrada de tipo `CORRECCION_ORIGEN_OPERACIONAL` con:
 - la guía nombrada, el transporte y la empresa;
 - el origen anterior y el confirmado;
 - el actor y el confirmante;
-- en `documentos_viaje`, el estado previo de cada guía: planta, fuente, evidencia, distancia y estado de ruta.
+- en `documentos_viaje`, el estado previo de cada guía: planta, fuente, evidencia, distancia y estado de ruta;
+- en `destinos_confirmados`, cada decisión de destino del viaje con su ruta anterior y la recalculada.
 
 La evidencia GPS y documental previa de las filas no se borra. La auditoría registra `APLICADA` o el fallo.
 

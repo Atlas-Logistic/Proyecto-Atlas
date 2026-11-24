@@ -50,7 +50,7 @@ def test_preview_confirmacion_auditoria_y_ruta_invalidada(entorno, monkeypatch):
     assert e['capa'].auditoria()[-1]['resultado'] == 'APLICADA'
 
 
-@pytest.mark.parametrize('conflicto', ['evento', 'duplicada', 'agrupacion', 'eventos_ilegibles', 'agrupaciones_invalidas', 'destino_confirmado'])
+@pytest.mark.parametrize('conflicto', ['evento', 'duplicada', 'agrupacion', 'eventos_ilegibles', 'agrupaciones_invalidas'])
 def test_bloquea_inconsistencias(entorno, conflicto):
     e = entorno
     fila = list(_filas(e['dataset']).values())[0]
@@ -65,13 +65,8 @@ def test_bloquea_inconsistencias(entorno, conflicto):
             {'estado': 'ACTIVA', 'transportes': [fila['numero_transporte'], '0000000901']}]}), encoding='utf-8')
     elif conflicto == 'eventos_ilegibles':
         (e['actual'] / 'eventos_operacionales.json').write_text('{"eventos": "invalido"}', encoding='utf-8')
-    elif conflicto == 'agrupaciones_invalidas':
-        (e['actual'] / 'agrupaciones_viaje.json').write_text('{"schema_version":1,"agrupaciones":null}', encoding='utf-8')
     else:
-        (e['actual'] / 'decisiones_aplicadas.json').write_text(json.dumps({'aplicaciones': [{
-            'tipo': 'DESTINO_OPERACIONAL_DOCUMENTO', 'documento': {'archivo': fila['archivo'],
-                'numero_guia': fila['numero_guia'], 'numero_transporte': fila['numero_transporte']},
-            'destino_operacional': {'direccion': 'EJEMPLO 123', 'comuna': 'RENCA'}}]}), encoding='utf-8')
+        (e['actual'] / 'agrupaciones_viaje.json').write_text('{"schema_version":1,"agrupaciones":null}', encoding='utf-8')
     antes = _huellas(e['raiz'])
     r = e['b1'].atender('p', 'La planta de origen de la guía 464900 es Renca')
     assert r['estado'] == 'ACLARACION_REQUERIDA', r
@@ -285,17 +280,7 @@ def test_viaje_de_varias_guias_cambia_completo_y_no_toca_otro_viaje(entorno, mon
     assert previos['464900']['distancia_km'] == '33' and previos['464901']['distancia_km'] == '35'
 
 
-def test_hermana_con_destino_confirmado_bloquea_todo_el_viaje(entorno):
-    e = entorno
-    _dos_guias(e)
-    (e['actual'] / 'decisiones_aplicadas.json').write_text(json.dumps({'aplicaciones': [{
-        'tipo': 'DESTINO_OPERACIONAL_DOCUMENTO', 'documento': {'archivo': '464901.jpeg',
-            'numero_guia': '464901', 'numero_transporte': '0000000900'},
-        'destino_operacional': {'direccion': 'EJEMPLO 123', 'comuna': 'RENCA'}}]}), encoding='utf-8')
-    antes = _huellas(e['raiz'])
-    r = e['b1'].atender('p', 'La planta de origen de la guía 464900 es Renca')
-    assert r['estado'] == 'ACLARACION_REQUERIDA' and '464901' in r['mensaje'], r
-    assert _huellas(e['raiz']) == antes
+# El destino confirmado ya no bloquea: ver tests/test_b1_origen_destino_confirmado.py
 
 
 def test_revision_de_origen_pendiente_en_el_viaje_bloquea_la_via_directa(entorno):

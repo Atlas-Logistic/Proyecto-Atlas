@@ -250,7 +250,7 @@ def recalcular_rutas_hacia_planta_conocida(
                 ruta_humana = {**{c: nueva[c] for c in (
                     "latitud_entrega", "longitud_entrega", "distancia_km", "duracion_min", "proveedor_ruta",
                     "estado_ruta", "region_entrega", "codigo_pais", "codigo_unidad", "codigo_contexto")},
-                    "comuna": comuna}
+                    "comuna": comuna, "planta_origen_id": origen.planta_id}
                 if not ruta_valida(ruta_humana, comuna):
                     abstener(archivo, "RUTA_NO_VALIDA_PARA_COMUNA_CONFIRMADA")
                     continue

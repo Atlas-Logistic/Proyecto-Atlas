@@ -1403,13 +1403,18 @@ def _plan_documento_planta_origen(ctx: _Contexto, p: dict) -> Plan:
     juntas para que viaje, entregas y rutas no queden con dos orígenes. Se
     abstiene ante cualquier dependencia que la corrección no puede mantener
     coherente: revisión de origen pendiente (se usa esa tarjeta), agrupación
-    activa, destino confirmado por una persona (su ruta guardada se calculó
-    desde la planta anterior), documento en investigación, guías sin folio o
-    repetidas, transporte no válido y eventos con vínculo inconsistente."""
+    activa, documento en investigación, guías sin folio o repetidas,
+    transporte no válido y eventos con vínculo inconsistente.
+
+    Un destino confirmado por una persona NO bloquea: es independiente del
+    origen. Se conservan su decisión (dirección, comuna, cliente, obra) y
+    sus coordenadas; sólo la ruta guardada, que salió de la planta
+    anterior, se invalida y se recalcula desde la nueva planta."""
     from atlas_core.aislamiento_empresas import empresa_de_raiz, empresa_proceso
     from atlas_core.agrupacion_viajes import _clave as clave_transporte
     from atlas_core.catalogo_plantas import CatalogoPlantas
-    from atlas_core.destino_operacional import identidades_destino_confirmado
+    from atlas_core.destino_operacional import (destino_vigente, identidades_destino_confirmado, proyectar_destino,
+                                               ubicacion_confirmada)
     from atlas_core.investigacion_documental import archivos_en_investigacion
 
     empresa = empresa_de_raiz(ctx.raiz)
@@ -1424,6 +1429,9 @@ def _plan_documento_planta_origen(ctx: _Contexto, p: dict) -> Plan:
                                      "la guía no tiene un número de transporte válido; corrija primero el transporte")
     try:
         destinos_confirmados = identidades_destino_confirmado(ctx.archivos["ledger_decisiones"])
+        ledger = _leer_json(ctx.archivos["ledger_decisiones"], {"schema_version": 1, "aplicaciones": []})
+        if not isinstance(ledger, dict) or not isinstance(ledger.get("aplicaciones"), list):
+            raise ValueError("ledger sin aplicaciones válidas")
         plantas = CatalogoPlantas(ctx.catalogos / "plantas.json").listar()
         en_investigacion = archivos_en_investigacion(ctx.raiz)
     except (OSError, ValueError) as error:
@@ -1444,11 +1452,25 @@ def _plan_documento_planta_origen(ctx: _Contexto, p: dict) -> Plan:
     for a, g in identidades:
         if a in en_investigacion:
             raise ErrorAccionOperacional("PRECONDICION_FALLIDA", f"la guía {g} del viaje está en investigación")
-        if (a, g) in destinos_confirmados:
+    destinos = []
+    for f in sorted(viaje, key=lambda f: str(f.get("numero_guia", ""))):
+        a, g = str(f.get("archivo", "")).strip(), str(f.get("numero_guia", "")).strip()
+        vigente = destino_vigente(f, ledger)
+        if ((a, g) in destinos_confirmados) != (vigente is not None):
+            # Fail closed: el ledger y la proyección no coinciden en si la
+            # guía tiene destino humano; no se adivina cuál vale.
             raise ErrorAccionOperacional(
-                "PRECONDICION_FALLIDA",
-                f"la guía {g} del viaje tiene destino operacional confirmado por una persona; su ruta "
-                "guardada se calculó desde la planta anterior y requiere revisión conjunta")
+                "ESTADO_ILEGIBLE", f"no pude identificar con certeza el destino confirmado de la guía {g}")
+        if vigente is None:
+            continue
+        actual = proyectar_destino(f, ledger)
+        destinos.append({"archivo": a, "numero_guia": g, "decision_id": vigente["decision_id"],
+                         "direccion": vigente["direccion"], "comuna": vigente["comuna"],
+                         "conservar_estado_operacional": vigente["conservar"],
+                         "con_coordenadas": ubicacion_confirmada(f, vigente) is not None,
+                         "ruta_anterior": {c: str(actual.get(c) or "") for c in (
+                             "distancia_km", "duracion_min", "estado_ruta", "latitud_entrega",
+                             "longitud_entrega", "proveedor_ruta")}})
     conjunto = set(guias)
     if any(d.get("tipo") == "ORIGEN_NO_CONFIRMADO" and d.get("estado", "PENDIENTE") == "PENDIENTE"
            and str((d.get("documento") or {}).get("numero_guia", "")).strip() in conjunto
@@ -1483,10 +1505,23 @@ def _plan_documento_planta_origen(ctx: _Contexto, p: dict) -> Plan:
     if len(documentos) > 1:
         consecuencias.append(f"El origen es del viaje: cambia en sus {len(documentos)} guías ("
                              + ", ".join(d["numero_guia"] for d in documentos) + ").")
+    por_archivo = {d["archivo"]: d for d in destinos}
     for d in cambian:
-        km = f"{d['distancia_km']} km" if d["distancia_km"] else "sin ruta calculada"
-        consecuencias.append(f"Guía {d['numero_guia']}: {d['planta_origen'] or 'sin origen'} → {planta.nombre}; "
-                             f"la ruta anterior ({km}) se invalida y se recalcula desde la nueva planta.")
+        destino = por_archivo.get(d["archivo"])
+        anterior_km = (destino["ruta_anterior"]["distancia_km"] if destino else d["distancia_km"])
+        km = f"{anterior_km} km" if anterior_km else "sin ruta calculada"
+        if destino is None:
+            consecuencias.append(f"Guía {d['numero_guia']}: {d['planta_origen'] or 'sin origen'} → {planta.nombre}; "
+                                 f"la ruta anterior ({km}) se invalida y se recalcula desde la nueva planta.")
+        else:
+            hasta = ("sus mismas coordenadas confirmadas" if destino["con_coordenadas"]
+                     else "esa misma dirección y comuna confirmadas")
+            consecuencias.append(
+                f"Guía {d['numero_guia']}: {d['planta_origen'] or 'sin origen'} → {planta.nombre}; "
+                f"se conserva el destino confirmado {destino['direccion']}, {destino['comuna']}, con su cliente "
+                "y obra (sin volver a pedir su confirmación); "
+                f"la ruta anterior ({km}) se invalida y se recalcula desde {planta.nombre} hasta {hasta}"
+                + ("; sigue requiriendo comprobación." if destino["conservar_estado_operacional"] else "."))
     consecuencias.append("Si la ruta no puede calcularse queda pendiente; no se conserva una distancia obsoleta.")
     humanas = [d["numero_guia"] for d in cambian if d["origen_determinado_por"] == "CONFIRMACION_HUMANA"]
     if humanas:
@@ -1500,7 +1535,7 @@ def _plan_documento_planta_origen(ctx: _Contexto, p: dict) -> Plan:
                          "numero_transporte": transporte, "empresa": empresa},
                 valor_actual=anterior, valor_propuesto=propuesto,
                 estado_base={"fila": fila, "viaje": viaje, "planta": vars(planta),
-                             "eventos": eventos, "agrupaciones": agrupaciones},
+                             "eventos": eventos, "agrupaciones": agrupaciones, "destinos": destinos},
                 sin_cambios=not cambian and all(d["origen_determinado_por"] == "CONFIRMACION_HUMANA"
                                                 for d in documentos),
                 afectados={"guias": [d["numero_guia"] for d in documentos], "numero_transporte": transporte,
@@ -1509,7 +1544,31 @@ def _plan_documento_planta_origen(ctx: _Contexto, p: dict) -> Plan:
                 revalidaciones=["RECALCULAR_RUTA", "RECONCILIAR_BANDEJA", "REGENERAR_REPORTE_VIAJES"],
                 archivos=("dataset", "bandeja", "ledger_decisiones"),
                 datos={"archivo": archivo, "guia": guia, "transporte": transporte, "empresa": empresa,
-                       "documentos": documentos})
+                       "documentos": documentos, "destinos": destinos})
+
+
+def _rutas_destino_confirmado(ctx: _Contexto, plan: Plan) -> dict[str, dict]:
+    """Ruta nueva (planta corregida -> destino confirmado) de cada guía con
+    destino humano cuya planta cambia, calculada ANTES de tomar el lock del
+    dataset. Las decisiones con «conservar estado» no tienen ruta propia."""
+    from atlas_core.destino_operacional import destino_vigente, recalcular_ruta_desde_planta, ubicacion_confirmada
+    nueva = plan.valor_propuesto["planta_id"]
+    ledger = _leer_json(ctx.archivos["ledger_decisiones"], {"schema_version": 1, "aplicaciones": []})
+    filas = {str(f.get("archivo", "")).strip(): f for f in plan.estado_base["viaje"]}
+    rutas = {}
+    for destino in plan.datos.get("destinos") or []:
+        fila = filas.get(destino["archivo"])
+        if fila is None or str(fila.get("planta_origen_id") or "") == nueva:
+            continue
+        vigente = destino_vigente(fila, ledger)
+        if vigente is None or vigente["decision_id"] != destino["decision_id"]:
+            raise ErrorAccionOperacional("PRECONDICION_FALLIDA",
+                                         f"el destino confirmado de la guía {destino['numero_guia']} cambió")
+        rutas[destino["archivo"]] = recalcular_ruta_desde_planta(
+            nueva, vigente["direccion"], vigente["comuna"], ubicacion_confirmada(fila, vigente), fila=fila,
+            carpeta_catalogos=ctx.catalogos, proveedor_rutas=ctx.proveedor_rutas,
+            proveedor_rutas_fallback=ctx.proveedor_rutas_fallback)
+    return rutas
 
 
 def _aplicar_documento_planta_origen(ctx: _Contexto, p: dict, plan: Plan, actor: str) -> dict:
@@ -1519,13 +1578,43 @@ def _aplicar_documento_planta_origen(ctx: _Contexto, p: dict, plan: Plan, actor:
         revalidar_ruta_sin_destino_calculado_sin_ocr, revalidar_indicadores_documentales_sin_ocr)
     archivo, guia = plan.datos["archivo"], plan.datos["guia"]
     documentos = plan.datos["documentos"]
+    from atlas_core.recalculo_ruta_planta import CLAVE_RUTA_OPERACIONAL, _metricas
     base = {str(f.get("archivo", "")).strip(): f for f in plan.estado_base["viaje"]}
     nueva = plan.valor_propuesto["planta_id"]
+    # Destinos confirmados: el proveedor se consulta fuera del lock; la ruta
+    # nueva se escribe junto con la planta, así ningún lector ve la planta
+    # nueva con la distancia de la anterior.
+    rutas_destino = _rutas_destino_confirmado(ctx, plan)
+    instante = ctx.reloj().astimezone(timezone.utc).isoformat()
+    fuente = f"ACCION_OPERACIONAL:{ctx.token}"
+    destinos_ledger = []
     with bloqueo_sesion(ctx.actual, "revalidacion_dataset"):
         filas = _leer_filas(ctx.archivos["dataset"], completas=True)
         viaje = [f for f in filas if clave_transporte(_transporte(f)) == clave_transporte(plan.datos["transporte"])]
         if len(viaje) != len(base) or any(base.get(str(f.get("archivo", "")).strip()) != f for f in viaje):
             raise ErrorAccionOperacional("PRECONDICION_FALLIDA", "el viaje cambió desde la confirmación")
+        destinos = {d["archivo"]: d for d in plan.datos.get("destinos") or []}
+        for fila in viaje:
+            clave = str(fila.get("archivo", "")).strip()
+            if clave in rutas_destino:
+                destino, ruta = destinos[clave], rutas_destino[clave]
+                metricas = _metricas(fila)
+                previa = metricas.get(CLAVE_RUTA_OPERACIONAL)
+                metricas[CLAVE_RUTA_OPERACIONAL] = {
+                    "decision_id": destino["decision_id"], "direccion": destino["direccion"],
+                    "comuna": destino["comuna"], "ruta": ruta, "planta_origen_id": nueva,
+                    "calculado_en": instante, "fuente": fuente}
+                auditoria = metricas.get("recalculo_ruta_origen")
+                auditoria = list(auditoria) if isinstance(auditoria, list) else []
+                auditoria.append({"fecha": instante, "fuente": fuente, "decision_destino_id": destino["decision_id"],
+                                  "planta_anterior_id": str(fila.get("planta_origen_id") or ""),
+                                  "planta_nueva_id": nueva, "ruta_anterior": destino["ruta_anterior"],
+                                  "registro_anterior": previa, "ruta_nueva": ruta})
+                metricas["recalculo_ruta_origen"] = auditoria
+                fila["metricas_procesamiento_json"] = json.dumps(metricas, ensure_ascii=False)
+                destinos_ledger.append({**destino, "ruta_nueva": ruta})
+            elif clave in destinos:
+                destinos_ledger.append({**destinos[clave], "ruta_nueva": None})
         for fila in viaje:
             # Sólo una planta que realmente cambia invalida la ruta: una
             # distancia calculada desde la planta anterior nunca se publica.
@@ -1550,6 +1639,9 @@ def _aplicar_documento_planta_origen(ctx: _Contexto, p: dict, plan: Plan, actor:
             # Estado previo de CADA guía del viaje (origen, fuente, evidencia y
             # ruta): la corrección queda auditable y reversible por documento.
             "documentos_viaje": documentos,
+            # Destinos humanos del viaje: la decisión no cambia; se registra
+            # la ruta que salía de la planta anterior y la recalculada.
+            "destinos_confirmados": destinos_ledger,
             "referencia": str(p.get("referencia", "")),
         })
         escribir_json_atomico(ctx.archivos["ledger_decisiones"], ledger)

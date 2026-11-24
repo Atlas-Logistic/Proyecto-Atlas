@@ -19,6 +19,9 @@ DERIVADOS = ("latitud_entrega", "longitud_entrega", "distancia_km", "duracion_mi
 # Campos que una ruta recalculada para el destino confirmado puede publicar.
 CAMPOS_RUTA = ("latitud_entrega", "longitud_entrega", "distancia_km", "duracion_min", "proveedor_ruta",
                "estado_ruta", "region_entrega", "codigo_pais", "codigo_unidad", "codigo_contexto")
+# Ubicación del destino (independiente de la planta de origen).
+CAMPOS_UBICACION = ("latitud_entrega", "longitud_entrega", "region_entrega", "codigo_pais", "codigo_unidad",
+                    "codigo_contexto")
 RUTA_CALCULADA = "RUTA_CALCULADA"
 # Tarjetas que preguntan por el destino de un documento: la decisión humana
 # las responde. Las demás revisiones de la misma guía siguen vigentes.
@@ -71,17 +74,24 @@ def ruta_valida(ruta: object, comuna: str) -> bool:
             and str(ruta.get("comuna") or "").strip() == comuna)
 
 
-def proyectar_destino(fila: Mapping[str, object], ledger: Mapping[str, object]) -> dict:
-    """Devuelve copia; exige archivo y guía exactos, nunca agrupa por transporte."""
-    salida = dict(fila)
+TIPO_CORRECCION_ORIGEN = "CORRECCION_ORIGEN_OPERACIONAL"
+MOTIVO_RUTA_ORIGEN_PENDIENTE = "ORIGEN_MODIFICADO_RUTA_PENDIENTE"
+
+
+def destino_vigente(fila: Mapping[str, object], ledger: Mapping[str, object]) -> dict | None:
+    """Decisión humana de destino vigente para ESTE documento (archivo y
+    folio exactos, siguiendo sus correcciones de folio auditadas), o None.
+
+    `origen_corregido_despues` indica si, después de esa decisión, una
+    corrección de origen auditada cambió la planta del documento: una ruta
+    guardada sin planta registrada ya no puede atribuirse a la planta actual.
+    """
     archivo, guia = _identidad(fila)
-    if not archivo or not guia:
-        return salida
-    aplicaciones = ledger.get("aplicaciones", [])
-    if not isinstance(aplicaciones, list):
-        return salida
-    vigente = None
-    for entrada, folios in _folios_anteriores(fila, aplicaciones):
+    aplicaciones = ledger.get("aplicaciones", []) if isinstance(ledger, Mapping) else None
+    if not archivo or not guia or not isinstance(aplicaciones, list):
+        return None
+    ultimo = len(aplicaciones) - 1
+    for k, (entrada, folios) in enumerate(_folios_anteriores(fila, aplicaciones)):
         if not isinstance(entrada, Mapping) or entrada.get("tipo") != TIPO:
             continue
         documento = entrada.get("documento")
@@ -96,26 +106,81 @@ def proyectar_destino(fila: Mapping[str, object], ledger: Mapping[str, object]) 
         direccion = str(destino.get("direccion") or "").strip()
         comuna = str(destino.get("comuna") or "").strip()
         if direccion and comuna:
-            vigente = (direccion, comuna, entrada.get("ruta_operacional"),
-                       bool(entrada.get("conservar_estado_operacional")), str(entrada.get("decision_id") or ""))
-            break
+            posicion = ultimo - k
+            return {"decision_id": str(entrada.get("decision_id") or ""), "direccion": direccion,
+                    "comuna": comuna, "ruta": entrada.get("ruta_operacional"),
+                    "conservar": bool(entrada.get("conservar_estado_operacional")),
+                    "origen_corregido_despues": _origen_corregido_despues(aplicaciones[posicion + 1:], archivo)}
+    return None
+
+
+def _origen_corregido_despues(posteriores: list, archivo: str) -> bool:
+    for entrada in posteriores:
+        if not isinstance(entrada, Mapping) or entrada.get("tipo") != TIPO_CORRECCION_ORIGEN:
+            continue
+        documentos = entrada.get("documentos_viaje")
+        documentos = list(documentos) if isinstance(documentos, list) else []
+        documentos.append(entrada.get("documento"))
+        if any(isinstance(d, Mapping) and str(d.get("archivo") or "").strip() == archivo for d in documentos):
+            return True
+    return False
+
+
+def ruta_de_planta_actual(ruta: object, fila: Mapping[str, object], *, origen_corregido_despues: bool) -> bool:
+    """Una ruta hacia el destino confirmado sólo describe el viaje si salió
+    de la planta que el documento tiene HOY. Con la planta registrada en la
+    ruta, se compara; sin ella (rutas antiguas), sólo vale mientras ninguna
+    corrección de origen posterior a la decisión haya cambiado la planta."""
+    if not isinstance(ruta, Mapping):
+        return False
+    planta = str(ruta.get("planta_origen_id") or "").strip()
+    if planta:
+        return planta == str(fila.get("planta_origen_id") or "").strip()
+    return not origen_corregido_despues
+
+
+def proyectar_destino(fila: Mapping[str, object], ledger: Mapping[str, object]) -> dict:
+    """Devuelve copia; exige archivo y guía exactos, nunca agrupa por transporte."""
+    salida = dict(fila)
+    vigente = destino_vigente(fila, ledger)
     if vigente:
-        direccion, comuna, ruta, conservar, decision_id = vigente
+        direccion, comuna, ruta = vigente["direccion"], vigente["comuna"], vigente["ruta"]
+        conservar, decision_id = vigente["conservar"], vigente["decision_id"]
         # Caso real 488100: la ruta calculada al confirmar quedó PENDIENTE
         # porque el geocodificador no ubicaba AZA COLINA. Un recálculo
         # explícito posterior (`recalculo_ruta_planta`) para ESTA misma
         # decisión, dirección y comuna la reemplaza; la decisión no cambia.
+        # Tras corregir la planta de origen, el recálculo desde la planta
+        # nueva la reemplaza aunque haya quedado pendiente: la ruta de la
+        # decisión salió de la planta anterior y nunca vuelve a publicarse.
         if not conservar:
             from atlas_core.recalculo_ruta_planta import ruta_operacional_recalculada
+            corregido = vigente["origen_corregido_despues"]
             recalculada = ruta_operacional_recalculada(fila, decision_id=decision_id, direccion=direccion,
                                                        comuna=comuna)
-            if ruta_valida(recalculada, comuna):
+            if (ruta_de_planta_actual(recalculada, fila, origen_corregido_despues=corregido)
+                    and (ruta_valida(recalculada, comuna) or str(recalculada.get("planta_origen_id") or "").strip())):
                 ruta = recalculada
+            if not ruta_de_planta_actual(ruta, fila, origen_corregido_despues=corregido):
+                ruta = None
         if conservar:
             salida["direccion_entrega"], salida["localidad_entrega"] = direccion, comuna
             salida["estado_ruta_historica"] = salida.get("estado_ruta", "")
             salida["estado_ruta"] = "REQUIERE_COMPROBACION"
             salida["ruta_requiere_comprobacion"] = True
+            if vigente["origen_corregido_despues"]:
+                # La distancia documental conservada salió de la planta
+                # anterior (el dataset la protege): sólo se publica la
+                # recalculada desde la planta actual; si no hay, ninguna.
+                from atlas_core.recalculo_ruta_planta import ruta_operacional_recalculada
+                recalculada = ruta_operacional_recalculada(fila, decision_id=decision_id, direccion=direccion,
+                                                           comuna=comuna)
+                valida = (ruta_de_planta_actual(recalculada, fila, origen_corregido_despues=True)
+                          and recalculada.get("estado_ruta") == RUTA_CALCULADA)
+                for campo in ("distancia_km", "duracion_min", "proveedor_ruta"):
+                    salida[campo] = str(recalculada.get(campo) or "") if valida else ""
+                if not valida:
+                    salida["motivo_ruta"] = MOTIVO_RUTA_ORIGEN_PENDIENTE
             return salida
         for campo in DERIVADOS:
             salida[campo] = ""
@@ -125,6 +190,14 @@ def proyectar_destino(fila: Mapping[str, object], ledger: Mapping[str, object]) 
             for campo in CAMPOS_RUTA:
                 salida[campo] = str(ruta.get(campo) or "")
             salida["estado_entrega"] = "RESUELTO"
+        elif isinstance(ruta, Mapping) and ruta.get("coordenadas_confirmadas") and str(ruta.get("comuna") or "").strip() == comuna:
+            # Planta corregida sin ruta calculable: el destino confirmado y
+            # sus coordenadas siguen vigentes; sólo la distancia queda pendiente.
+            for campo in CAMPOS_UBICACION:
+                salida[campo] = str(ruta.get(campo) or "")
+            salida["estado_entrega"] = "RESUELTO"
+            salida["estado_ruta"] = "REQUIERE_REVISION"
+            salida["motivo_ruta"] = MOTIVO_RUTA_ORIGEN_PENDIENTE
         # Casos reales 483491/483526: el estado operacional documental
         # reflejaba la ruta que faltaba; con el destino confirmado se
         # recalcula con la regla de siempre (documento en revisión o ruta no
@@ -190,6 +263,88 @@ def calcular_ruta_operacional(fila: Mapping[str, object], direccion: str, comuna
     ruta["comuna"] = comuna
     ruta["planta_origen_id"] = planta_id
     return ruta
+
+
+def _coordenadas_confirmadas(ruta: object):
+    from atlas_core.rutas.modelos import Coordenadas
+    if not isinstance(ruta, Mapping):
+        return None
+    try:
+        latitud = float(str(ruta.get("latitud_entrega") or "").strip())
+        longitud = float(str(ruta.get("longitud_entrega") or "").strip())
+        coordenadas = Coordenadas(longitud, latitud)
+    except Exception:  # noqa: BLE001 -- coordenada ilegible o no finita: no se usa
+        return None
+    if not (-90 <= latitud <= 90 and -180 <= longitud <= 180):
+        return None
+    return coordenadas
+
+
+def ubicacion_confirmada(fila: Mapping[str, object], vigente: Mapping[str, object]) -> dict | None:
+    """Ruta guardada que lleva las coordenadas del destino confirmado (las
+    coordenadas no dependen de la planta): primero el recálculo ligado a
+    ESTA decisión, luego la ruta guardada al confirmar. None si ninguna."""
+    from atlas_core.recalculo_ruta_planta import ruta_operacional_recalculada
+    recalculada = ruta_operacional_recalculada(fila, decision_id=str(vigente.get("decision_id") or ""),
+                                               direccion=str(vigente.get("direccion") or ""),
+                                               comuna=str(vigente.get("comuna") or ""))
+    for ruta in (recalculada, vigente.get("ruta")):
+        if (_coordenadas_confirmadas(ruta) is not None
+                and str(ruta.get("comuna") or vigente.get("comuna") or "").strip() == vigente.get("comuna")):
+            return dict(ruta)
+    return None
+
+
+def recalcular_ruta_desde_planta(planta_id: str, direccion: str, comuna: str, ruta_anterior: object, *,
+                                 fila: Mapping[str, object], carpeta_catalogos, proveedor_rutas=None,
+                                 proveedor_rutas_fallback=None, perfil: str = "driving-hgv") -> dict:
+    """Ruta desde una planta corregida hacia el destino YA confirmado.
+
+    El destino no se vuelve a resolver: si la ruta anterior tenía
+    coordenadas, se conservan (con región y códigos) y sólo se pide al
+    proveedor el recorrido planta nueva -> esas coordenadas. Sin
+    coordenadas previas se usa el mismo cálculo de la confirmación
+    (`calcular_ruta_operacional`, con la comuna confirmada como control).
+    Nunca reutiliza la distancia anterior: si el proveedor no la calcula,
+    la ruta queda pendiente (conservando las coordenadas confirmadas).
+    Siempre registra la planta de la que sale."""
+    from pathlib import Path
+    from atlas_core.catalogo_plantas import CatalogoPlantas
+    from atlas_core.rutas.geocerca import coordenada_ruteo_planta
+    from atlas_core.rutas.modelos import EstadoRuta
+
+    base = {"comuna": comuna, "planta_origen_id": planta_id}
+    destino = _coordenadas_confirmadas(ruta_anterior)
+    if destino is None:
+        ruta = calcular_ruta_operacional({**dict(fila), "planta_origen_id": planta_id}, direccion, comuna,
+                                         carpeta_catalogos=carpeta_catalogos, proveedor_rutas=proveedor_rutas,
+                                         proveedor_rutas_fallback=proveedor_rutas_fallback)
+        return {**ruta, **base}
+    ubicacion = {campo: str(ruta_anterior.get(campo) or "") for campo in CAMPOS_UBICACION}
+    pendiente = {**ubicacion, **base, "estado_ruta": "PENDIENTE", "coordenadas_confirmadas": True}
+    carpeta = Path(carpeta_catalogos)
+    try:
+        plantas = tuple(CatalogoPlantas(carpeta / "plantas.json").listar())
+    except (OSError, ValueError):
+        plantas = ()
+    planta = next((p for p in plantas if p.planta_id == planta_id), None) if planta_id else None
+    if planta is None:
+        return {**pendiente, "motivo": "PLANTA_ORIGEN_DESCONOCIDA"}
+    origen = coordenada_ruteo_planta(planta)
+    if origen is None:
+        return {**pendiente, "motivo": "PLANTA_SIN_COORDENADAS_EN_CATALOGO"}
+    if proveedor_rutas is None:
+        from atlas_core.revalidacion_documental import _proveedor_rutas_ors_predeterminado
+        proveedor_rutas = _proveedor_rutas_ors_predeterminado(raiz_atlas=carpeta.parent)
+    try:
+        resultado = proveedor_rutas.calcular_ruta(origen, destino, perfil)
+    except Exception as error:  # noqa: BLE001 -- un fallo del proveedor deja la ruta pendiente
+        return {**pendiente, "motivo": f"ERROR_PROVEEDOR: {type(error).__name__}"}
+    if resultado.estado != EstadoRuta.RUTA_CALCULADA or not resultado.distancia_km:
+        return {**pendiente, "motivo": str(resultado.motivo or resultado.estado.value)}
+    return {**ubicacion, **base, "coordenadas_confirmadas": True,
+            "distancia_km": str(resultado.distancia_km), "duracion_min": str(resultado.duracion_estimada_min),
+            "proveedor_ruta": str(getattr(proveedor_rutas, "nombre", "") or ""), "estado_ruta": RUTA_CALCULADA}
 
 
 def identidades_destino_confirmado(ruta_ledger):
