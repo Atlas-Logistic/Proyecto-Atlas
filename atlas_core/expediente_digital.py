@@ -55,6 +55,9 @@ TIPOS_BASE = {
     "SEGURO_CARGA": {"entidad": VEHICULO, "nombre": "Seguro de carga", "obligatorio": False},
 }
 TIPOS_POLIZA = frozenset({"POLIZA_RESPONSABILIDAD_CIVIL", "POLIZA_ROBO"})
+# Coberturas que una persona puede confirmar en el original de una póliza (las que el OCR lee y el seguro de carga).
+COBERTURAS_CONFIRMABLES = ("POLIZA_RESPONSABILIDAD_CIVIL", "SEGURO_CARGA", "POLIZA_ROBO")
+OCR, HUMANO = "OCR", "HUMANO"
 DIAS_POR_VENCER = 30
 VENCIDO, POR_VENCER, VIGENTE, SIN_VENCIMIENTO = "VENCIDO", "POR_VENCER", "VIGENTE", "SIN_VENCIMIENTO"
 PENDIENTE_REVISION, FECHA_INVALIDA = "PENDIENTE_REVISION", "FECHA_INVALIDA"
@@ -373,8 +376,8 @@ def _revision_vigente(documento: dict) -> dict:
 
 
 def _coberturas_documento(documento: dict) -> list[str]:
-    """Coberturas acreditadas: las leídas con evidencia, también tras la revisión humana
-    (que sólo puede confirmar las leídas, nunca agregar)."""
+    """Coberturas acreditadas: las leídas con evidencia o, tras la revisión humana del mismo original,
+    las confirmadas (las leídas más las que la persona indicó; su procedencia queda en la revisión)."""
     revision = _revision_vigente(documento)
     if revision:
         return list(revision.get("coberturas") or [])
@@ -674,7 +677,7 @@ _CONFIRMABLES = ("ACTIVAR", "REEMPLAZAR", "PROGRAMAR")
 # declarado, la confirmación explícita de que esos datos aparecen en el original.
 CONTRATO_ACEPTACION = 2
 _CAMPOS_FECHA_REVISION = ("fecha_emision", "fecha_vencimiento")
-_CAMPOS_CONFIRMACION_ORIGINAL = ("tipo", "patente", "inicio_vigencia", "reemplaza")
+_CAMPOS_CONFIRMACION_ORIGINAL = ("tipo", "patente", "inicio_vigencia", "reemplaza", "coberturas")
 PERSONA_DECLARADA, PERSONA_NO_DECLARADA = "DECLARADA", "NO_DECLARADA"
 
 
@@ -735,12 +738,16 @@ def _datos_completados(propuesta: dict | None, leido: dict) -> list[str]:
                    if " ".join(str(propuesta.get(c) or "").split()) and not leido.get(c)]
     if str(propuesta.get("reemplaza") or "").strip():
         completados.append("reemplaza")
+    propias = propuesta.get("coberturas")
+    if isinstance(propias, (list, tuple)) and set(map(str, propias)) - set(leido.get("coberturas") or []):
+        completados.append("coberturas")
     return completados
 
 
 def _exigir_confirmacion_original(autoria: dict, completados: list[str], confirmo_original: bool) -> None:
     if autoria["persona"] == PERSONA_NO_DECLARADA and completados and confirmo_original is not True:
-        nombres = {"tipo": "tipo", "patente": "patente", "inicio_vigencia": "inicio de vigencia", "reemplaza": "documento reemplazado"}
+        nombres = {"tipo": "tipo", "patente": "patente", "inicio_vigencia": "inicio de vigencia", "reemplaza": "documento reemplazado",
+                   "coberturas": "coberturas"}
         raise ErrorExpedienteDigital("confirme que estos datos aparecen en el original: "
                                      + ", ".join(nombres[c] for c in completados))
 
@@ -875,9 +882,24 @@ def _evaluar_revision(raiz: str | Path, datos: dict, documento: dict, propuesta:
     if inicio_humano and lectura["inicios_observados"] and inicio not in lectura["inicios_observados"]:
         # Ante varias fechas de inicio en el original, la persona elige una de ellas; no inventa otra.
         return bloqueo("INICIO_NO_OBSERVADO", "inicio_vigencia")
-    coberturas = leido["coberturas"] if valores["tipo"] in TIPOS_POLIZA else []
-    if valores["tipo"] in TIPOS_POLIZA and not coberturas:
-        return bloqueo("COBERTURAS_SIN_EVIDENCIA", "coberturas")
+    # Coberturas: las leídas con evidencia no se quitan; la persona agrega las que ve en el original.
+    propias = propuesta.get("coberturas")
+    if propias is not None and (not isinstance(propias, (list, tuple))
+                                or any(not isinstance(c, str) or c not in COBERTURAS_CONFIRMABLES for c in propias)):
+        return bloqueo("COBERTURA_NO_ADMITIDA", "coberturas")
+    propias = sorted(set(propias or []))
+    coberturas = []
+    if valores["tipo"] in TIPOS_POLIZA:
+        if propias and set(leido["coberturas"]) - set(propias):
+            return bloqueo("CONTRADICE_LECTURA", "coberturas")
+        coberturas = sorted(set(leido["coberturas"]) | set(propias))
+        if not coberturas:
+            return bloqueo("COBERTURAS_SIN_EVIDENCIA", "coberturas")
+        if valores["tipo"] not in coberturas:
+            return bloqueo("COBERTURA_DEL_TIPO_AUSENTE", "coberturas")
+    elif propias:
+        return bloqueo("COBERTURAS_NO_APLICAN", "coberturas")
+    procedencia = {c: OCR if c in leido["coberturas"] else HUMANO for c in coberturas}
     reemplaza = str(propuesta.get("reemplaza") or "").strip()
     # El tipo confirmado por la persona resuelve la duda entre informado y leído; todo lo demás
     # (vínculo, cobertura, vencimiento posterior, vigencia futura) lo decide la regla única.
@@ -886,7 +908,7 @@ def _evaluar_revision(raiz: str | Path, datos: dict, documento: dict, propuesta:
         "estado_inicio": None if inicio_humano else lectura["estado_inicio"], "coberturas": coberturas,
         "reemplaza": reemplaza}, _anteriores_operativos(datos, documento, hoy) if anteriores is None else anteriores, hoy)
     valores.update(fecha_emision=emision, fecha_vencimiento=vencimiento, inicio_vigencia=inicio, coberturas=coberturas,
-                   reemplaza=reemplaza)
+                   procedencia_coberturas=procedencia, reemplaza=reemplaza)
     return {**decision, "campo": "", "detalle": "", "valores": valores}
 
 
@@ -966,12 +988,12 @@ def revisar_documento_pendiente(raiz: str | Path, *, empresa: str, referencia: s
     documento = _pendiente_de_vehiculo(raiz, empresa, datos, referencia, documento_id, carpeta_catalogos)
     lectura = _lectura(documento)
     evaluacion, anteriores, fichas_anteriores, clave = _revision_desktop_contexto(raiz, empresa, datos, documento, propuesta, hoy, carpeta_catalogos)
-    from atlas_core.renovacion_documental import tipos_acreditados
+    from atlas_core.renovacion_documental import relacionado
     # Sólo los anteriores que acreditan lo mismo que el tipo en revisión (y los que nombra la decisión).
     tipo_revisado = str((propuesta or {}).get("tipo") or "").upper() or lectura["leido"]["tipo"] or documento.get("tipo_informado") or ""
-    acredita = tipos_acreditados({"tipo": tipo_revisado, "coberturas": lectura["leido"]["coberturas"]})
+    revisado = {"tipo": tipo_revisado, "coberturas": evaluacion["valores"].get("coberturas") or lectura["leido"]["coberturas"]}
     operativos = {a["documento_id"] for a in anteriores
-                  if acredita & tipos_acreditados(a) or a["documento_id"] in evaluacion["documentos"]}
+                  if relacionado(revisado, a) or a["documento_id"] in evaluacion["documentos"]}
     nombres = tipos_documento(datos)
     return {
         "empresa": empresa,
@@ -999,7 +1021,10 @@ def _vista_aceptacion(lectura: dict, *, otro_vehiculo: bool | None = None) -> di
                       or (not lectura["leido"][c] and not (c == "patente" and otro))],
         "contrato_aceptacion": CONTRATO_ACEPTACION,
         "precarga": {c: lectura["leido"][c] or "" for c in _CAMPOS_FECHA_REVISION},
-        "confirmacion_original": [c for c in _CAMPOS_CONFIRMACION_ORIGINAL if c == "reemplaza" or not lectura["leido"][c]],
+        "confirmacion_original": [c for c in _CAMPOS_CONFIRMACION_ORIGINAL
+                                  if c in ("reemplaza", "coberturas") or not lectura["leido"][c]],
+        # Una persona puede confirmar las coberturas de una póliza que el OCR no leyó; las leídas quedan fijas.
+        "coberturas_confirmables": list(COBERTURAS_CONFIRMABLES),
     }
 
 
@@ -1077,7 +1102,8 @@ def resolver_documento_pendiente(
         documento["revision_humana"] = {
             "autor": autor, "en": instante, "actor": actor, "sha256": documento["sha256"], "decision": accion,
             "motivo_regla": evaluacion["motivo"], "patente": v["patente"], "inicio_vigencia": v["inicio_vigencia"],
-            "coberturas": v["coberturas"], "cambios": cambios, "motivos_revisados": motivos,
+            "coberturas": v["coberturas"], "procedencia_coberturas": v["procedencia_coberturas"],
+            "coberturas_ocr": lectura["leido"]["coberturas"], "cambios": cambios, "motivos_revisados": motivos,
             "posible_reemplazo_resuelto": resuelto, "reemplaza": evaluacion["documentos"],
             "fechas": fechas, "correccion_ocr": correccion_ocr, "datos_completados": completados,
             "confirmo_original": bool(completados) and confirmo_original is True, **_auditoria_autoria(autoria)}
@@ -1096,6 +1122,7 @@ def resolver_documento_pendiente(
                 renovacion=accion, motivo_regla=evaluacion["motivo"], reemplaza=reemplazados,
                 programado_desde=evaluacion["fecha"] if accion == "PROGRAMAR" else "",
                 anteriores=evaluacion["documentos"], fechas=fechas, correccion_ocr=correccion_ocr,
+                coberturas=v["coberturas"], procedencia_coberturas=v["procedencia_coberturas"],
                 datos_completados=completados, **_auditoria_autoria(autoria))
         return dict(documento)
 
@@ -1179,9 +1206,13 @@ def _vista_coberturas(documento: dict) -> dict:
     extraccion = documento.get("extraccion_automatica") or {}
     campos = extraccion.get("campos") or {}
     huella = documento.get("sha256")
-    if _revision_vigente(documento).get("coberturas"):
-        # Confirmada por una persona sobre este original, con coberturas leídas con evidencia.
-        return {**documento, "tipos_cubiertos": _coberturas_documento(documento),
+    revision = _revision_vigente(documento)
+    if revision.get("coberturas"):
+        # Confirmada por una persona sobre este original: leídas con evidencia y/o confirmadas por ella.
+        cubiertas = _coberturas_documento(documento)
+        procedencia = revision.get("procedencia_coberturas") or {}
+        return {**documento, "tipos_cubiertos": cubiertas,
+                "procedencia_coberturas": {c: procedencia.get(c, OCR) for c in cubiertas},
                 "pendiente_revision": bool(documento.get("pendiente_revision"))}
     if documento.get("fuente") == "EXPEDIENTE":
         patente = campos.get("patente") or {}
@@ -1205,7 +1236,7 @@ def _vista_coberturas(documento: dict) -> dict:
     confiable = (vinculado and extraccion.get("procedencia") == "AUTOMATICA_OCR"
                  and (leido or _vencimiento_corregido(documento)))
     coberturas = _coberturas_extraidas(extraccion) if confiable else []
-    return {**documento, "tipos_cubiertos": coberturas,
+    return {**documento, "tipos_cubiertos": coberturas, "procedencia_coberturas": {c: OCR for c in coberturas},
             "pendiente_revision": bool(documento.get("pendiente_revision") or not coberturas)}
 
 

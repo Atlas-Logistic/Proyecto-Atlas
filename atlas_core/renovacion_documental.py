@@ -1,8 +1,8 @@
 """Decisión única de renovación de documentos vehiculares (Mobile y Desktop).
 
 Se evalúa sólo para un documento nuevo cuya lectura ya es confiable: tipo,
-patente y vencimiento acreditados por OCR del mismo original y, si es póliza,
-coberturas leídas con evidencia. Decide frente a los documentos operativos del
+patente y vencimiento acreditados (OCR del mismo original o persona) y, si es póliza,
+coberturas leídas con evidencia o confirmadas en el original. Decide frente a los documentos operativos del
 mismo vehículo (con vencimiento, no reemplazados ni pendientes):
 
 - ACTIVAR: no hay anterior que acredite lo mismo.
@@ -20,6 +20,9 @@ from __future__ import annotations
 from datetime import date
 
 TIPOS_POLIZA = frozenset({"POLIZA_RESPONSABILIDAD_CIVIL", "POLIZA_ROBO"})
+# Requisitos que una póliza puede acreditar por sus coberturas: las leídas por OCR (responsabilidad civil,
+# robo) y, además, las que una persona confirma en el mismo original (también el seguro de carga).
+COBERTURAS_POLIZA = frozenset({*TIPOS_POLIZA, "SEGURO_CARGA"})
 ACTIVAR, REEMPLAZAR, PROGRAMAR, PENDIENTE = "ACTIVAR", "REEMPLAZAR", "PROGRAMAR", "PENDIENTE"
 
 
@@ -31,9 +34,9 @@ def _fecha(valor) -> date | None:
 
 
 def tipos_acreditados(documento: dict) -> frozenset[str]:
-    """Requisitos que acredita: una póliza por sus coberturas leídas; sin ellas, por su propio tipo."""
+    """Requisitos que acredita: una póliza por sus coberturas (leídas o confirmadas); sin ellas, por su propio tipo."""
     tipo = documento.get("tipo")
-    coberturas = [c for c in documento.get("coberturas") or [] if c in TIPOS_POLIZA]
+    coberturas = [c for c in documento.get("coberturas") or [] if c in COBERTURAS_POLIZA]
     return frozenset(coberturas) if tipo in TIPOS_POLIZA and coberturas else frozenset({tipo})
 
 
@@ -48,11 +51,20 @@ def inicio_acreditado(campo_vencimiento: dict | None) -> str:
     return ""
 
 
+def relacionado(nuevo: dict, anterior: dict) -> bool:
+    """El anterior acredita algo de lo que acredita el nuevo y puede ser sustituido por él. Un documento
+    propio de otro requisito (p. ej. un seguro de carga aparte) nunca lo retira una póliza que también lo
+    cubre: ambos acreditan ese requisito, sin sustitución."""
+    if anterior.get("tipo") not in TIPOS_POLIZA and anterior.get("tipo") != nuevo.get("tipo"):
+        return False
+    return bool(tipos_acreditados(nuevo) & tipos_acreditados(anterior))
+
+
 def decidir_renovacion(nuevo: dict, anteriores: list[dict], hoy: date) -> dict:
     """`nuevo`: tipo, tipo_informado, vencimiento, inicio, coberturas, reemplaza (origen explícito o "").
     `anteriores`: documento_id, tipo, vencimiento, coberturas, origenes."""
     tipos = tipos_acreditados(nuevo)
-    relacionados = [a for a in anteriores if tipos & tipos_acreditados(a)]
+    relacionados = [a for a in anteriores if relacionado(nuevo, a)]
 
     def resultado(accion, motivo="", documentos=(), fecha=""):
         return {"accion": accion, "motivo": motivo, "documentos": [d["documento_id"] for d in documentos], "fecha": fecha}

@@ -197,7 +197,9 @@ def resolver(raiz, *, empresa, referencia, documento_id, sha256, decision, autor
             actual['clasificacion_humana'] = {'patente': vehiculo.patente_canonica, 'autor': autor, 'fecha': instante,
                                               **exp._auditoria_autoria(autoria)}
             revision.update(patente=vehiculo.patente_canonica, inicio_vigencia=valores['inicio_vigencia'],
-                            coberturas=valores['coberturas'], renovacion=evaluacion['accion'],
+                            coberturas=valores['coberturas'],
+                            procedencia_coberturas=valores.get('procedencia_coberturas') or {},
+                            renovacion=evaluacion['accion'],
                             reemplaza=evaluacion['documentos'], fechas=fechas, datos_completados=completados,
                             correccion_ocr={c: {'antes': f['ocr'], 'despues': f['valor']} for c, f in fechas.items()
                                             if f['origen'] == 'HUMANO' and f['ocr']},

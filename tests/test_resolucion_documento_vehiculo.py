@@ -202,12 +202,14 @@ def test_vencimiento_no_posterior_queda_pendiente_aunque_una_persona_confirme(ra
     assert almacen(raiz) == antes and documento_en(raiz, viejo["documento_id"])["estado"] == "ACTIVO"
 
 
-def test_poliza_sin_coberturas_leidas_no_se_confirma_ni_con_coberturas_declaradas(raiz):
+def test_poliza_sin_coberturas_leidas_exige_que_la_persona_las_indique(raiz):
+    # Sin coberturas leídas ni indicadas no acredita nada; indicadas por la persona sí (ver test_coberturas_humanas.py).
     pendiente = alta(raiz, ["POLIZA DE SEGURO CONTRA ROBO", "PATENTE " + PATENTE, "VENCIMIENTO: 30/09/2027"],
                      tipo="POLIZA_ROBO", contenido=b"sin-coberturas")
-    vista = revisar(raiz, pendiente, {"coberturas": ["POLIZA_ROBO"]})
-    assert vista["motivos"] == ["COBERTURAS_NO_LEIDAS"] and "coberturas" not in vista["editables"]
+    vista = revisar(raiz, pendiente)
+    assert vista["motivos"] == ["COBERTURAS_NO_LEIDAS"] and "coberturas" in vista["confirmacion_original"]
     assert vista["consecuencia"]["motivo"] == "COBERTURAS_SIN_EVIDENCIA" and not vista["puede_confirmar"]
+    assert revisar(raiz, pendiente, {"coberturas": ["POLIZA_ROBO"]})["consecuencia"]["accion"] == "ACTIVAR"
 
 
 def test_poliza_con_menos_coberturas_no_retira_la_anterior(raiz):
