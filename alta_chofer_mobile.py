@@ -182,7 +182,12 @@ def aplicar_alta(raiz: Path, datos: dict[str, str], password_hash: str, escritor
                                                datos["usuario"]: {"chofer_id": chofer_id, "password_hash": password_hash}}}
     _exigir_vigente(escritor)
     if not existente:
-        escribir_json_atomico(ruta_choferes, {**choferes, chofer_id: {"nombre": datos["nombre"], "activo": True}})
+        from atlas_core.fichas_choferes import EMPRESA_ACTUAL, leer_almacen, preparar_ficha_selectiva
+        catalogo_propuesto = {**choferes, chofer_id: {"nombre": datos["nombre"], "activo": True}}
+        # Rechaza antes de escribir si la identidad documental es ambigua.
+        preparar_ficha_selectiva(leer_almacen(raiz, empresa=EMPRESA_ACTUAL), catalogo_propuesto,
+                                 empresa=EMPRESA_ACTUAL, referencia=chofer_id, actor='ALTA_CHOFER')
+        escribir_json_atomico(ruta_choferes, catalogo_propuesto)
     try:
         _exigir_vigente(escritor)
         escribir_json_atomico(ruta_usuarios, nuevos_usuarios)
@@ -190,6 +195,18 @@ def aplicar_alta(raiz: Path, datos: dict[str, str], password_hash: str, escritor
         if not existente and escritor.vigente:
             escribir_json_atomico(ruta_choferes, choferes)
         raise
+    if not existente:
+        from atlas_core.fichas_choferes import inicializar_ficha_selectiva_en_turno
+        try:
+            inicializar_ficha_selectiva_en_turno(raiz, empresa=EMPRESA_ACTUAL, actor='ALTA_CHOFER',
+                                                 referencia=chofer_id, comprobar=lambda: _exigir_vigente(escritor))
+        except Exception as error:
+            # Los dos registros anteriores ya fueron publicados. Se informa la
+            # aplicacion parcial para reparar por la operacion selectiva idempotente.
+            raise ErrorAlta('FICHA_DOCUMENTAL_PENDIENTE',
+                            'El chofer y la cuenta fueron creados; falta su ficha documental. '
+                            'Use la inicializacion selectiva antes de continuar: ' + str(error),
+                            SALIDA_SIN_ESCRITOR) from error
     return chofer_id
 
 

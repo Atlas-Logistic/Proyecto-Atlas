@@ -388,3 +388,34 @@ def test_nuevo_sigue_rechazando_rut_existente(raiz):
     with pytest.raises(alta.ErrorAlta) as error:
         ejecutar(raiz, usuario="luis.x", rut="10.833.150-K", nombre="JOSE LAZCANO")
     assert error.value.codigo == "RUT_DUPLICADO"
+
+
+def test_alta_nueva_crea_ficha_selectiva_sin_vehiculo(raiz):
+    from atlas_core.fichas_choferes import leer_almacen, fichas_por_referencia
+    ejecutar(raiz)
+    almacen = leer_almacen(raiz, empresa='MBT')
+    fichas = fichas_por_referencia(almacen)
+    assert list(fichas) == ['116405008']
+    assert fichas['116405008']['documentos'] == []
+    assert not (raiz / 'catalogos_privados' / 'vehiculos.json').exists()
+
+
+def test_alta_informa_fallo_documental_parcial_y_permite_reparar(raiz, monkeypatch):
+    import atlas_core.fichas_choferes as fichas
+    real = fichas.inicializar_ficha_selectiva_en_turno
+    def falla(*args, **kwargs):
+        raise OSError('fallo sintetico')
+    monkeypatch.setattr(fichas, 'inicializar_ficha_selectiva_en_turno', falla)
+    with pytest.raises(alta.ErrorAlta) as error:
+        ejecutar(raiz)
+    assert error.value.codigo == 'FICHA_DOCUMENTAL_PENDIENTE'
+    assert '116405008' in leer(raiz, 'choferes.json')
+    assert 'raimundo.pineda' in leer(raiz, 'usuarios_mobile.json')['usuarios']
+    monkeypatch.setattr(fichas, 'inicializar_ficha_selectiva_en_turno', real)
+    with EscritorFalso(raiz) as escritor:
+        assert escritor.adquirir()
+        r = real(raiz, empresa='MBT', actor='TEST', referencia='116405008',
+                 comprobar=lambda: alta._exigir_vigente(escritor))
+        assert r['modificado']
+        assert not real(raiz, empresa='MBT', actor='TEST', referencia='116405008',
+                        comprobar=lambda: alta._exigir_vigente(escritor))['modificado']

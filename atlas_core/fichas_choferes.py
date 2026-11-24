@@ -308,6 +308,78 @@ def inicializar_almacen(raiz, *, empresa, actor, vinculos=None):
                     'revision': propuesto['revision'], 'respaldo': str(respaldo)}
 
 
+def preparar_ficha_selectiva(datos, catalogo, *, empresa, referencia, actor):
+    """Prepara solamente una identidad confirmada; se abstiene ante dudas de continuidad."""
+    referencia = str(referencia or '')
+    registro = catalogo.get(referencia)
+    if not isinstance(registro, dict) or registro.get('activo') is not True:
+        raise ValueError('El chofer no existe o no esta activo en el catalogo')
+    rut = normalizar_rut(rut_canonico_de_registro_chofer(referencia, registro) or '')
+    if not rut:
+        raise ValueError('El chofer no tiene RUT confirmado')
+    coincidencias = [ref for ref, reg in catalogo.items() if isinstance(reg, dict)
+                     and normalizar_rut(rut_canonico_de_registro_chofer(ref, reg) or '') == rut]
+    if coincidencias != [referencia]:
+        raise ValueError('El RUT no identifica un unico registro del catalogo')
+    if datos is not None and (datos.get('version') != VERSION or datos.get('empresa') != empresa):
+        raise ValueError('Se requiere el almacen oficial v2 de la empresa')
+    if datos:
+        _validar_v2(datos)
+        indice = fichas_por_referencia(datos)
+        if referencia in indice:
+            return copy.deepcopy(datos)
+        if any(not set(f['referencias_catalogo']) & set(catalogo) for f in datos['choferes']):
+            raise ValueError('Hay fichas huerfanas: confirme su identidad antes de crear una ficha')
+        if any(normalizar_rut(str(e.get('rut', ''))) == rut
+               for e in datos.get('choferes_legacy_sin_vincular', []) if isinstance(e, dict)):
+            raise ValueError('Hay documentos legados para este RUT que requieren vinculacion explicita')
+        refs_existentes = set(indice) & set(catalogo)
+    else:
+        refs_existentes = set()
+    # El plan oficial solo ve las referencias ya existentes y la solicitada.
+    limitado = {ref: catalogo[ref] for ref in refs_existentes | {referencia}}
+    return preparar_almacen(datos, limitado, empresa=empresa, actor=actor)
+
+
+def inicializar_ficha_selectiva_en_turno(raiz, *, empresa, actor, referencia, comprobar):
+    """Requiere turno oficial vigente; respalda y publica solo una ficha."""
+    comprobar()
+    ruta = ruta_almacen(raiz, empresa)
+    with bloqueo_sesion(Path(raiz) / 'operacion' / 'actual', 'fichas_choferes_' + empresa):
+        catalogo_ruta = Path(raiz) / 'catalogos_privados' / 'choferes.json'
+        catalogo_bytes = catalogo_ruta.read_bytes()
+        catalogo = json.loads(catalogo_bytes.decode('utf-8-sig'))
+        anterior = leer_almacen(raiz, empresa=empresa)
+        propuesta = preparar_ficha_selectiva(anterior, catalogo, empresa=empresa,
+                                             referencia=referencia, actor=actor)
+        ficha = fichas_por_referencia(propuesta)[referencia]
+        if anterior == propuesta:
+            return {'modificado': False, 'ficha_id': ficha['ficha_id'], 'revision': propuesta['revision']}
+        respaldo = Path(raiz) / 'respaldos' / 'fichas_choferes' / uuid.uuid4().hex
+        respaldo.mkdir(parents=True)
+        if ruta.is_file():
+            shutil.copy2(ruta, respaldo / ruta.name)
+        escribir_json_atomico(respaldo / 'manifest.json', {
+            'empresa': empresa, 'actor': actor, 'operacion': 'INICIALIZAR_FICHA_SELECTIVA',
+            'referencia_catalogo': referencia, 'existia_almacen': anterior is not None,
+            'ruta_relativa': str(ruta.relative_to(raiz)),
+            'revision_anterior': anterior.get('revision') if anterior else None,
+        })
+        comprobar()
+        if catalogo_ruta.read_bytes() != catalogo_bytes:
+            raise ValueError('El catalogo cambio durante la preparacion; no se publica')
+        escribir_json_atomico(ruta, propuesta)
+        return {'modificado': True, 'ficha_id': ficha['ficha_id'],
+                'revision': propuesta['revision'], 'respaldo': str(respaldo)}
+
+
+def inicializar_ficha_selectiva(raiz, *, empresa, actor, referencia):
+    from atlas_core.desktop_operacion import sesion
+    with sesion(raiz, reutilizar=True) as comprobar:
+        return inicializar_ficha_selectiva_en_turno(raiz, empresa=empresa, actor=actor,
+                                                     referencia=referencia, comprobar=comprobar)
+
+
 def _copiar_licencia_nueva(origen, destino, comprobar):
     """Copia por creación exclusiva y devuelve huella; nunca reutiliza nombre."""
     origen, extension, tamano_esperado = _tipo_archivo_licencia(origen)
