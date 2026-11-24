@@ -1346,11 +1346,45 @@ def _clave_obra(nombre: str) -> str:
     return re.sub(r"\bLTDA\b", "LIMITADA", normalizar_nombre_obra(nombre))
 
 
-def resolver_obra(obras: list, mencion: str) -> dict:
+def _abreviatura_de(corta: str, larga: str) -> bool:
+    """`corta` abrevia `larga` por prefijo (BOD -> BODEGA). Sólo palabras
+    alfabéticas de al menos 3 letras: los números nunca se abrevian."""
+    return (corta.isalpha() and larga.isalpha() and 3 <= len(corta) < len(larga)
+            and larga.startswith(corta))
+
+
+def obra_equivale_por_abreviatura(a: str, b: str) -> bool:
+    """Caso real 492040: «SODIMAC SA RENCA BODEGA 721» (dicho por Javier) y
+    «SODIMAC SA RENCA BOD 721» (catálogo) son la misma obra escrita con y sin
+    abreviatura. Misma cantidad de palabras, cada palabra distinta es una
+    abreviatura por prefijo de la otra y toda palabra con dígitos es idéntica
+    (BOD 721 nunca equivale a BOD 209). No es fuzzy: no tolera letras
+    cambiadas, palabras faltantes ni números distintos."""
+    ta, tb = _clave_obra(a).split(), _clave_obra(b).split()
+    if not ta or len(ta) != len(tb) or ta == tb:
+        return False
+    return all(x == y or _abreviatura_de(x, y) or _abreviatura_de(y, x) for x, y in zip(ta, tb))
+
+
+def _obras_equivalentes_del_cliente(obras: list, nombre: str, cliente_id: str) -> list:
+    """Obras vigentes del cliente cuyo nombre canónico o alias equivale a
+    `nombre` por abreviatura. Nunca cruza clientes."""
+    if not cliente_id or not str(nombre or "").strip():
+        return []
+    return [o for o in obras
+            if o.estado_vigencia == "ACTIVO" and o.estado not in {"RECHAZADA", "INACTIVA"}
+            and str(o.cliente_id or "") == cliente_id
+            and any(obra_equivale_por_abreviatura(nombre, x) for x in (o.nombre_canonico, *o.aliases_documentales))]
+
+
+def resolver_obra(obras: list, mencion: str, cliente_id: str = "") -> dict:
     """{'estado': RESUELTO|AMBIGUO|DESCONOCIDO, 'obra_id', 'nombre', 'candidatos'}.
-    Sólo coincidencia exacta normalizada con el nombre canónico o un alias de
-    una obra vigente; nunca crea obra ni adivina entre varias. LTDA y
-    LIMITADA son la misma forma jurídica al comparar."""
+    Primero coincidencia exacta normalizada con el nombre canónico o un alias
+    de una obra vigente (LTDA y LIMITADA son la misma forma jurídica). Sólo
+    si no hay ninguna exacta y se conoce el cliente de la guía, se acepta la
+    misma obra escrita con abreviaturas (`obra_equivale_por_abreviatura`)
+    entre las obras de ESE cliente, y únicamente si es una sola. Nunca crea
+    obra ni adivina entre varias."""
     from atlas_core.catalogo_obras_destinos import normalizar_nombre_obra as _normalizar
 
     def normalizar_nombre_obra(nombre: str) -> str:
@@ -1362,6 +1396,14 @@ def resolver_obra(obras: list, mencion: str) -> dict:
                if clave and clave in {normalizar_nombre_obra(x) for x in (o.nombre_canonico, *o.aliases_documentales)}]
     if len(exactas) == 1:
         return {"estado": "RESUELTO", "obra_id": exactas[0].obra_id, "nombre": exactas[0].nombre_canonico}
+    if not exactas:
+        equivalentes = _obras_equivalentes_del_cliente(vigentes, mencion, cliente_id)
+        if len(equivalentes) == 1:
+            return {"estado": "RESUELTO", "obra_id": equivalentes[0].obra_id,
+                    "nombre": equivalentes[0].nombre_canonico, "equivalencia": "ABREVIATURA"}
+        if len(equivalentes) > 1:
+            return {"estado": "AMBIGUO",
+                    "candidatos": [{"obra_id": o.obra_id, "nombre": o.nombre_canonico} for o in equivalentes[:10]]}
     parecidas = exactas or [o for o in vigentes if clave and (clave in normalizar_nombre_obra(o.nombre_canonico)
                                                               or normalizar_nombre_obra(o.nombre_canonico) in clave)]
     return {"estado": "AMBIGUO" if len(exactas) > 1 else "DESCONOCIDO",
@@ -2668,7 +2710,11 @@ class OperadorB1:
             parametros["valor"] = resolucion["nombre"]
         if "obra" in intencion.menciones:
             mencion = intencion.menciones["obra"]
-            resolucion = resolver_obra(self.capa._ctx.catalogo_obras().listar_obras(), mencion)
+            # La obra de una guía se busca también entre las obras de SU
+            # cliente escritas con abreviaturas (caso real 492040).
+            cliente_guia = (self._cliente_id_de_guia(parametros, revision)
+                            if intencion.accion == "DOCUMENTO_ASIGNAR_OBRA" else "")
+            resolucion = resolver_obra(self.capa._ctx.catalogo_obras().listar_obras(), mencion, cliente_guia)
             if resolucion["estado"] == "DESCONOCIDO" and intencion.accion == "DOCUMENTO_ASIGNAR_OBRA":
                 oferta = self._ofrecer_registro_obra(estado, conversacion_id, mencion, parametros,
                                                      resolucion["candidatos"], revision, texto)
@@ -2711,6 +2757,18 @@ class OperadorB1:
                 return {"estado": "ACLARACION_REQUERIDA", "accion": intencion.accion, "candidatos": candidatos_publicos,
                         "mensaje": mensaje}
             parametros["cliente_id"] = resolucion["cliente_id"]
+        if intencion.accion == "OBRA_REGISTRAR" and parametros.get("cliente_id"):
+            nombre_obra = str(parametros.get("nombre_obra") or "")
+            existentes = _obras_equivalentes_del_cliente(self.capa._ctx.catalogo_obras().listar_obras(), nombre_obra,
+                                                         str(parametros["cliente_id"]))
+            if existentes:
+                # Misma obra con otra abreviatura: registrarla sería un duplicado.
+                listado = "; ".join(o.nombre_canonico for o in existentes)
+                return {"estado": "ACLARACION_REQUERIDA", "accion": intencion.accion,
+                        "candidatos": [{"obra_id": o.obra_id, "nombre": o.nombre_canonico} for o in existentes],
+                        "mensaje": f"«{nombre_obra}» ya está registrada para ese cliente como {listado} "
+                                   "(solo cambia la abreviatura). No se crea otra obra; para corregir una guía "
+                                   f"escribe «la obra es {existentes[0].nombre_canonico}». No se creó nada."}
         if "destino" in intencion.menciones:
             mencion = intencion.menciones["destino"]
             resolucion = resolver_destino(self.capa._ctx.catalogo_destinos().listar(), mencion)
@@ -2735,6 +2793,25 @@ class OperadorB1:
                         "mensaje": rechazo}
             parametros["archivo"] = archivo
         return self._previsualizar(estado, conversacion_id, intencion, parametros, texto)
+
+    def _cliente_id_de_guia(self, parametros: Mapping[str, object],
+                            revision: tuple[Mapping[str, object], str] | None) -> str:
+        """cliente_id del cliente vigente de la guía (fila del dataset resuelta
+        contra el catálogo de clientes); si la fila no lo resuelve, el
+        cliente ya resuelto en la tarjeta de revisión. "" si no se sabe."""
+        from atlas_core.catalogo_clientes import CatalogoClientes
+        guia, archivo = str(parametros.get("numero_guia") or "").strip(), str(parametros.get("archivo") or "").strip()
+        filas = [f for f in self.capa._ctx.filas()
+                 if (str(f.get("archivo") or "").strip() == archivo if archivo
+                     else guia and str(f.get("numero_guia") or "").strip() == guia)]
+        if len(filas) == 1 and str(filas[0].get("cliente") or "").strip():
+            resolucion = resolver_cliente(CatalogoClientes(self.capa._ctx.archivos["clientes"]).listar(),
+                                          str(filas[0].get("cliente")))
+            if resolucion["estado"] == "RESUELTO":
+                return str(resolucion["cliente_id"])
+        if revision:
+            return str((revision[0].get("contexto") or {}).get("cliente_id") or "")
+        return ""
 
     def _archivo_unico_de_guia(self, guia: str) -> tuple[str, str]:
         """(archivo, "") del ÚNICO documento con ese folio, o ("", motivo). Una
