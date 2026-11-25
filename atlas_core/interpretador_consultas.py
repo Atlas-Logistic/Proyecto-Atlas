@@ -42,6 +42,11 @@ from atlas_core.consultas_atlas import (
     METRICA_SUM_KM,
     METRICA_SUM_PESO,
     METRICA_SUM_TIEMPO,
+    METRICA_SUM_ADICIONAL,
+    ADICIONAL_CONFIRMADO,
+    ADICIONAL_PENDIENTE,
+    FILTROS_OBSERVACION,
+    palabra_en_observacion,
     PERIODO_AYER,
     PERIODO_ESTA_SEMANA,
     PERIODO_ESTE_MES,
@@ -204,6 +209,12 @@ class CatalogosConsulta:
     patentes: tuple[str, ...] = ()
     plantas: tuple[str, ...] = ()
     regiones: tuple[str, ...] = ()
+    # Direcciones de entrega reales (filtro `destino` por subcadena) y
+    # palabras de las observaciones operacionales vinculadas a viajes
+    # (filtro `observacion`). Con ellas el intérprete puede explicar una
+    # palabra que no es chofer/cliente/obra en vez de descartarla.
+    destinos: tuple[str, ...] = ()
+    observaciones: frozenset[str] = frozenset()
 
 
 def construir_catalogos_consulta(viajes: Iterable[Mapping[str, str]]) -> CatalogosConsulta:
@@ -217,7 +228,13 @@ def construir_catalogos_consulta(viajes: Iterable[Mapping[str, str]]) -> Catalog
     patentes: set[str] = set()
     plantas: set[str] = set()
     regiones: set[str] = set()
+    destinos: set[str] = set()
+    observaciones: set[str] = set()
     for viaje in viajes:
+        destino = str(viaje.get("direccion_entrega", "")).strip()
+        if destino:
+            destinos.add(destino)
+        observaciones.update(_PATRON_PALABRA.findall(str(viaje.get("_observaciones", "") or "")))
         for columna, destino in (("planta_origen_nombre", plantas), ("region_entrega", regiones)):
             valor = str(viaje.get(columna, "")).strip()
             if valor:
@@ -236,6 +253,7 @@ def construir_catalogos_consulta(viajes: Iterable[Mapping[str, str]]) -> Catalog
         obras=tuple(sorted(obras)), tipos_carga=tuple(sorted(tipos_carga)),
         comunas=tuple(sorted(comunas)), patentes=tuple(sorted(patentes)),
         plantas=tuple(sorted(plantas)), regiones=tuple(sorted(regiones)),
+        destinos=tuple(sorted(destinos)), observaciones=frozenset(observaciones),
     )
 
 
@@ -502,6 +520,12 @@ _PATRON_RANGO_FECHAS = re.compile(
     + r"\s+(?:Y|HASTA|AL?)\s+" + _FECHA_TEXTO + r"\b"
 )
 _PATRON_FECHA_PUNTUAL = re.compile(r"\b" + _FECHA_TEXTO + r"\b")
+# Mes con nombre ("de noviembre", "en octubre de 2026"): sin año, el último
+# mes con ese nombre que no está en el futuro.
+_MESES = {"ENERO": 1, "FEBRERO": 2, "MARZO": 3, "ABRIL": 4, "MAYO": 5, "JUNIO": 6, "JULIO": 7, "AGOSTO": 8,
+          "SEPTIEMBRE": 9, "SETIEMBRE": 9, "OCTUBRE": 10, "NOVIEMBRE": 11, "DICIEMBRE": 12}
+_PATRON_MES = re.compile(r"\b(?:(?:EN|DE|DEL|DURANTE)\s+)?(?:(?:EL\s+)?MES\s+DE\s+)?(?P<mes>" + "|".join(_MESES)
+                         + r")(?:\s+(?:DE\s+|DEL\s+)?(?P<anio>20\d{2}))?\b")
 
 
 def _filtros_periodo(texto_normalizado: str) -> dict[str, str]:
@@ -529,6 +553,14 @@ def _filtros_periodo(texto_normalizado: str) -> dict[str, str]:
         if desde > hasta:
             raise ValueError("Rango inválido: la fecha inicial es posterior a la final.")
         return {"fecha_desde": desde.isoformat(), "fecha_hasta": hasta.isoformat()}
+    mes = _PATRON_MES.search(texto_normalizado)
+    if mes:
+        numero = _MESES[mes.group("mes")]
+        hoy = date.today()
+        anio = int(mes.group("anio")) if mes.group("anio") else (hoy.year if numero <= hoy.month else hoy.year - 1)
+        siguiente = date(anio + (numero == 12), 1 if numero == 12 else numero + 1, 1)
+        return {"fecha_desde": date(anio, numero, 1).isoformat(),
+                "fecha_hasta": date.fromordinal(siguiente.toordinal() - 1).isoformat()}
     ultimos = _PATRON_ULTIMOS_DIAS.search(texto_normalizado)
     if ultimos:
         return {"periodo": PERIODO_ULTIMOS_N_DIAS, "dias": ultimos.group(1)}
@@ -933,6 +965,215 @@ def busqueda_transporte_explicita(texto: str):
     return _BUSQUEDA_TRANSPORTE.fullmatch(normalizar_texto_atlas(texto))
 
 
+# --- Observaciones operacionales: adicionales, motivo y lugar de retiro ---
+# Una sola gramática, dentro de este intérprete: la cláusula de adicional
+# se convierte en filtros (`adicional`, `adicional_estado`) y en una
+# intención (contar/listar/sumar); el motivo ("por ir a Versalles") y el
+# lugar ("retiro en Versalles") son términos que se buscan en las
+# observaciones registradas -- nunca se descartan en silencio.
+_ADICIONAL_Q = r"ADI(?:C|S|CC|SC|Z)IONAL(?:ES)?"
+_MONTO_Q = r"\$?\s*(?:\d{1,3}(?:[.]\d{3})+|\d+)(?:\s*(?:MIL|LUCAS|PESOS))?"
+_MONTOS_Q = _MONTO_Q + r"(?:\s*(?:,|\bO\b|\bY\b)\s*" + _MONTO_Q + r")*"
+_COMPARADORES_Q = (
+    ("MAYOR_IGUAL", r"(?:DE\s+)?(?:AL\s+MENOS|COMO\s+MINIMO|MINIMO|DESDE|MAYOR(?:ES)?\s+O\s+IGUAL(?:ES)?\s+(?:A|QUE))"),
+    ("MENOR_IGUAL", r"(?:DE\s+)?(?:HASTA|COMO\s+MAXIMO|MAXIMO|MENOR(?:ES)?\s+O\s+IGUAL(?:ES)?\s+(?:A|QUE))"),
+    ("MAYOR", r"(?:SUPERIOR(?:ES)?\s+A|MAYOR(?:ES)?\s+(?:A|QUE|DE)|(?:DE\s+)?MAS\s+DE|SOBRE|ARRIBA\s+DE)"),
+    ("MENOR", r"(?:INFERIOR(?:ES)?\s+A|MENOR(?:ES)?\s+(?:A|QUE|DE)|(?:DE\s+)?MENOS\s+DE|BAJO|DEBAJO\s+DE)"),
+    ("IGUAL", r"(?:IGUAL(?:ES)?\s+A|DE|POR|EXACTAMENTE)"),
+)
+_ESTADO_ADICIONAL_Q = (
+    (ADICIONAL_CONFIRMADO, r"CONFIRMAD[OA]S?|REGISTRAD[OA]S?|CON\s+MONTO(?:\s+CONFIRMADO)?"),
+    (ADICIONAL_PENDIENTE, r"PENDIENTES?(?:\s+DE\s+(?:CONFIRMAR|CONFIRMACION|MONTO|REVISION))?|SIN\s+CONFIRMAR|POR\s+CONFIRMAR|"
+                          r"SIN\s+MONTO|NO\s+CONFIRMAD[OA]S?"),
+)
+_PATRON_CLAUSULA_ADICIONAL = re.compile(
+    r"(?:\b(?:CON|TIENEN?|TUVIERON|TUVO|LLEVAN?|LLEVARON|COBRARON|HAY)\s+)?(?:\b(?:UN|UNOS|EL|LOS|ALGUN|ALGUNOS)\s+)?"
+    r"(?:(?P<montos_antes>" + _MONTO_Q + r")\s+(?:DE\s+|EN\s+)?)?"
+    r"\b(?P<palabra>" + _ADICIONAL_Q + r")\b"
+    r"(?:\s+(?P<estado1>" + "|".join(e for _, e in _ESTADO_ADICIONAL_Q) + r"))?"
+    r"(?:\s+(?P<comparador>" + "|".join(f"(?P<c_{n}>{c})" for n, c in _COMPARADORES_Q) + r")?\s*(?P<montos>" + _MONTOS_Q + r"))?"
+    r"(?:\s+(?P<estado2>" + "|".join(e for _, e in _ESTADO_ADICIONAL_Q) + r"))?"
+    r"(?=\s|$|[?.,;!])"
+)
+_PATRON_AGRUPACION_INICIAL = re.compile(
+    r"^(?:CADA\s+)?(?:CHOFER(?:ES)?|CONDUCTOR(?:ES)?|CLIENTES?|EMPRESAS?|OBRAS?|DESTINOS?|COMUNAS?|MATERIAL(?:ES)?|"
+    r"TIPOS?\s+DE\s+CARGA|DIAS?|SEMANAS?|MES(?:ES)?)\b")
+_PATRON_MOTIVO = re.compile(r"^\s*(?:POR\s+CONCEPTO\s+DE|POR\s+MOTIVO\s+DE|DEBIDO\s+A|CORRESPONDIENTE\s+A|POR|DE)\s+(?P<frase>.+)$")
+# "retiro en X", "retiro de material(es) en X", "se cargó en X", "carga desde X".
+_PATRON_LUGAR = re.compile(
+    r"\b(?:CON\s+)?(?:(?:UN|EL|LOS)\s+)?(?:RETIR(?:O|OS|A|AN|AR|ARON|ADO|ADOS|ADA|ADAS)|CARG(?:A|AS|O|ARON|ADO|ADOS|ADA|ADAS|AR|UE|ARA))"
+    r"(?:\s+(?:DE|DEL)\s+(?:LOS\s+|LAS\s+)?(?:MATERIAL(?:ES)?|CARGA|FIERROS?|MERCADERIA))?"
+    r"\s+(?:EN|DESDE|DE)\s+(?P<lugar>.+)$")
+_PATRON_FUERA_DE_AZA = re.compile(r"\bA?FUERA\s+DE\s+AZA\b")
+_PATRON_MARCA_OBSERVACION = re.compile(
+    r"\b(?:CON\s+)?(?:(?:LA|LAS|UNA|ALGUNA)\s+)?(?:OBSERVACION(?:ES)?|NOTAS?|COMENTARIOS?|MOTIVOS?)\b"
+    r"(?:\s+(?:QUE\s+)?(?:DIGAN?|DICEN?|MENCIONEN?|MENCIONAN?|CONTENGAN?|HABLEN?|INDIQUEN?)\b)?(?:\s+(?:DE|SOBRE|CON))?"
+    r"|\bQUE\s+(?:MENCIONEN?|MENCIONAN?|DIGAN?|DICEN?)\b")
+_PATRON_SUMA_ADICIONAL = re.compile(
+    r"\b(?:SUMA|SUMAN|SUMAR|SUMADO|SUMAMOS|MONTO|MONTOS|IMPORTE|IMPORTES|DINERO|PLATA|PAGAR|PAGAMOS|PAGO|PAGOS|"
+    r"PAGADO|COBRAR|COBRO|COBRAMOS|COBRADO|VALOR|CUANTO)\b")
+# Palabras gramaticales: nunca son, por sí solas, un filtro ni un término.
+_PALABRAS_VACIAS = frozenset({
+    "A", "AL", "Y", "E", "O", "U", "EN", "QUE", "QUIEN", "QUIENES", "CUAL", "CUALES", "COMO", "DONDE", "CUANDO",
+    "SE", "ME", "MI", "MIS", "NOS", "LE", "LES", "LO", "SU", "SUS", "UN", "UNA", "UNOS", "UNAS", "ESE", "ESA",
+    "ESOS", "ESAS", "ESTOS", "ESTAS", "ESTO", "ESO", "AQUI", "HAY", "HUBO", "HABIA", "SON", "ERA", "ERAN", "ES",
+    "ESTA", "ESTAN", "ESTUVO", "TIENE", "TIENEN", "TUVO", "TUVIERON", "TENIDO", "LLEVA", "LLEVAN", "LLEVO",
+    "LLEVARON", "IR", "IRSE", "FUE", "FUERON", "VA", "VAN", "FUIMOS", "HICIMOS", "HECHO", "HECHOS", "HICE",
+    "REALIZADO", "REALIZADOS", "REALIZARON", "TODO", "TODOS", "TODAS", "TODA", "ALGUN", "ALGUNO", "ALGUNOS",
+    "ALGUNA", "ALGUNAS", "DAME", "DIME", "MUESTRAME", "MOSTRAR", "VER", "QUIERO", "SABER", "NECESITO",
+    "PUEDES", "FAVOR", "PORFAVOR", "ATLAS", "B1", "SOLO", "SOLAMENTE", "TAMBIEN", "YA", "AUN", "TODAVIA", "BIEN",
+    "HAN", "HA", "HEMOS", "HAYA", "HAYAN", "SEAN", "SEA", "CUANTOS", "CUANTAS", "CUANTO", "CUANTA", "TENEMOS",
+    "TENGO", "TIENES", "EXISTE", "EXISTEN", "QUEDAN", "QUEDA", "CORRESPONDE", "CORRESPONDEN", "ASOCIADOS",
+    "ASOCIADO", "ASOCIADAS", "ASOCIADA", "RESPECTO", "SEGUN", "ENTRE", "HACIA", "HASTA", "DESDE", "SIN", "CON",
+    "PARA", "POR", "DE", "DEL", "EL", "LA", "LOS", "LAS", "NO", "SI", "MAS", "MENOS", "OTRO", "OTROS", "OTRA",
+    "OTRAS", "CADA", "VECES", "VEZ", "NUMERO", "CANTIDAD", "TOTAL", "LISTADO", "LISTA", "RESUMEN", "INFORMACION",
+    "DATOS", "DETALLE", "REGISTRO", "REGISTROS", "REGISTRADO", "REGISTRADOS", "OPERACION", "ACTUAL", "AHORA",
+    "MES", "ANO", "ANOS", "DIAS", "SEMANA", "SEMANAS", "RETIRO", "RETIROS", "CARGA", "CARGAS", "OBSERVACION",
+    "OBSERVACIONES", "NOTA", "NOTAS", "MOTIVO", "MOTIVOS", "VIAJE", "VIAJES", "HACER", "HIZO", "HICIERON",
+})
+
+
+# Días de la semana: sin fecha no identifican un período; nunca se aplican
+# como término de observación ni se descartan.
+_DIAS_SEMANA = frozenset({"LUNES", "MARTES", "MIERCOLES", "JUEVES", "VIERNES", "SABADO", "DOMINGO"})
+# Palabras que nombran un campo o una agrupación ("por chofer"): dentro de un
+# motivo nunca se buscan como texto de observación.
+_PALABRAS_DE_CAMPO_O_AGRUPACION = frozenset(
+    p for frases in (*(f for _, f in _PALABRAS_AGRUPACION), tuple(_CAMPO_POR_SINONIMO))
+    for frase in frases for p in frase.split())
+
+
+def _comparador_y_montos(m: re.Match) -> tuple[str | None, tuple[int, ...] | None]:
+    """(comparador canónico, montos) de la cláusula; montos None si alguno
+    no es interpretable (nunca se descarta en silencio)."""
+    from atlas_core.consulta_adicionales import monto_a_entero
+    crudo = m.group("montos") or m.group("montos_antes")
+    if not crudo:
+        return None, ()
+    comparador = "IGUAL"
+    if m.group("comparador"):
+        comparador = next(n for n, _ in _COMPARADORES_Q if m.group(f"c_{n}"))
+    partes = [x for x in re.split(r"\s*(?:,|\bO\b|\bY\b)\s*", crudo) if x.strip()]
+    montos = tuple(monto_a_entero(x) for x in partes)
+    if any(v is None or v <= 0 for v in montos) or (len(montos) > 1 and comparador != "IGUAL"):
+        return comparador, None
+    return comparador, montos
+
+
+def extraer_condicion_observacion(normalizado: str) -> dict | None:
+    """Reconoce la cláusula de adicional y las menciones de observación
+    (lugar de retiro, "observación que diga X", "fuera de AZA"). Devuelve
+    None si el texto no habla de observaciones; si no, un dict con
+    `filtros`, `texto` (sin la cláusula consumida), `frases_termino`
+    (texto donde viven motivo/lugar) y la intención `suma`."""
+    texto = f" {normalizado} "
+    filtros: dict[str, str] = {}
+    frases: list[str] = []
+    avisos: list[str] = []
+    contexto = False
+    suma = False
+    clausula = None
+    for m in _PATRON_CLAUSULA_ADICIONAL.finditer(texto):
+        if m.group("palabra"):
+            clausula = m
+            break
+    if clausula is not None:
+        contexto = True
+        comparador, montos = _comparador_y_montos(clausula)
+        if montos is None:
+            avisos.append("MONTO_NO_INTERPRETABLE:" + (clausula.group("montos") or clausula.group("montos_antes") or "").strip())
+        elif montos:
+            if any(v < 1000 for v in montos):
+                avisos.append("AMBIGUO_MONTO:" + ",".join(str(v) for v in montos))
+            filtros["adicional"] = f"{comparador} " + ",".join(str(v) for v in montos)
+        else:
+            filtros["adicional"] = "CUALQUIERA"
+        for grupo in ("estado1", "estado2"):
+            valor = clausula.group(grupo)
+            if valor:
+                filtros["adicional_estado"] = next(
+                    estado for estado, patron in _ESTADO_ADICIONAL_Q if re.fullmatch(patron, valor))
+        resto = texto[clausula.end():]
+        motivo = _PATRON_MOTIVO.match(resto)
+        if motivo and _PATRON_AGRUPACION_INICIAL.match(motivo.group("frase")):
+            motivo = None  # "adicionales por chofer" agrupa, no es un motivo
+        if motivo:
+            frases.append(motivo.group("frase"))
+        texto = texto[:clausula.start()] + " " + texto[clausula.end():]
+        # Otras menciones sueltas de la palabra (p. ej. "suma de adicionales
+        # de los viajes con adicional pendiente") no agregan otro filtro.
+        texto = re.sub(r"\b" + _ADICIONAL_Q + r"\b", " ", texto)
+        if _PATRON_SUMA_ADICIONAL.search(texto) or (
+                re.search(r"\bTOTAL(?:ES)?\b", texto) and not re.search(r"\bVIAJES?\b|\bCUANT[OA]S\b", texto)):
+            suma = True
+            texto = _PATRON_SUMA_ADICIONAL.sub(" ", texto)
+    if _PATRON_FUERA_DE_AZA.search(texto):
+        contexto = True
+        filtros["observacion"] = "FUERA DE AZA"
+        texto = _PATRON_FUERA_DE_AZA.sub(" ", texto)
+    lugar = _PATRON_LUGAR.search(texto)
+    if lugar:
+        contexto = True
+        frases.append(lugar.group("lugar"))
+        texto = texto[:lugar.start()] + " " + lugar.group("lugar") + " "
+    marca = _PATRON_MARCA_OBSERVACION.search(texto)
+    if marca:
+        contexto = True
+        frases.append(texto[marca.end():])
+        texto = texto[:marca.start()] + " " + texto[marca.end():]
+    if not contexto:
+        return None
+    return {"filtros": filtros, "texto": " ".join(texto.split()), "frases_termino": frases,
+            "suma": suma, "avisos": avisos}
+
+
+def _residuo_sin_explicar(
+    texto_operativo: str, texto_original: str, palabras_reclamadas: set[str], catalogos: CatalogosConsulta,
+    frases_termino: list[str], contexto_observacion: bool,
+) -> tuple[list[str], str | None, list[str], list[str]]:
+    """Palabras que ningún filtro explicó. Devuelve
+    `(terminos_observacion, destino, sin_explicar, sin_explicar_capitalizadas)`.
+
+    Orden: vocabulario de la pregunta y palabras ya reclamadas por una
+    entidad -> dirección de entrega real -> observaciones registradas ->
+    sin explicar (nunca se descartan: el llamador no responde con el total)."""
+    limpio = texto_operativo
+    for patron in (_PATRON_RANGO_FECHAS, _PATRON_FECHA_PUNTUAL, _PATRON_MES, _PATRON_ULTIMOS_DIAS, _PATRON_TOP_N,
+                   _PATRON_RUT_CON_DV, _PATRON_RUT_SIN_DV, _PATRON_GUIA_NUMERO, _PATRON_TRANSPORTE_NUMERO):
+        limpio = patron.sub(" ", limpio)
+    capitalizadas = {normalizar_texto_atlas(p): p for p in _PATRON_PALABRA_CAPITALIZADA.findall(texto_original)[1:]
+                     if p[:1].isupper()}
+    en_frase = {p for f in frases_termino for p in _PATRON_PALABRA.findall(f)}
+    candidatas: list[str] = []
+    for palabra in _PATRON_PALABRA.findall(limpio):
+        if palabra in palabras_reclamadas or palabra in _VOCABULARIO_CONOCIDO or palabra in _PALABRAS_VACIAS:
+            if not (palabra in en_frase and palabra not in _PALABRAS_VACIAS and palabra not in palabras_reclamadas
+                    and palabra not in _VOCABULARIO_PERIODO and palabra not in _PALABRAS_DE_CAMPO_O_AGRUPACION):
+                continue
+        if palabra.isdigit() and len(palabra) < 4:
+            continue
+        if len(palabra) < 3 and not palabra.isdigit():
+            continue
+        if palabra not in candidatas:
+            candidatas.append(palabra)
+    terminos: list[str] = []
+    sin_explicar: list[str] = []
+    destino: str | None = None
+    fuera_de_frase = [p for p in candidatas if p not in en_frase and not p.isdigit()]
+    if fuera_de_frase and catalogos.destinos:
+        frase = " ".join(fuera_de_frase)
+        if any(frase in normalizar_texto_atlas(d) for d in catalogos.destinos):
+            destino = frase
+            candidatas = [p for p in candidatas if p not in fuera_de_frase]
+    for palabra in candidatas:
+        observable = (not palabra.isdigit() and palabra not in _DIAS_SEMANA
+                      and palabra_en_observacion(palabra, catalogos.observaciones)
+                      and (contexto_observacion or palabra in en_frase or palabra in capitalizadas or len(palabra) >= 5))
+        (terminos if observable else sin_explicar).append(palabra)
+    capitalizadas_sin_explicar = [capitalizadas[p] for p in sin_explicar if p in capitalizadas]
+    return terminos, destino, sin_explicar, capitalizadas_sin_explicar
+
+
 def interpretar_consulta_determinista(
     texto: str, *, catalogos: CatalogosConsulta, contexto_previo: ConsultaAtlas | None = None,
 ) -> tuple[ConsultaAtlas | None, tuple[str, ...]]:
@@ -966,6 +1207,18 @@ def interpretar_consulta_determinista(
             metrica=METRICA_LISTAR_VIAJES, filtros=dict(contexto_previo.filtros),
             dominio=contexto_previo.dominio,
         ), tuple(avisos)
+
+    # Adicionales y observaciones operacionales: la cláusula se consume
+    # aquí y el resto de la pregunta sigue el MISMO flujo de filtros de
+    # viajes (chofer, fecha, cliente, obra, destino...). Sus palabras
+    # ("pendiente", "doble vuelta", "estadía" como motivo) ya no pueden
+    # desviar la pregunta a otro dominio.
+    observacion = extraer_condicion_observacion(normalizado)
+    if observacion is not None:
+        avisos_observacion = observacion["avisos"]
+        if any(a.startswith(("MONTO_NO_INTERPRETABLE:", "AMBIGUO_MONTO:")) for a in avisos_observacion):
+            return None, tuple(avisos_observacion)
+        return _interpretar_viajes(texto, observacion["texto"], catalogos, avisos, observacion=observacion)
 
     # Antes de la métrica genérica de patentes/vehículos: aquí la dimensión
     # es la asociación, no el inventario de vehículos ni los viajes.
@@ -1234,6 +1487,22 @@ def interpretar_consulta_determinista(
                 break
         return ConsultaAtlas(metrica=METRICA_COUNT_DISTINCT_CHOFER, filtros=filtros_chofer), tuple(avisos)
 
+    return _interpretar_viajes(texto, normalizado, catalogos, avisos)
+
+
+def _interpretar_viajes(
+    texto: str, normalizado: str, catalogos: CatalogosConsulta, avisos: list[str], *, observacion: dict | None = None,
+) -> tuple[ConsultaAtlas | None, tuple[str, ...]]:
+    """Flujo genérico del dominio VIAJES (filtros de entidad, período,
+    estado, identificadores, agrupación, ranking) -- también para las
+    preguntas sobre adicionales/observaciones, que sólo agregan sus filtros."""
+    presencia, normalizado_operativo = _extraer_presencia(normalizado)
+    if observacion is None:
+        pass
+    elif (FILTRO_AUSENTE_ALGUNO in presencia and _PATRON_REVISION.search(normalizado)) or (
+        not presencia and _PATRON_PENDIENTE_AMBIGUO.search(normalizado_operativo)
+    ):
+        return None, (*avisos, "AMBIGUO_FALTANTES_REVISIONES")
     # Desde aquí la métrica, la agrupación y las entidades se leen sobre el
     # texto SIN las menciones de presencia/ausencia ya convertidas en filtro.
     metrica = METRICA_COUNT_VIAJES
@@ -1258,10 +1527,10 @@ def interpretar_consulta_determinista(
         # "viaje(s)" -- cualquier otro "cuántos X" sin evidencia de
         # métrica se cede a B1 (o "no interpretable" sin B1 configurado),
         # nunca se adivina.
-        if relacion is None and not any(
+        if relacion is None and observacion is None and not any(
             re.search(rf"\b{re.escape(p)}\b", normalizado_operativo) for p in ("VIAJE", "VIAJES")
         ):
-            return None, avisos  # ninguna señal de métrica reconocible -- intentar B1
+            return None, tuple(avisos)  # ninguna señal de métrica reconocible -- intentar B1
 
     filtros: dict[str, str] = dict(presencia)
     # Período con nombre, últimos N días, rango o fecha puntual.
@@ -1384,9 +1653,34 @@ def interpretar_consulta_determinista(
     # nunca se ignora en silencio y se responde sobre TODOS los viajes
     # como si nadie se hubiera mencionado. Se cede a B1 (o se reporta
     # "no interpretable") en vez de adivinar.
-    sin_explicar = _palabras_capitalizadas_sin_explicar(texto, palabras_reclamadas)
+    # "Filtro no resuelto ≠ quitar filtro": cada palabra con contenido debe
+    # quedar explicada (entidad, dirección de entrega, observación
+    # registrada) -- nunca se responde sobre todos los viajes ignorándola.
+    texto_residuo = normalizado_operativo
+    if "patente" in filtros:
+        texto_residuo = re.sub(rf"\b{re.escape(normalizar_texto_atlas(filtros['patente']))}\b", " ", texto_residuo)
+    terminos, destino_residuo, sin_explicar, capitalizadas = _residuo_sin_explicar(
+        texto_residuo, texto, palabras_reclamadas, catalogos,
+        observacion["frases_termino"] if observacion else [], observacion is not None,
+    )
+    if capitalizadas:
+        return None, (*avisos, "SIN_COINCIDENCIA:" + ", ".join(capitalizadas))
     if sin_explicar:
-        return None, (*avisos, "SIN_COINCIDENCIA:" + ", ".join(sin_explicar))
+        return None, (*avisos, "NO_RECONOCIDO:" + ", ".join(p.lower() for p in sin_explicar))
+    if destino_residuo and "destino" not in filtros:
+        filtros["destino"] = destino_residuo
+    if observacion is not None:
+        filtros.update(observacion["filtros"])
+    if terminos:
+        previos = [t for t in str(filtros.get("observacion", "")).split("|") if t]
+        filtros["observacion"] = "|".join([*previos, *terminos])
+    if observacion is not None:
+        if observacion["suma"]:
+            filtros.setdefault("adicional", "CUALQUIERA")
+            if metrica in (METRICA_COUNT_VIAJES, METRICA_LISTAR_VIAJES):
+                metrica = METRICA_SUM_ADICIONAL
+        elif metrica == METRICA_COUNT_VIAJES and not re.search(r"\bCUANT[OA]S\b", normalizado_operativo):
+            metrica = METRICA_LISTAR_VIAJES
 
     # La entidad pedida decide la forma: "qué guías" lista guías (sin
     # duplicar las de un mismo viaje), "qué viajes" lista viajes.
@@ -1418,6 +1712,10 @@ def validar_compatibilidad_semantica(pregunta: str, consulta: ConsultaAtlas) -> 
     un motivo no-`None` (Bloque 7: "cambiar el criterio de cuándo entra
     B1"), nunca ejecuta la consulta rechazada tal cual."""
     normalizado = normalizar_texto_atlas(pregunta)
+    if consulta.dominio == DOMINIO_VIAJES and any(f in consulta.filtros for f in FILTROS_OBSERVACION):
+        # La cláusula de adicional/observación ya consumió su vocabulario
+        # ("pendiente", "doble vuelta", "estadía" como motivo).
+        return None
 
     def _menciona(palabras: tuple[str, ...], texto: str | None = None) -> bool:
         return any(re.search(rf"\b{re.escape(p)}\b", normalizado if texto is None else texto) for p in palabras)
@@ -1503,3 +1801,60 @@ def validar_compatibilidad_semantica(pregunta: str, consulta: ConsultaAtlas) -> 
     ):
         return "la pregunta pide un estado de gestión (aprobada/rechazada/en espera), pero la consulta no lo usa"
     return None
+
+
+# --- Vocabulario que el intérprete YA sabe leer (palabras de pregunta,
+# métrica, período, campos, estados, eventos, agrupación). Una palabra
+# fuera de este vocabulario, sin entidad, dirección ni observación que la
+# explique, nunca se descarta en silencio (ver `_residuo_sin_explicar`). ---
+def _palabras_de_frases(*grupos) -> set[str]:
+    palabras: set[str] = set()
+    for grupo in grupos:
+        for elemento in grupo:
+            if isinstance(elemento, tuple):
+                palabras |= _palabras_de_frases(elemento)
+            else:
+                palabras.update(_PATRON_PALABRA.findall(str(elemento)))
+    return palabras
+
+
+_VOCABULARIO_PERIODO = frozenset(_palabras_de_frases(*(f for _, f in _PALABRAS_PERIODO)) | {
+    "ULTIMOS", "ULTIMAS", "ULTIMO", "ULTIMA", "DIA", "DIAS", "ENTRE", "DESDE", "HASTA", "AL", "DEL",
+})
+_VOCABULARIO_CONOCIDO = frozenset(
+    _PALABRAS_ESTRUCTURA_PREGUNTA
+    | _VOCABULARIO_PERIODO
+    | _palabras_de_frases(
+        _PALABRAS_PESO, _PALABRAS_KM, _PALABRAS_TIEMPO, _PALABRAS_UNIDADES_FISICAS,
+        tuple(_SUSTANTIVO_CUANTOS_A_RELACION), *(p for _, p in _PALABRAS_METRICA), tuple(_PALABRAS_SEGUIMIENTO_LISTAR),
+        _PALABRAS_INCIDENCIA_DOCUMENTAL, _PALABRAS_INCIDENCIA_GENERICA, _PALABRAS_PENDIENTE_TECNICO,
+        _PALABRAS_CHOFER_PLURAL, *(p for _, p in _PALABRAS_EVENTO), *(p for _, p in _PALABRAS_EVENTO_AGRUPACION),
+        *(p for _, p in _PALABRAS_ESTADO_GESTION), _PALABRAS_INGESTA_KW, tuple(_CAMPO_POR_SINONIMO),
+        *(p for _, p in _PALABRAS_ESTADO_VIAJE), *(p for _, p in _PALABRAS_AGRUPACION),
+        _VOCABULARIO_GENERAL_TOLERANTE, _MARCADORES_TOLERANTES, tuple(_MARCADORES_ANTES_DE_CAMPO),
+        tuple(_PALABRAS_INTERMEDIAS), tuple(_PALABRAS_IGNORADAS_ENTIDAD),
+    )
+    | {
+        # Ranking, relación, identificadores y verbos operacionales que las
+        # reglas de arriba ya interpretan por patrón.
+        "TOP", "MAS", "MAYOR", "MENOS", "MENOR", "MINIMO", "MINIMA", "MAXIMO", "MAXIMA", "QUIEN", "QUIENES",
+        "APARECE", "APARECEN", "VINCULADA", "VINCULADO", "VINCULADAS", "VINCULADOS", "USADO", "UTILIZADO",
+        "USO", "UTILIZO", "USARON", "TRANSPORTE", "TRANSPORTES", "RUT", "NRO", "GUIA", "GUIAS", "NUMERO",
+        "HIZO", "HICIERON", "TRABAJO", "TRABAJARON", "MOVIO", "MOVIERON", "MOVIMOS", "MOVIDO", "MOVIDAS",
+        "MOVIDOS", "TRANSPORTO", "TRANSPORTARON", "TRANSPORTADO", "TRANSPORTADOS", "LLEVO", "LLEVARON",
+        "ENTREGO", "ENTREGARON", "ENTREGADO", "ENTREGADOS", "ENTREGAS", "DESPACHO", "DESPACHOS", "DESPACHADO",
+        "DESPACHADOS", "DESPACHARON", "SALIO", "SALIERON", "CARGO", "CARGARON", "VIAJO", "VIAJARON", "REALIZO",
+        "TERMINADOS", "COMPLETOS", "INCOMPLETOS", "REVISION", "REVISIONES", "REVISAR", "REVISADOS", "REVISADAS",
+        "PENDIENTE", "PENDIENTES", "CONFIRMAR", "CONFIRMADA", "CONFIRMADAS", "ESTADO", "ESTADOS", "HOY", "AYER",
+        "CORRECTAMENTE", "CORRECTOS", "CORRECTAS", "ACTUALMENTE", "SEGUN", "VIAJE", "VIAJES", "NOMBRE",
+        "OPERACIONAL", "OPERACIONALES", "TECNICO", "TECNICOS", "PERSONAS", "GENTE", "CAMION", "CAMIONES",
+        # Verbos y adjetivos con que se pregunta por viajes, km, peso o tiempo.
+        "RECORRIO", "RECORRIERON", "RECORRIMOS", "RECORRIDA", "RECORRIDAS", "HICIMOS", "TRABAJAMOS",
+        "TRANSPORTAMOS", "CARGAMOS", "ENTREGAMOS", "DESPACHAMOS", "LLEVAMOS", "MANEJO", "MANEJARON",
+        "CONDUJO", "CONDUJERON", "ATENDIO", "ATENDIERON", "VISITO", "VISITARON", "FUIMOS", "TARDO",
+        "TARDARON", "DEMORO", "DEMORARON", "DEMORA", "CALCULADO", "CALCULADOS", "CALCULADA", "CALCULADAS",
+        "REALES", "REAL", "ACUMULADO", "ACUMULADOS", "ACUMULADA", "SUMA", "SUMAN", "SUMADO", "HECHAS",
+        "REALIZADAS", "REGISTRADA", "EXISTENTES", "DISTINTOS", "DISTINTAS", "DIFERENTES", "UNICOS",
+        "UNICAS", "TOTALMENTE", "CADA", "UNO", "UNA", "DOS", "TRES", "CUATRO", "CINCO",
+    }
+)

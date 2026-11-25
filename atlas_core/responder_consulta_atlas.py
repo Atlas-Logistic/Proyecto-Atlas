@@ -11,6 +11,7 @@ acoplar renderer directamente a CSV con lógica duplicada")."""
 from __future__ import annotations
 
 import logging
+import re
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -45,6 +46,10 @@ from atlas_core.consultas_atlas import (
     ejecutar_consulta_incidencias_documentales,
     validar_consulta,
     validar_consistencia_respuesta,
+)
+from atlas_core.consultas_atlas import (
+    ADICIONAL_CONFIRMADO, ADICIONAL_PENDIENTE, FILTROS_OBSERVACION, METRICA_SUM_ADICIONAL,
+    montos_adicional_confirmados, parsear_filtro_adicional,
 )
 from atlas_core.incidencias_documentales import AlmacenIncidenciasDocumentales
 from atlas_core.interpretador_consultas import (
@@ -465,6 +470,119 @@ def _cargar_eventos(raiz_atlas: str | Path | None, viajes: list[dict[str, str]])
     return salida
 
 
+def _cargar_observaciones(raiz_atlas, viajes):
+    """(filas enriquecidas | None, diagnóstico, mensaje de error)."""
+    from atlas_core.consulta_adicionales import FuenteObservacionesNoDisponible, indexar_observaciones, leer_eventos
+    try:
+        filas, diagnostico = indexar_observaciones(viajes, leer_eventos(raiz_atlas))
+    except FuenteObservacionesNoDisponible as error:
+        return None, {}, str(error)
+    return filas, diagnostico, ""
+
+
+def _pesos(valor: float | int) -> str:
+    return "$" + f"{int(round(valor)):,}".replace(",", ".")
+
+
+def _descripcion_adicional(filtros) -> str:
+    estado = filtros.get("adicional_estado")
+    base = {ADICIONAL_CONFIRMADO: "con adicional confirmado", ADICIONAL_PENDIENTE: "con adicional pendiente de confirmar"}.get(
+        estado, "con adicional")
+    if "adicional" not in filtros:
+        return base if estado else ""
+    comparador, montos = parsear_filtro_adicional(filtros["adicional"])
+    if comparador is None:
+        return base
+    etiqueta = {"IGUAL": "de", "MAYOR": "superior a", "MENOR": "inferior a", "MAYOR_IGUAL": "de al menos",
+                "MENOR_IGUAL": "de hasta"}[comparador]
+    if estado is None:
+        base = "con adicional confirmado"
+    return f"{base} {etiqueta} {' o '.join(_pesos(m) for m in montos)}"
+
+
+def _guia_legible(viaje) -> str:
+    guias = str(viaje.get("numeros_guia") or "").replace(" | ", ", ").strip() or "sin guía"
+    fecha = str(viaje.get("fecha") or "").strip()
+    chofer = str(viaje.get("choferes") or "").strip()
+    detalle = ", ".join(x for x in (fecha, chofer) if x)
+    declarado = str(viaje.get("_adicional_declarado") or "")
+    if declarado.isdigit():
+        detalle = f"{detalle}, declarado {_pesos(int(declarado))}" if detalle else f"declarado {_pesos(int(declarado))}"
+    return f"guía {guias}" + (f" ({detalle})" if detalle else "")
+
+
+def _texto_observaciones(resultado, filas_observacion, diagnostico) -> str:
+    """Respuesta para consultas con adicionales u observaciones: separa
+    confirmados de pendientes, nunca suma un pendiente y, si se filtró por
+    monto, informa los pendientes que podrían corresponder."""
+    from dataclasses import replace as _replace
+    consulta = resultado.consulta_interpretada
+    filtros = dict(consulta.filtros)
+    otros = {k: v for k, v in filtros.items() if k not in FILTROS_OBSERVACION}
+    contexto = _filtros_legibles(ConsultaAtlas(metrica=consulta.metrica, filtros=otros))
+    terminos = [t for t in str(filtros.get("observacion") or "").split("|") if t]
+    partes_criterio = [x for x in (
+        _descripcion_adicional(filtros),
+        ("cuyas observaciones mencionan " + " y ".join(f"«{t}»" for t in terminos)) if terminos else "",
+        contexto,
+    ) if x]
+    criterio = ", ".join(partes_criterio)
+    viajes = list(resultado.viajes_soporte)
+    if consulta.agrupacion is not None:
+        filas = resultado.resultado
+        if not filas:
+            return f"No encontré viajes {criterio}."
+        unidad = _pesos if consulta.metrica == METRICA_SUM_ADICIONAL else (lambda v: f"{int(v)} viaje{'s' if v != 1 else ''}")
+        detalle = "; ".join(f"{f['grupo']}: {unidad(f['valor'])}" for f in filas[:10])
+        return f"Resultados por {_NOMBRE_AGRUPACION_LEGIBLE.get(consulta.agrupacion, consulta.agrupacion)} ({criterio}): {detalle}."
+    confirmados = [v for v in viajes if v.get("_adicional_estado") == ADICIONAL_CONFIRMADO]
+    pendientes = [v for v in viajes if v.get("_adicional_estado") == ADICIONAL_PENDIENTE]
+    n = resultado.total_coincidencias
+    if consulta.metrica == METRICA_SUM_ADICIONAL:
+        texto = (f"Total de adicionales confirmados: {_pesos(resultado.resultado)} en {len(confirmados)} "
+                 f"viaje{'s' if len(confirmados) != 1 else ''} ({criterio}).")
+    elif n == 0:
+        texto = f"No encontré viajes {criterio}."
+    else:
+        verbo = "Encontré " if consulta.metrica == METRICA_LISTAR_VIAJES else ""
+        texto = f"{verbo}{n} viaje{'s' if n != 1 else ''} {criterio}."
+    if "adicional" in filtros and n and consulta.metrica != METRICA_SUM_ADICIONAL and (confirmados or pendientes):
+        suma = sum(sum(montos_adicional_confirmados(v)) for v in confirmados)
+        texto += (f" Con monto confirmado: {len(confirmados)}"
+                  + (f" (total {_pesos(suma)})" if confirmados else "")
+                  + f"; pendientes de confirmar monto: {len(pendientes)}.")
+        if pendientes:
+            texto += " Pendientes: " + "; ".join(_guia_legible(v) for v in pendientes[:10]) + (
+                " …" if len(pendientes) > 10 else "") + "."
+    # Con filtro de monto o de confirmados (o una suma), los pendientes que
+    # cumplen todo lo demás podrían corresponder: se informan aparte.
+    comparador = parsear_filtro_adicional(filtros["adicional"])[0] if "adicional" in filtros else None
+    if filas_observacion is not None and "adicional" in filtros and filtros.get("adicional_estado") != ADICIONAL_PENDIENTE and (
+            comparador is not None or filtros.get("adicional_estado") == ADICIONAL_CONFIRMADO
+            or consulta.metrica == METRICA_SUM_ADICIONAL):
+        sin_monto = dict(filtros, adicional="CUALQUIERA", adicional_estado=ADICIONAL_PENDIENTE)
+        candidatos = ejecutar_consulta_atlas(
+            _replace(consulta, metrica=METRICA_LISTAR_VIAJES, filtros=sin_monto, agrupacion=None, limite=None),
+            filas_observacion).viajes_soporte
+        if candidatos:
+            texto += (f" Además, {len(candidatos)} viaje{'s' if len(candidatos) != 1 else ''} "
+                      f"{'tiene' if len(candidatos) == 1 else 'tienen'} un adicional pendiente de confirmar monto "
+                      "que no se incluye: " + "; ".join(_guia_legible(v) for v in candidatos[:10])
+                      + (" …" if len(candidatos) > 10 else "") + ".")
+    con_otras = [v for v in confirmados if str(v.get("_adicional_otras_pendientes") or "").isdigit()]
+    if con_otras and "adicional" in filtros:
+        texto += (f" {len(con_otras)} viaje{'s' if len(con_otras) != 1 else ''} con monto confirmado "
+                  f"{'tiene' if len(con_otras) == 1 else 'tienen'} además otra observación de adicional sin monto "
+                  "confirmado (no sumada): " + "; ".join(_guia_legible(v) for v in con_otras[:10]) + ".")
+    sin_vinculo = int((diagnostico or {}).get("observaciones_adicional_sin_vinculo") or 0)
+    if sin_vinculo and "adicional" in filtros:
+        texto += (f" Atención: {sin_vinculo} observaci{'ón' if sin_vinculo == 1 else 'ones'} con adicional "
+                  "no se pudo vincular a un viaje del reporte y no se incluye.")
+    if (diagnostico or {}).get("eventos") == 0:
+        texto += " El registro de observaciones está vacío; no demuestra que no existan adicionales fuera de esta fuente."
+    return texto
+
+
 def responder_consulta_atlas(
     pregunta: str, *, ruta_viajes: str | Path, ruta_incidencias: str | Path | None = None,
     raiz_atlas: str | Path | None = None,
@@ -507,11 +625,6 @@ def responder_consulta_atlas(
             and re.search(r"\b(?:SIN|NO TIENEN?|FALTA(?:N)?)\s+(?:LA\s+)?DIRECCION(?: DE ENTREGA)?\b", texto_seguro)):
         return RespuestaConsultaAtlas(estado=ESTADO_NO_INTERPRETABLE,
             texto_respuesta="No puedo contar guias sin direccion de entrega: el reporte disponible contiene la direccion consolidada por viaje, no por guia.")
-    if consulta_anterior and "adicional" in consulta_anterior.filtros:
-        import re
-        if re.fullmatch(r"\s*(?:muestramelos|muestra(?:melos)?|listalos|listar|cuales son)\s*[?]?\s*", pregunta.lower()):
-            return RespuestaConsultaAtlas(estado=ESTADO_NO_INTERPRETABLE,
-                texto_respuesta="Para listar esos viajes, repite la consulta de adicional con su monto.")
     from atlas_core.consulta_pendientes_b1 import consultar_pendientes_tecnicos
     pendientes = consultar_pendientes_tecnicos(pregunta, viajes, raiz_atlas)
     if pendientes is not None:
@@ -520,19 +633,34 @@ def responder_consulta_atlas(
         resultado = pendientes[1]
         return RespuestaConsultaAtlas(estado=ESTADO_OK if resultado.total_coincidencias else ESTADO_SIN_RESULTADOS,
                                       texto_respuesta=pendientes[2], resultado=resultado)
-    from atlas_core.consulta_adicionales import consultar_adicionales
-    adicionales = consultar_adicionales(pregunta, viajes, raiz_atlas)
-    if adicionales is not None:
-        if adicionales[0] == "limitacion":
-            return RespuestaConsultaAtlas(estado=ESTADO_NO_INTERPRETABLE, texto_respuesta=adicionales[1])
-        resultado = adicionales[1]
-        return RespuestaConsultaAtlas(estado=ESTADO_OK if resultado.total_coincidencias else ESTADO_SIN_RESULTADOS,
-                                      texto_respuesta=adicionales[2], resultado=resultado)
-    catalogos = construir_catalogos_consulta(viajes)
+    # Observaciones operacionales (Mobile y correcciones humanas) por viaje:
+    # alimentan el vocabulario del intérprete y, sólo si la consulta las
+    # usa, las filas que filtra el ejecutor. Una fuente ilegible no impide
+    # otras consultas; sí impide responder una que la necesita.
+    filas_observacion, diagnostico_observacion, error_observacion = _cargar_observaciones(raiz_atlas, viajes)
+    catalogos = construir_catalogos_consulta(filas_observacion if filas_observacion is not None else viajes)
 
     consulta, avisos = interpretar_consulta_determinista(
         pregunta, catalogos=catalogos, contexto_previo=consulta_anterior,
     )
+    monto_ambiguo = next((a for a in avisos if a.startswith("AMBIGUO_MONTO:")), None)
+    if monto_ambiguo is not None:
+        valores = monto_ambiguo.split(":", 1)[1].split(",")
+        opcion = re.sub(r"\b(" + "|".join(re.escape(v) for v in valores) + r")\b(?!\s*(?:mil|lucas|\.))",
+                        lambda m: f"{int(m.group(1)) * 1000:,}".replace(",", "."), pregunta, flags=re.IGNORECASE)
+        return RespuestaConsultaAtlas(
+            estado=ESTADO_AMBIGUA,
+            texto_respuesta=(f"¿El monto {' o '.join('$' + v for v in valores)} es en miles "
+                             f"(por ejemplo ${int(valores[0]) * 1000:,})? Confírmalo para no filtrar un importe equivocado.".replace(",", ".")),
+            opciones_aclaracion=(opcion,) if opcion != pregunta else (),
+        )
+    monto_invalido = next((a for a in avisos if a.startswith("MONTO_NO_INTERPRETABLE:")), None)
+    if monto_invalido is not None:
+        return RespuestaConsultaAtlas(
+            estado=ESTADO_NO_INTERPRETABLE,
+            texto_respuesta=(f"No pude interpretar el monto «{monto_invalido.split(':', 1)[1].lower()}» del adicional; "
+                             "indica un importe como 30.000 o 30 mil (varios montos sólo con «de X o Y»)."),
+        )
 
     if consulta is not None and (consulta.filtros.get("ausente") or consulta.filtros.get("ausente_alguno")):
         from atlas_core.consultas_atlas import _COLUMNA_PRESENCIA, _CAMPO_DOCUMENTO, _documentos_viaje
@@ -655,7 +783,19 @@ def responder_consulta_atlas(
                 nombres = sin_coincidencia.split(":", 1)[1]
                 return RespuestaConsultaAtlas(
                     estado=ESTADO_NO_INTERPRETABLE,
-                    texto_respuesta=f"No encontré a «{nombres}» entre los choferes, clientes u obras de la operación actual.",
+                    texto_respuesta=(f"No encontré a «{nombres}» entre los choferes, clientes u obras de la operación actual"
+                                     f"{'' if error_observacion else ' ni en las observaciones registradas'}."),
+                )
+            no_reconocido = next((a for a in avisos if a.startswith("NO_RECONOCIDO:")), None)
+            if no_reconocido is not None:
+                palabras = no_reconocido.split(":", 1)[1]
+                return RespuestaConsultaAtlas(
+                    estado=ESTADO_NO_INTERPRETABLE,
+                    texto_respuesta=(
+                        f"No pude aplicar «{palabras}» como filtro: no coincide con choferes, clientes, obras, "
+                        "destinos, fechas ni con las observaciones registradas. No respondo con el total de viajes; "
+                        "reformula ese criterio (por ejemplo «viajes con observación que diga …» o el nombre del chofer)."
+                    ),
                 )
             return RespuestaConsultaAtlas(
                 estado=ESTADO_NO_INTERPRETABLE,
@@ -703,7 +843,10 @@ def responder_consulta_atlas(
     elif consulta.dominio == DOMINIO_ASOCIACIONES_PATENTE_CHOFER:
         resultado = ejecutar_consulta_asociaciones_patente_chofer(consulta, viajes)
     else:
-        resultado = ejecutar_consulta_atlas(consulta, viajes)
+        usa_observaciones = any(f in consulta.filtros for f in FILTROS_OBSERVACION)
+        if usa_observaciones and filas_observacion is None:
+            return RespuestaConsultaAtlas(estado=ESTADO_FUENTE_NO_DISPONIBLE, texto_respuesta=error_observacion)
+        resultado = ejecutar_consulta_atlas(consulta, filas_observacion if usa_observaciones else viajes)
         if consulta.filtros.get("ausente"):
             # Detalle por guía de lo que falta; no altera coincidencias ni cifras.
             from dataclasses import replace
@@ -767,6 +910,8 @@ def responder_consulta_atlas(
         texto = f"No tengo registrada la cantidad de {palabra} por unidad. Sí puedo verificar el peso: {texto}"
     if consulta.filtros.get("ausente_alguno"):
         texto = f"{texto} {_resumen_faltantes_generales(resultado)}"
+    if consulta.dominio == DOMINIO_VIAJES and any(f in consulta.filtros for f in FILTROS_OBSERVACION):
+        texto = _texto_observaciones(resultado, filas_observacion, diagnostico_observacion)
     estado = ESTADO_SIN_RESULTADOS if resultado.total_coincidencias == 0 else ESTADO_OK
     _registro.debug("Consulta ejecutada: métrica=%s dominio=%s resultado=%r", consulta.metrica, consulta.dominio, resultado.resultado)
     return RespuestaConsultaAtlas(estado=estado, texto_respuesta=texto, resultado=resultado)
