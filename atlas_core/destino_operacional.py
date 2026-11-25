@@ -213,11 +213,43 @@ def proyectar_destino(fila: Mapping[str, object], ledger: Mapping[str, object]) 
     return salida
 
 
+METODO_UBICACION_CATALOGO = "IDENTIDAD_DESTINO_CONFIRMADO_CATALOGO"
+
+
+def ubicacion_destino_catalogo(direccion: str, comuna: str, *, carpeta_catalogos) -> dict | None:
+    """Ubicación del destino CONFIRMADO del catálogo que es, sin ambigüedad,
+    esta dirección confirmada por un humano
+    (`IndiceIdentidadDestinos.destino_con_coordenadas`): sus coordenadas
+    confirmadas y la región/códigos oficiales de la comuna confirmada.
+    None si no hay identidad única con coordenadas coherentes."""
+    from atlas_core.geografia import EstadoNormalizacion, cargar_geografia
+    from atlas_core.identidad_destino import IndiceIdentidadDestinos
+
+    destino = IndiceIdentidadDestinos.desde_carpeta(carpeta_catalogos).destino_con_coordenadas(direccion, comuna)
+    if destino is None:
+        return None
+    ubicacion = {"latitud_entrega": str(float(destino.latitud)), "longitud_entrega": str(float(destino.longitud)),
+                 "region_entrega": "", "codigo_pais": "", "codigo_unidad": "", "codigo_contexto": ""}
+    geografia = cargar_geografia("CL")
+    normalizada = geografia.normalizar(comuna)
+    if normalizada.estado == EstadoNormalizacion.EXACTA and normalizada.unidad is not None:
+        contexto = geografia.parametros_geocodificacion(normalizada.unidad)
+        ubicacion.update(region_entrega=contexto.nombre_contexto, codigo_pais=contexto.codigo_pais,
+                         codigo_unidad=contexto.codigo_unidad, codigo_contexto=contexto.codigo_contexto)
+    return {**ubicacion, "destino_id": str(destino.destino_id), "metodo_ubicacion": METODO_UBICACION_CATALOGO}
+
+
 def calcular_ruta_operacional(fila: Mapping[str, object], direccion: str, comuna: str, *,
                               carpeta_catalogos, proveedor_rutas=None, proveedor_rutas_fallback=None) -> dict:
     """Ruta planta -> destino confirmado, sin leer el documento ni escribir
     el dataset. Sólo es válida si se calcula y la comuna resuelta coincide
-    con la confirmada; si no, queda pendiente con su motivo."""
+    con la confirmada; si no, queda pendiente con su motivo.
+
+    Si el catálogo ya conoce ese destino con coordenadas confirmadas
+    (`ubicacion_destino_catalogo`), la dirección no se vuelve a
+    geocodificar: sólo se pide al proveedor el recorrido desde la planta
+    del documento hasta esas coordenadas. Si no, se geocodifica con la
+    comuna confirmada como control."""
     from pathlib import Path
     from atlas_core.catalogo_plantas import CatalogoPlantas
     from atlas_core.direccion_equivalente import comuna_oficial
@@ -225,6 +257,10 @@ def calcular_ruta_operacional(fila: Mapping[str, object], direccion: str, comuna
 
     carpeta = Path(carpeta_catalogos)
     planta_id = str(fila.get("planta_origen_id") or "").strip()
+    ubicacion = ubicacion_destino_catalogo(direccion, comuna, carpeta_catalogos=carpeta)
+    if ubicacion is not None:
+        return ruta_hacia_ubicacion(planta_id, comuna, ubicacion, carpeta_catalogos=carpeta,
+                                    proveedor_rutas=proveedor_rutas)
     try:
         plantas = tuple(CatalogoPlantas(carpeta / "plantas.json").listar())
     except (OSError, ValueError):
@@ -308,20 +344,38 @@ def recalcular_ruta_desde_planta(planta_id: str, direccion: str, comuna: str, ru
     Nunca reutiliza la distancia anterior: si el proveedor no la calcula,
     la ruta queda pendiente (conservando las coordenadas confirmadas).
     Siempre registra la planta de la que sale."""
+    if _coordenadas_confirmadas(ruta_anterior) is None:
+        ruta = calcular_ruta_operacional({**dict(fila), "planta_origen_id": planta_id}, direccion, comuna,
+                                         carpeta_catalogos=carpeta_catalogos, proveedor_rutas=proveedor_rutas,
+                                         proveedor_rutas_fallback=proveedor_rutas_fallback)
+        return {**ruta, "comuna": comuna, "planta_origen_id": planta_id}
+    ubicacion = {campo: str(ruta_anterior.get(campo) or "") for campo in CAMPOS_UBICACION}
+    return ruta_hacia_ubicacion(planta_id, comuna, ubicacion, carpeta_catalogos=carpeta_catalogos,
+                                proveedor_rutas=proveedor_rutas, perfil=perfil, pendiente_con_ubicacion=True)
+
+
+def ruta_hacia_ubicacion(planta_id: str, comuna: str, ubicacion: Mapping[str, object], *, carpeta_catalogos,
+                         proveedor_rutas=None, perfil: str = "driving-hgv",
+                         pendiente_con_ubicacion: bool = False) -> dict:
+    """Recorrido planta -> coordenadas ya confirmadas del destino, sin
+    geocodificar. La ubicación (coordenadas, región, códigos y su
+    procedencia) se copia tal cual; sólo la distancia y la duración vienen
+    del proveedor. Si no se calcula, la ruta queda pendiente con su motivo
+    (con `pendiente_con_ubicacion`, conservando la ubicación como
+    confirmada: planta corregida sin ruta calculable)."""
     from pathlib import Path
     from atlas_core.catalogo_plantas import CatalogoPlantas
     from atlas_core.rutas.geocerca import coordenada_ruteo_planta
     from atlas_core.rutas.modelos import EstadoRuta
 
+    destino = _coordenadas_confirmadas(ubicacion)
+    ubicacion = {campo: str(valor or "") for campo, valor in ubicacion.items()}
     base = {"comuna": comuna, "planta_origen_id": planta_id}
-    destino = _coordenadas_confirmadas(ruta_anterior)
+    pendiente = {**ubicacion, **base, "estado_ruta": "PENDIENTE"}
+    if pendiente_con_ubicacion:
+        pendiente["coordenadas_confirmadas"] = True
     if destino is None:
-        ruta = calcular_ruta_operacional({**dict(fila), "planta_origen_id": planta_id}, direccion, comuna,
-                                         carpeta_catalogos=carpeta_catalogos, proveedor_rutas=proveedor_rutas,
-                                         proveedor_rutas_fallback=proveedor_rutas_fallback)
-        return {**ruta, **base}
-    ubicacion = {campo: str(ruta_anterior.get(campo) or "") for campo in CAMPOS_UBICACION}
-    pendiente = {**ubicacion, **base, "estado_ruta": "PENDIENTE", "coordenadas_confirmadas": True}
+        return {**pendiente, "motivo": "COORDENADAS_DESTINO_INVALIDAS"}
     carpeta = Path(carpeta_catalogos)
     try:
         plantas = tuple(CatalogoPlantas(carpeta / "plantas.json").listar())

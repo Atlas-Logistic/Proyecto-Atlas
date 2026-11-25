@@ -46,6 +46,7 @@ from typing import Iterable, Mapping
 from atlas_core.catalogo_destinos import (
     CatalogoDestinos,
     _clave_fisica_destino,
+    consolidar_destinos_equivalentes,
     direccion_confirmada_coincide,
     normalizar_nombre_destino,
 )
@@ -121,6 +122,7 @@ class IndiceIdentidadDestinos:
     def __init__(self, destinos: Iterable[object]) -> None:
         # (calle comparable, comuna oficial, clave física)
         self._calles: list[tuple[str, str, tuple]] = []
+        self._destinos: dict[tuple, list] = {}
         representaciones: dict[tuple, Counter] = {}
         for destino in destinos:
             if (getattr(destino, "estado_vigencia", "") != "ACTIVO"
@@ -131,6 +133,7 @@ class IndiceIdentidadDestinos:
             if not comuna or not any(ch.isdigit() for ch in calle):
                 continue
             clave = _clave_fisica_destino(destino)
+            self._destinos.setdefault(clave, []).append(destino)
             representaciones.setdefault(clave, Counter())[
                 (str(getattr(destino, "direccion", "")).split(",", 1)[0].strip(),
                  str(getattr(destino, "comuna", "")).strip())] += 1
@@ -189,8 +192,42 @@ class IndiceIdentidadDestinos:
         clave = next(iter(claves))
         direccion, comuna_texto = self._representacion[clave]
         return IdentidadDestino(
-            clave=" ".join(clave[0]) + "@" + clave[1], direccion=direccion, comuna=comuna_texto,
+            clave=_texto_clave(clave), direccion=direccion, comuna=comuna_texto,
         )
+
+    def destino_con_coordenadas(self, direccion: str, comuna: str) -> object | None:
+        """Destino del catálogo cuyas coordenadas CONFIRMADAS ubican una
+        dirección ya confirmada por un humano (dirección + comuna), o
+        ``None``.
+
+        Casos reales 492111/483526 (VISTA CLARA 2351, CERRILLOS): la
+        decisión humana nombra un lugar que el catálogo ya conoce con
+        coordenadas verificadas; geocodificar de nuevo su texto devolvió
+        "Santiago" y dejó la ruta pendiente. La identidad es la de
+        `identificar` (misma tolerancia, misma comuna exigida); además, los
+        registros de esa identidad deben ser un solo punto
+        (`consolidar_destinos_equivalentes`, <=150 m). Caso real 485242
+        (SANTA ISABEL 585, LAMPA): dos destinos confirmados de la misma
+        obra a 535 m -- ambigüedad real, se abstiene."""
+        identidad = self.identificar((direccion,), comunas_conocidas={comuna_oficial(comuna)} - {""})
+        if identidad is None:
+            return None
+        clave = next(c for c in self._destinos if _texto_clave(c) == identidad.clave)
+        puntos = consolidar_destinos_equivalentes(self._destinos[clave])
+        if len(puntos) != 1:
+            return None
+        destino = puntos[0]
+        try:
+            latitud, longitud = float(destino.latitud), float(destino.longitud)
+        except (TypeError, ValueError):
+            return None
+        if not (-90 <= latitud <= 90 and -180 <= longitud <= 180):
+            return None
+        return destino
+
+
+def _texto_clave(clave: tuple) -> str:
+    return " ".join(clave[0]) + "@" + clave[1]
 
 
 def comunas_conocidas_de_fila(fila: Mapping[str, object]) -> set[str]:

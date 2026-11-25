@@ -487,7 +487,7 @@ def _pendientes_ruta(dataset: Path, decisiones: Path) -> list[dict[str, str]]:
     # existe porque un revalidador lo dejó así a propósito, esperando
     # este mismo reintento.
     humanas = _guias_humanas(decisiones)
-    return [
+    candidatas = [
         f for f in _leer_filas(dataset)
         if str(f.get("numero_guia", "")).strip() not in humanas
         and str(f.get("indicador_revision", "")).strip() == "OK"
@@ -495,6 +495,22 @@ def _pendientes_ruta(dataset: Path, decisiones: Path) -> list[dict[str, str]]:
         and str(f.get("planta_origen_id", "")).strip()
         and str(f.get("despachar_a_crudo", "")).strip()
     ]
+    if not candidatas:
+        return candidatas
+    # Casos reales 483576/484002/484140/488100: el destino confirmado por un
+    # humano ya publica una ruta calculada (`proyectar_destino`), pero la
+    # fila documental conserva el motivo de la lectura OCR. Esa ruta no es
+    # un pendiente técnico: reintentarla geocodificaría otra vez el texto
+    # OCR que la decisión ya reemplaza. Sin ledger legible no se excluye.
+    from atlas_core.destino_operacional import RUTA_CALCULADA, destino_vigente, proyectar_destino
+    try:
+        ledger = json.loads((dataset.parent / LEDGER).read_text(encoding="utf-8-sig"))
+    except (OSError, ValueError):
+        return candidatas
+    if not isinstance(ledger, dict):
+        return candidatas
+    return [f for f in candidatas
+            if destino_vigente(f, ledger) is None or proyectar_destino(f, ledger).get("estado_ruta") != RUTA_CALCULADA]
 
 
 def _guias_destino_no_resuelto_reintentables(dataset: Path, decisiones: Path) -> list[str]:

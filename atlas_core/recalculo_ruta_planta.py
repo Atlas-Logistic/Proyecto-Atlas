@@ -16,8 +16,14 @@ y sólo cuando:
   (sin "conservar estado") o correcciones de peso/material, que no afectan
   la ruta (cualquier otra decisión: abstención);
 - el destino vigente (documental o el confirmado por el humano) es
-  inequívocamente una planta confirmada (`planta_conocida_como_destino`);
-- el proveedor real calcula la ruta hasta el punto de ruteo de esa planta.
+  inequívocamente una planta confirmada (`planta_conocida_como_destino`),
+  o bien -- sólo para el destino confirmado por el humano -- un destino
+  CONFIRMADO del catálogo con coordenadas coherentes
+  (`destino_operacional.ubicacion_destino_catalogo`; casos reales
+  492111/483526 VISTA CLARA 2351, CERRILLOS, cuya ruta quedó pendiente
+  porque se geocodificó el texto en vez de usar el destino conocido);
+- el proveedor real calcula la ruta hasta el punto de ruteo de esa planta
+  o hasta esas coordenadas (nunca se geocodifica en este módulo).
 
 Nunca modifica el ledger ni crea decisiones. En un documento con destino
 humano, la ruta queda en `metricas_procesamiento_json` ligada al
@@ -120,7 +126,9 @@ def recalcular_rutas_hacia_planta_conocida(
     from atlas_core.almacenamiento_portable import bloqueo_sesion
     from atlas_core.catalogo_destinos import CatalogoDestinos, EstadoCalidadDestino
     from atlas_core.catalogo_plantas import CatalogoPlantas
-    from atlas_core.destino_operacional import ruta_valida
+    from atlas_core.destino_operacional import (
+        CAMPOS_UBICACION, METODO_UBICACION_CATALOGO, ruta_hacia_ubicacion, ruta_valida, ubicacion_destino_catalogo,
+    )
     from atlas_core.revalidacion_documental import (
         _escribir_filas_completas, _leer_filas, _proveedor_rutas_ors_predeterminado,
     )
@@ -177,9 +185,15 @@ def recalcular_rutas_hacia_planta_conocida(
             texto, comuna = str(fila.get("despachar_a_crudo") or "").strip(), ""
         planta = planta_conocida_como_destino(texto, plantas, comuna_confirmada_humano=comuna,
                                               planta_origen_id=origen.planta_id)
-        if planta is None:
+        ubicacion = None
+        if planta is None and decision is not None:
+            ubicacion = ubicacion_destino_catalogo(texto, comuna, carpeta_catalogos=carpeta)
+        if planta is None and ubicacion is None:
             return None, "DESTINO_NO_ES_PLANTA_CONOCIDA_INEQUIVOCA"
-        return (fila, origen, decision, texto, comuna, planta), ""
+        return (fila, origen, decision, texto, comuna, planta, ubicacion), ""
+
+    def destino_de(planta, ubicacion) -> str:
+        return planta.planta_id if planta is not None else str(ubicacion["destino_id"])
 
     try:
         filas = _leer_filas(dataset, completas=True)
@@ -198,7 +212,20 @@ def recalcular_rutas_hacia_planta_conocida(
         if motivo:
             abstener(archivo, motivo)
             continue
-        fila, origen, decision, texto, comuna, planta = preparado
+        fila, origen, decision, texto, comuna, planta, ubicacion = preparado
+        if planta is None:
+            # Destino humano conocido en el catálogo: sólo el recorrido
+            # desde la planta del documento hasta sus coordenadas.
+            ruta_humana = ruta_hacia_ubicacion(origen.planta_id, comuna, ubicacion, carpeta_catalogos=carpeta,
+                                               proveedor_rutas=proveedor_rutas)
+            if not ruta_valida(ruta_humana, comuna):
+                abstener(archivo, f"RUTA_NO_CALCULADA:{ruta_humana.get('motivo') or ruta_humana.get('estado_ruta')}")
+                continue
+            calculadas[archivo] = {"ruta_humana": ruta_humana, "planta": None, "ubicacion": ubicacion,
+                                   "destino": destino_de(None, ubicacion), "huella": _huella_ruta(fila),
+                                   "decision_id": str(decision.get("decision_id") or ""),
+                                   "texto": texto, "comuna": comuna}
+            continue
         ruta = calcular_ruta_con_planta_conocida(
             planta=origen, despachar_a_crudo=texto, proveedor_rutas=proveedor_rutas,
             origen_determinado_por=str(fila.get("origen_determinado_por") or ""),
@@ -212,7 +239,8 @@ def recalcular_rutas_hacia_planta_conocida(
         if ruta.estado_ruta != "RUTA_CALCULADA" or not str(ruta.distancia_km or "").strip():
             abstener(archivo, f"RUTA_NO_CALCULADA:{ruta.motivo_ruta or ruta.estado_ruta}")
             continue
-        calculadas[archivo] = {"ruta": ruta, "planta": planta, "huella": _huella_ruta(fila),
+        calculadas[archivo] = {"ruta": ruta, "planta": planta, "destino": destino_de(planta, None),
+                               "huella": _huella_ruta(fila),
                                "decision_id": str((decision or {}).get("decision_id") or ""),
                                "texto": texto, "comuna": comuna}
 
@@ -229,28 +257,31 @@ def recalcular_rutas_hacia_planta_conocida(
             if motivo:
                 abstener(archivo, f"CAMBIO_DURANTE_CALCULO:{motivo}")
                 continue
-            fila, origen, decision, texto, comuna, planta = preparado
-            if (_huella_ruta(fila) != calculo["huella"] or planta.planta_id != calculo["planta"].planta_id
+            fila, origen, decision, texto, comuna, planta, ubicacion = preparado
+            if (_huella_ruta(fila) != calculo["huella"] or destino_de(planta, ubicacion) != calculo["destino"]
                     or str((decision or {}).get("decision_id") or "") != calculo["decision_id"]):
                 abstener(archivo, "CAMBIO_DURANTE_CALCULO")
                 continue
-            ruta = calculo["ruta"]
-            nueva = {
-                "direccion_entrega": ruta.direccion_entrega_geocodificada,
-                "localidad_entrega": ruta.localidad_entrega, "region_entrega": ruta.region_entrega,
-                "codigo_pais": ruta.codigo_pais, "codigo_unidad": ruta.codigo_unidad,
-                "codigo_contexto": ruta.codigo_contexto,
-                "latitud_entrega": ruta.latitud_entrega, "longitud_entrega": ruta.longitud_entrega,
-                "distancia_km": ruta.distancia_km, "duracion_min": ruta.duracion_min,
-                "proveedor_ruta": ruta.proveedor_ruta, "estado_ruta": ruta.estado_ruta,
-            }
             anterior = {c: str(fila.get(c) or "") for c in _CAMPOS_RUTA_FILA}
             metricas = _metricas(fila)
-            if decision is not None:
+            if planta is None:
+                ruta_humana = calculo["ruta_humana"]
+            else:
+                ruta = calculo["ruta"]
+                nueva = {
+                    "direccion_entrega": ruta.direccion_entrega_geocodificada,
+                    "localidad_entrega": ruta.localidad_entrega, "region_entrega": ruta.region_entrega,
+                    "codigo_pais": ruta.codigo_pais, "codigo_unidad": ruta.codigo_unidad,
+                    "codigo_contexto": ruta.codigo_contexto,
+                    "latitud_entrega": ruta.latitud_entrega, "longitud_entrega": ruta.longitud_entrega,
+                    "distancia_km": ruta.distancia_km, "duracion_min": ruta.duracion_min,
+                    "proveedor_ruta": ruta.proveedor_ruta, "estado_ruta": ruta.estado_ruta,
+                }
                 ruta_humana = {**{c: nueva[c] for c in (
                     "latitud_entrega", "longitud_entrega", "distancia_km", "duracion_min", "proveedor_ruta",
                     "estado_ruta", "region_entrega", "codigo_pais", "codigo_unidad", "codigo_contexto")},
                     "comuna": comuna, "planta_origen_id": origen.planta_id}
+            if decision is not None:
                 if not ruta_valida(ruta_humana, comuna):
                     abstener(archivo, "RUTA_NO_VALIDA_PARA_COMUNA_CONFIRMADA")
                     continue
@@ -261,7 +292,9 @@ def recalcular_rutas_hacia_planta_conocida(
                     continue
                 metricas[CLAVE_RUTA_OPERACIONAL] = {
                     "decision_id": calculo["decision_id"], "direccion": texto, "comuna": comuna,
-                    "ruta": ruta_humana, "planta_destino_id": planta.planta_id, "calculado_en": instante,
+                    "ruta": ruta_humana, "calculado_en": instante,
+                    **({"planta_destino_id": planta.planta_id} if planta is not None
+                       else {"destino_id": ubicacion["destino_id"]}),
                 }
                 despues = ruta_humana
             else:
@@ -284,8 +317,11 @@ def recalcular_rutas_hacia_planta_conocida(
             auditoria = metricas.get(CLAVE_AUDITORIA)
             auditoria = list(auditoria) if isinstance(auditoria, list) else []
             auditoria.append({
-                "fecha": instante, "planta_destino_id": planta.planta_id, "planta_destino": planta.nombre,
-                "metodo": METODO_PLANTA_CONOCIDA_CATALOGO, "decision_destino_id": calculo["decision_id"] or None,
+                "fecha": instante,
+                **({"planta_destino_id": planta.planta_id, "planta_destino": planta.nombre,
+                    "metodo": METODO_PLANTA_CONOCIDA_CATALOGO} if planta is not None
+                   else {"destino_id": ubicacion["destino_id"], "metodo": METODO_UBICACION_CATALOGO}),
+                "decision_destino_id": calculo["decision_id"] or None,
                 "ruta_anterior": anterior, "ruta_nueva": despues,
             })
             metricas[CLAVE_AUDITORIA] = auditoria
@@ -294,7 +330,9 @@ def recalcular_rutas_hacia_planta_conocida(
             guia = str(fila.get("numero_guia") or "").strip()
             resultado["guias_actualizadas"].append(guia)
             resultado["recalculadas"].append({"archivo": archivo, "numero_guia": guia,
-                                              "planta_destino": planta.nombre, "anterior": anterior,
+                                              **({"planta_destino": planta.nombre} if planta is not None
+                                                 else {"destino_id": ubicacion["destino_id"]}),
+                                              "anterior": anterior,
                                               "nueva": despues,
                                               "decision_destino_id": calculo["decision_id"] or None})
         if cambios:
