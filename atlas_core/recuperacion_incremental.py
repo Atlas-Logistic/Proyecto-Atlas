@@ -658,9 +658,17 @@ def _respaldar_dataset(dataset: Path, directorio: Path, lote: str) -> Path:
     return destino
 
 
+def _base_local() -> Path:
+    """``%LOCALAPPDATA%/Atlas`` de MBT (igual que siempre) o la carpeta local de
+    la empresa del proceso: otra empresa nunca escribe en la de MBT."""
+    from atlas_core.aislamiento_empresas import EMPRESA_MBT, base_local, empresa_proceso
+    if empresa_proceso() != EMPRESA_MBT:
+        return base_local()
+    return Path(os.environ.get("LOCALAPPDATA") or tempfile.gettempdir()) / "Atlas"
+
+
 def _directorio_respaldo_local() -> Path:
-    base = os.environ.get("LOCALAPPDATA") or tempfile.gettempdir()
-    return Path(base) / "Atlas" / "respaldos" / "recuperacion_incremental"
+    return _base_local() / "respaldos" / "recuperacion_incremental"
 
 
 def _registrar_lote(actual: Path, lote: Mapping[str, object]) -> None:
@@ -854,8 +862,7 @@ def recuperar_campos_ausentes(
 
 
 def _marca_pull_local() -> Path:
-    base = os.environ.get("LOCALAPPDATA") or tempfile.gettempdir()
-    return Path(base) / "Atlas" / "cache" / "recuperacion_incremental_ultima_pasada.json"
+    return _base_local() / "cache" / "recuperacion_incremental_ultima_pasada.json"
 
 
 def ejecutar_en_ciclo_pull(

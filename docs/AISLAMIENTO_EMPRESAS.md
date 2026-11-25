@@ -81,3 +81,21 @@ Equipo nuevo: `abrir_empresa(..., restauracion=True)`, lease (verifica y restaur
 7. **OFICINA:** requiere el mismo código antes de que existan otras empresas.
 8. **Datos base:** una empresa nueva no recibe `datos_privados/geografia` ni catálogos
    (por diseño); falta definir su carga inicial.
+
+## Validación operativa (25/11/2026)
+
+`scripts/validacion_multiempresa/validar.py <mundo> <checkout Cloud>`: segunda empresa
+ficticia `andes-prueba` junto a una MBT ficticia, en un mundo sintético local, con el
+Worker real sobre SQLite en memoria (`test/servidor_local.js` de Cloud, HTTPS con
+certificado local) y procesos con el entorno de cada empresa. Cubre alta
+(`inicializar_empresa` + `estado_confirmado --sembrar`), Mobile (login y envío con el
+contrato de la PWA), PULL por empresa, B1 (consultas de Desktop y corrección de peso con
+confirmación), reportes, catálogos y accesos cruzados, con barrido de marcadores y
+mutación de control. Parte Desktop: `test/multiempresa_validacion_orquestar.js`.
+
+Corregido aquí: la recuperación incremental del ciclo PULL guardaba su marca y sus
+respaldos en `%LOCALAPPDATA%/Atlas` de MBT; en otra empresa la guarda la bloqueaba y el
+PULL la omitía. Ahora usa la carpeta local de la empresa; MBT, mismas rutas.
+
+El alta exige sembrar la custodia antes del primer PULL: sin ella, el segundo ciclo
+rechaza la custodia (`CUSTODIA_AJENA`) y no escribe.
