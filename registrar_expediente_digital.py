@@ -42,5 +42,5 @@ if __name__ == '__main__':
         documento = registrar_documento(
             args.raiz_atlas, empresa=empresa_del_proceso(), entidad=args.entidad, referencia=args.referencia, tipo=args.tipo,
             fecha_emision=args.fecha_emision, fecha_vencimiento=args.fecha_vencimiento,
-            contenido=contenido, mime_type=_MIME[extension], actor='DESKTOP')
+            contenido=contenido, mime_type=_MIME[extension], actor='DESKTOP', rechazar_duplicado=True)
     print(json.dumps(documento, ensure_ascii=True))

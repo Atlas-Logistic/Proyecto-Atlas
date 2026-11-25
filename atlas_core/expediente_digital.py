@@ -402,6 +402,7 @@ def registrar_documento(
     fecha_vencimiento: str = "", fecha_emision: str = "", archivo: str = "", sha256: str = "",
     contenido: bytes | None = None, mime_type: str = "",
     carpeta_catalogos: str | Path | None = None, reloj: _Reloj = _ahora_utc, pendiente_ocr: bool = False,
+    rechazar_duplicado: bool = False,
 ) -> dict:
     """Agrega un documento activo al expediente (creándolo si hace falta); el
     activo anterior del mismo tipo queda REEMPLAZADO. `contenido` custodia el
@@ -429,6 +430,21 @@ def registrar_documento(
                     original = _original_valido(contenido, mime_type, sha256 or hashlib.sha256(contenido).hexdigest())
                 except ValueError as error:
                     raise ErrorExpedienteDigital(str(error)) from error
+            if rechazar_duplicado and original and entidad == VEHICULO:
+                huella = original["sha256"]
+                existente = _buscar_expediente(datos, entidad, equivalentes)
+                if existente and any(d.get("expediente_id") == existente["expediente_id"] and
+                                     d.get("sha256") == huella for d in datos["documentos"]):
+                    raise ErrorExpedienteDigital("Este archivo ya está registrado en el expediente del vehículo; revise sus documentos e historial.")
+                fichas = _leer_fichas(raiz, empresa)
+                if fichas:
+                    catalogos = _carpeta(raiz, carpeta_catalogos)
+                    from atlas_core.catalogo_vehiculos import normalizar_patente_vehiculo
+                    indice = _indice_patentes(catalogos)
+                    for ficha in fichas.get("vehiculos", []):
+                        if indice.get(normalizar_patente_vehiculo(str(ficha.get("patente", "")))) == clave and any(
+                                d.get("sha256") == huella for d in ficha.get("documentos", [])):
+                            raise ErrorExpedienteDigital("Este archivo ya está registrado en la ficha del vehículo; revise sus documentos e historial.")
             instante = _instante(reloj)
             expediente, _ = _asegurar_expediente(datos, entidad, clave, equivalentes, ficha_id, actor, instante)
             documento_id = str(uuid.uuid4())
@@ -477,7 +493,7 @@ def registrar_documento_vehiculo_desktop(
         raise ErrorExpedienteDigital("tipo vehicular sin procesamiento OCR")
     documento = registrar_documento(raiz, empresa=empresa, entidad=VEHICULO, referencia=referencia, tipo=tipo,
                                     actor="DESKTOP", contenido=contenido, mime_type=mime_type,
-                                    pendiente_ocr=True, reloj=reloj)
+                                    pendiente_ocr=True, rechazar_duplicado=True, reloj=reloj)
     ruta = ruta_almacen_expediente(raiz, empresa).parent / documento["archivo"]
     proveedor = None
     lectura = {"estado": "PENDIENTE_REVISION", "motivo": "ERROR_OCR", "campos": {
