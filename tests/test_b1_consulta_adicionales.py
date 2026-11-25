@@ -283,3 +283,9 @@ def test_monto_aprobado_por_persona_confirma(operacion):
     ruta.write_text(json.dumps(documento), encoding='utf-8')
     r = consultar(operacion, 'viajes con adicional de 30 mil')
     assert guias(r) == {'482741', '485318'}
+
+def test_soporte_entrega_observacion_completa_sin_recorte():
+    from atlas_core.soporte_consultas import _soporte_observaciones
+    observacion = 'Texto de observación ' * 20 + 'final íntegro'
+    soporte = _soporte_observaciones([{'_observaciones_texto': observacion}])
+    assert soporte['filas'][0][-1] == observacion
