@@ -51,7 +51,9 @@ RUTA_MARCA = ("catalogos_privados", "empresa_identidad.json")
 PATRON_ID = re.compile(r"^[a-z][a-z0-9-]{1,38}[a-z0-9]$")
 # Variables del entorno padre que un paso de la empresa puede heredar (el resto
 # de ATLAS_* es de MBT u otra empresa y nunca pasa).
-HEREDABLES = ("ATLAS_CLOUD_MOBILE_URL", "ATLAS_EXCLUSION_LOCAL", "ATLAS_EXCLUSION_RAICES")
+# ATLAS_SESION: con la identidad exigida, el alta de choferes requiere la sesión
+# de un administrador de la empresa (docs/IDENTIDAD_PERMISOS.md).
+HEREDABLES = ("ATLAS_CLOUD_MOBILE_URL", "ATLAS_EXCLUSION_LOCAL", "ATLAS_EXCLUSION_RAICES", "ATLAS_SESION")
 SALIDA_OK, SALIDA_ERROR, SALIDA_PENDIENTE = 0, 2, 3
 ESTADOS_LISTOS = ("HECHO", "YA_ESTABA")
 

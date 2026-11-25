@@ -10,4 +10,10 @@ _instalar_guardia()
 # Frontera entre empresas: mismo criterio, sin depender de cada CLI.
 from atlas_core.aislamiento_empresas import entrar_proceso as _entrar_proceso  # noqa: E402
 
-_entrar_proceso()
+_contexto_empresa = _entrar_proceso()
+
+# Identidad y permisos: inactiva salvo que la empresa exija identidad
+# (catalogos_privados/desktop_usuarios.json, exigir_identidad: true).
+from atlas_core.identidad import entrar_proceso as _entrar_identidad  # noqa: E402
+
+_entrar_identidad(_contexto_empresa)
