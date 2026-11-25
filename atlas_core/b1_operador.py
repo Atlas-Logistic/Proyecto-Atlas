@@ -1645,9 +1645,11 @@ def _describir_preview(preview: Mapping[str, object]) -> str:
     elif accion == "VIAJE_AGREGAR_OBSERVACION":
         detalle = propuesto.get("guias") or []
         agregar = [d for d in detalle if d.get("estado") == "AGREGAR"]
+        corregir = [d for d in detalle if d.get("estado") == "CORREGIR_MOTIVO"]
         viajes = len(propuesto.get("observaciones") or {})
         texto = (f"Agregar la observación «{propuesto.get('texto')}» a {len(agregar)} "
-                 f"{_plural(len(agregar), 'guía', 'guías')} ({viajes} {_plural(viajes, 'viaje', 'viajes')}).")
+                 f"{_plural(len(agregar), 'guía', 'guías')} y corregir el motivo en {len(corregir)} "
+                 f"({_plural(viajes, 'viaje', 'viajes')}: {viajes}).")
         return " ".join([texto, *(str(c) for c in preview.get("consecuencias") or [])])
     elif accion == "DESTINO_CONFIRMAR_COORDENADA":
         texto = (f"Confirmar la coordenada del destino {entidad.get('direccion')!r}: "
@@ -1712,6 +1714,8 @@ def _describir_preview(preview: Mapping[str, object]) -> str:
 
 _ESTADO_OBSERVACION_LEGIBLE = {
     "AGREGAR": "Se agrega", "YA_PRESENTE": "Ya la tiene (sin cambio)",
+    "CORREGIR_MOTIVO": "Se corrige el motivo (requiere confirmación)",
+    "CONFLICTO_ADICIONAL": "Adicional ambiguo (revisar; no se aplica)",
     "NO_ENCONTRADA": "No existe en Atlas (no se aplica)", "SIN_TRANSPORTE": "Sin transporte (no se aplica)",
     "TRANSPORTE_AMBIGUO": "Transporte ambiguo (no se aplica)",
 }
@@ -1722,7 +1726,8 @@ def _tablas_observacion(preview: Mapping[str, object]) -> list[dict[str, object]
     propuesto = (preview.get("valor_propuesto") or {}).get("texto", "")
     filas = [[d.get("numero_guia", ""), d.get("numero_transporte", "") or "-",
               _ESTADO_OBSERVACION_LEGIBLE.get(d.get("estado"), d.get("estado")),
-              " | ".join(d.get("observaciones_vigentes") or []) or "-", propuesto] for d in detalle]
+              " | ".join(d.get("observaciones_vigentes") or []) or "-",
+              propuesto if d.get("estado") in {"AGREGAR", "CORREGIR_MOTIVO"} else "-"] for d in detalle]
     return [{"tipo": "observacion_viaje_preview", "resumen": "",
              "columnas": ["Guia", "Transporte", "Resultado", "Observacion vigente", "Cambio propuesto"],
              "filas": filas}] if filas else []
@@ -3368,7 +3373,7 @@ class OperadorB1:
             tablas = _tablas_observacion(preview)
             if preview.get("estado") == "SIN_CAMBIOS":
                 return {"estado": "SIN_CAMBIOS", "accion": intencion.accion, "preview": publico, "tablas": tablas,
-                        "mensaje": "Las guías indicadas ya tienen esa observación; no hay nada que confirmar."}
+                        "mensaje": "No hay cambios válidos que confirmar; revisa el resultado de cada guía."}
             self._fijar_pendiente(estado, conversacion_id, {
                 "token": preview["token"], "accion": intencion.accion, "parametros": parametros,
                 "referencia": str(texto)[:500], "creado_en": self.reloj().isoformat()})
