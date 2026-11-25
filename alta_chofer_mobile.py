@@ -1,4 +1,8 @@
-"""Alta de un chofer MBT y de su credencial Mobile local, bajo el escritor oficial.
+"""Alta de un chofer y de su credencial Mobile local, bajo el escritor oficial.
+
+MBT por defecto. Otra empresa: el proceso corre con el entorno de esa empresa
+(``ATLAS_EMPRESA_ID``...; lo arma ``alta_empresa.py``) y ``--empresa`` es su
+``cloud_id``, el de su marca.
 
 Uso (consola interactiva; la contraseña se pide con getpass, nunca por argumento):
 
@@ -24,6 +28,7 @@ from __future__ import annotations
 import argparse
 import getpass
 import json
+import os
 import re
 import sys
 import time
@@ -32,7 +37,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Callable
 
-from atlas_core.aislamiento_empresas import CARPETA_EMPRESAS, CLOUD_MBT, EMPRESA_MBT, empresa_de_raiz  # noqa: F401
+from atlas_core.aislamiento_empresas import (  # noqa: F401
+    CARPETA_EMPRESAS, CLOUD_MBT, EMPRESA_MBT, ErrorAislamiento, contexto_desde_entorno, empresa_de_raiz)
 from atlas_core.almacenamiento_portable import escribir_json_atomico, resolver_raiz_atlas
 from atlas_core.catalogos import normalizar_rut
 from atlas_core.mobile import hash_password, verificar_password
@@ -92,9 +98,21 @@ def normalizar_datos(*, usuario: str, rut: str, nombre: str) -> dict[str, str]:
 
 
 def validar_empresa(raiz: Path, empresa: str) -> None:
-    if empresa != CLOUD_MBT or empresa_de_raiz(raiz) != EMPRESA_MBT:
+    """MBT: como siempre, su raíz y ``CLOUD_MBT``. Otra empresa: el proceso debe
+    ser de ESA empresa (su entorno), ``raiz`` su raíz y ``empresa`` su ``cloud_id``."""
+    if empresa_de_raiz(raiz) == EMPRESA_MBT:
+        if empresa != CLOUD_MBT:
+            raise ErrorAlta("EMPRESA_NO_SOPORTADA",
+                            f"La raíz de MBT sólo admite la empresa Cloud {CLOUD_MBT!r}.")
+        return
+    try:
+        contexto = contexto_desde_entorno()
+    except ErrorAislamiento as error:
+        raise ErrorAlta("EMPRESA_NO_SOPORTADA", f"Proceso sin la empresa de la raíz: {error.codigo}.") from error
+    if (contexto.empresa_id != empresa_de_raiz(raiz) or os.path.normcase(os.path.realpath(contexto.raiz))
+            != os.path.normcase(os.path.realpath(raiz)) or not contexto.cloud_id or empresa != contexto.cloud_id):
         raise ErrorAlta("EMPRESA_NO_SOPORTADA",
-                        f"Este comando sólo da de alta choferes de MBT (empresa Cloud {CLOUD_MBT!r}) en la raíz de MBT.")
+                        f"La raíz pertenece a {contexto.empresa_id!r} (Cloud {contexto.cloud_id!r}), no a {empresa!r}.")
 
 
 def comprobar_duplicados(datos: dict[str, str], choferes: dict, usuarios: dict, *, existente: bool = False) -> str:
@@ -272,15 +290,22 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--usuario", required=True)
     parser.add_argument("--rut", required=True, help="RUT con dígito verificador (11.640.500-8)")
     parser.add_argument("--nombre", required=True)
-    parser.add_argument("--empresa", default=CLOUD_MBT, help=f"identificador Cloud de la empresa (sólo {CLOUD_MBT})")
+    parser.add_argument("--empresa", default=CLOUD_MBT, help=f"identificador Cloud de la empresa (MBT: {CLOUD_MBT})")
+    parser.add_argument("--password-stdin", action="store_true",
+                        help="lee la contraseña de la primera línea de stdin (la usa alta_empresa.py; nunca por argumento)")
     parser.add_argument("--solo-validar", action="store_true", help="valida datos y duplicados sin pedir contraseña ni escribir")
     parser.add_argument("--chofer-existente", action="store_true",
                         help="el chofer ya está activo en el catálogo: sólo se crea la credencial (no escribe choferes.json)")
     args = parser.parse_args(argv)
     fecha = datetime.now(timezone.utc).isoformat(timespec="seconds")
+    opciones = {}
+    if args.password_stdin and not args.solo_validar:
+        leida = sys.stdin.readline().rstrip("\r\n")
+        opciones["pedir"] = lambda _texto: leida  # la misma para "repita"
     try:
         resultado = ejecutar(resolver_raiz_atlas(args.raiz_atlas), usuario=args.usuario, rut=args.rut, nombre=args.nombre,
-                             empresa=args.empresa, solo_validar=args.solo_validar, existente=args.chofer_existente)
+                             empresa=args.empresa, solo_validar=args.solo_validar, existente=args.chofer_existente,
+                             **opciones)
         salida = SALIDA_OK
     except ErrorAlta as error:
         resultado, salida = {"resultado": "RECHAZADO", "codigo": error.codigo, "detalle": error.detalle}, error.salida

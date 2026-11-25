@@ -46,6 +46,9 @@ VERSION_MARCA = 1
 VARIABLE_EMPRESA = "ATLAS_EMPRESA_ID"
 VARIABLE_RAIZ_MBT = "ATLAS_RAIZ_MBT"
 VARIABLE_TOKEN = "ATLAS_CLOUD_MOTOR_TOKEN"
+# Proceso de alta: su valor debe repetir ATLAS_EMPRESA_ID. Admite que la raíz
+# aún no tenga marca (la escribe ``inicializar_empresa`` desde ese proceso).
+VARIABLE_ALTA = "ATLAS_EMPRESA_ALTA"
 
 _PATRON_ID = re.compile(r"^[a-z][a-z0-9-]{1,38}[a-z0-9]$")
 _RESERVADOS = frozenset({
@@ -321,6 +324,21 @@ def inicializar_empresa(raiz_mbt: str | os.PathLike, empresa_id: str, *, nombre:
     return abrir_empresa(raiz_mbt, empresa_id)
 
 
+def contexto_alta(raiz_mbt: str | os.PathLike, empresa_id: str) -> ContextoEmpresa:
+    """Contexto del proceso que da de alta ``empresa_id``: su raíz puede no existir
+    o estar vacía (aún sin marca, ``cloud_id=None``). Con marca, es el contexto normal.
+    Nunca escribe. MBT y una raíz con datos sin marca se rechazan."""
+    raiz_mbt = _validar_raiz_mbt(raiz_mbt)
+    validar_empresa_id(empresa_id)
+    raiz = _raiz_otra_empresa(raiz_mbt, empresa_id)
+    if raiz.is_dir():
+        if _leer_marca(raiz) is not None:
+            return abrir_empresa(raiz_mbt, empresa_id)
+        if any(raiz.iterdir()):
+            raise ErrorAislamiento("RAIZ_CON_DATOS_SIN_MARCA", empresa_id)
+    return ContextoEmpresa(empresa_id, raiz, raiz_mbt, None, empresa_id)
+
+
 def contexto_desde_entorno() -> ContextoEmpresa:
     """Sin ``ATLAS_EMPRESA_ID`` es MBT, igual que hoy (y rechaza una raíz ajena)."""
     empresa_id = os.environ.get(VARIABLE_EMPRESA, "").strip() or EMPRESA_MBT
@@ -329,7 +347,10 @@ def contexto_desde_entorno() -> ContextoEmpresa:
     raiz_mbt = os.environ.get(VARIABLE_RAIZ_MBT, "").strip()
     if not raiz_mbt:
         raise ErrorAislamiento("ENTORNO_INCOMPLETO", VARIABLE_RAIZ_MBT)
-    contexto = abrir_empresa(raiz_mbt, empresa_id)
+    alta = os.environ.get(VARIABLE_ALTA, "").strip()
+    if alta and alta != empresa_id:
+        raise ErrorAislamiento("ALTA_DE_OTRA_EMPRESA", f"{empresa_id} != {alta}")
+    contexto = contexto_alta(raiz_mbt, empresa_id) if alta else abrir_empresa(raiz_mbt, empresa_id)
     if _norm(ap.resolver_raiz_atlas()) != _norm(contexto.raiz):
         raise ErrorAislamiento("RAIZ_DE_OTRA_EMPRESA", str(ap.resolver_raiz_atlas()))
     return contexto
@@ -392,11 +413,58 @@ def _vetada(ruta: object, *, sonda: bool = False) -> bool:
     # Los ancestros de lo propio no revelan nada de otra empresa.
     if sonda and any(_dentro(propia, normal) for propia in guarda["propias"]):
         return False
+    # Registro de empresas (identificador, nombre visible, cloud_id): sus carpetas
+    # y marcas pueden consultarse; nada más de otra empresa.
+    if sonda and _registro_empresas(normal) is not None:
+        return False
     return any(_dentro(normal, vetada) for vetada in guarda["vetadas"])
+
+
+_PARTES_MARCA = tuple(os.path.normcase(p) for p in RUTA_MARCA.split("/"))
+_ESCRITURA = os.O_WRONLY | os.O_RDWR | os.O_APPEND | os.O_CREAT | os.O_TRUNC
+
+
+def _registro_empresas(normal: str) -> str | None:
+    """``base``, ``empresa`` o ``marca`` si ``normal`` es parte del registro público
+    de empresas (la carpeta ``Atlas_empresas``, cada raíz y su marca)."""
+    base = _guarda["registro"]
+    if base is None:
+        return None
+    if normal == base:
+        return "base"
+    if not normal.startswith(base + os.sep):
+        return None
+    partes = tuple(normal[len(base) + 1:].split(os.sep))
+    if len(partes) == 1:
+        return "empresa"
+    return "marca" if partes[1:] == _PARTES_MARCA else None
+
+
+def _consulta_registro(evento: str, argumentos: tuple) -> bool:
+    """Listar ``Atlas_empresas`` o LEER una marca: lo que necesita
+    ``listar_empresas``/``inicializar_empresa`` para no repetir ``cloud_id``."""
+    if evento not in ("open", "os.listdir", "os.scandir") or not argumentos:
+        return False
+    ruta = argumentos[0]
+    if isinstance(ruta, bytes):
+        ruta = os.fsdecode(ruta)
+    if not isinstance(ruta, (str, os.PathLike)):
+        return False
+    _hilo.dentro = True
+    try:
+        tipo = _registro_empresas(_norm(ruta))
+    finally:
+        _hilo.dentro = False
+    if evento == "open":
+        banderas = argumentos[2] if len(argumentos) > 2 and isinstance(argumentos[2], int) else _ESCRITURA
+        return tipo == "marca" and not banderas & _ESCRITURA
+    return tipo == "base"
 
 
 def _gancho(evento: str, argumentos: tuple) -> None:
     if _guarda is None:
+        return
+    if _guarda["registro"] is not None and _consulta_registro(evento, argumentos):
         return
     if evento == "os.mkdir":  # crear lo propio crea sus ancestros si faltan
         if _vetada(argumentos[0], sonda=True):
@@ -413,8 +481,12 @@ def _gancho(evento: str, argumentos: tuple) -> None:
             raise ErrorAislamiento("ACCESO_ENTRE_EMPRESAS", f"{_guarda['empresa_id']}: {ruta!r}")
 
 
-def activar_guarda(contexto: ContextoEmpresa) -> None:
-    """Un proceso, una empresa. Irreversible (los audit hooks no se retiran)."""
+def activar_guarda(contexto: ContextoEmpresa, *, alta: bool = False) -> None:
+    """Un proceso, una empresa. Irreversible (los audit hooks no se retiran).
+
+    ``alta=True`` (sólo el proceso de alta de otra empresa) además deja listar
+    ``Atlas_empresas`` y LEER las marcas: lo justo para no repetir ``cloud_id``.
+    Ningún otro proceso sabe siquiera qué otras empresas existen."""
     global _guarda
     if _guarda is not None:
         if _guarda["empresa_id"] != contexto.empresa_id:
@@ -428,7 +500,8 @@ def activar_guarda(contexto: ContextoEmpresa) -> None:
         # En la carpeta local de MBT sólo se comparten los runtimes de OCR.
         propias = [_norm(contexto.raiz), _norm(base_local(contexto.empresa_id)), _norm(local / "runtime")]
         vetadas = [_norm(_base_empresas(contexto.raiz_mbt)), _norm(contexto.raiz_mbt), _norm(local)]
-    _guarda = {"empresa_id": contexto.empresa_id, "cloud_id": contexto.cloud_id, "propias": propias, "vetadas": vetadas}
+    _guarda = {"empresa_id": contexto.empresa_id, "cloud_id": contexto.cloud_id, "propias": propias, "vetadas": vetadas,
+               "registro": _norm(_base_empresas(contexto.raiz_mbt)) if alta and not contexto.es_mbt else None}
     sys.addaudithook(_gancho)
     _instalar_sondas()
 
@@ -484,7 +557,7 @@ def entrar_proceso() -> ContextoEmpresa | None:
                 os.environ[VARIABLE_TOKEN] = token
             else:
                 os.environ.pop(VARIABLE_TOKEN, None)
-        activar_guarda(contexto)
+        activar_guarda(contexto, alta=bool(os.environ.get(VARIABLE_ALTA, "").strip()))
         return contexto
     raiz = ap.resolver_raiz_atlas()
     _validar_raiz_mbt(raiz)

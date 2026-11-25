@@ -63,7 +63,7 @@ consultas D1 y claves R2 ya filtraban por `empresa_id`.
 
 ## Recuperación
 
-Alta: `inicializar_empresa` y `custodia.sembrar(lease)` en el primer turno.
+Alta: `inicializar_empresa` (desde un proceso de alta, `ATLAS_EMPRESA_ALTA`) y `custodia.sembrar(lease)` en el primer turno. Procedimiento completo: `alta_empresa.py` (docs/ALTA_EMPRESA.md).
 Equipo nuevo: `abrir_empresa(..., restauracion=True)`, lease (verifica y restaura) y
 `confirmar_restauracion`.
 
