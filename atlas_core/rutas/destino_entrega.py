@@ -1916,6 +1916,23 @@ def motivo_punto_fuera_de_comuna_conocida(
     return ""
 
 
+
+def coordenada_de_destino_fuera_de_su_comuna(destino, base_geografica_local: "BaseGeograficaLocal | None") -> str:
+    """Motivo si las coordenadas guardadas de un destino del catálogo caen,
+    con evidencia positiva de la base territorial, fuera de su PROPIA comuna
+    (caso real 77a085b2 HELSINSKI 5810 / LA REINA, confirmado con el punto
+    del geocodificador en Conchalí); '' si son coherentes o no se puede
+    afirmar. Un consumidor de coordenadas confirmadas debe abstenerse ante
+    un motivo: nunca se elige otra coordenada en su lugar."""
+    try:
+        coordenadas = Coordenadas(longitud=float(destino.longitud), latitud=float(destino.latitud))
+    except (TypeError, ValueError, AttributeError):
+        return ""
+    return motivo_punto_fuera_de_comuna_conocida(
+        coordenadas, base_geografica_local, comunas=(str(getattr(destino, "comuna", "") or ""),),
+        despachar_a_crudo=str(getattr(destino, "direccion", "") or ""),
+    )
+
 def _comuna_que_cubre_punto(cubre, coordenadas: Coordenadas, *, excluir: str) -> str:
     """Primera comuna de la misma región que `excluir` con alguna dirección
     a <=1 km del punto, o ''."""

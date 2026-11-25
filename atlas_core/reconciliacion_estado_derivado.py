@@ -974,8 +974,13 @@ def reconciliar_estado_derivado(
     guias_objetivo: set[str] | None = None,
     omitir_coordenadas_catalogo: bool = False,
     recalcular_rutas_archivos: Collection[str] | None = None,
+    revalidar_territorio_archivos: Collection[str] | None = None,
 ) -> dict[str, object]:
     """Actualiza una operación antigua una sola vez por RULESET_VERSION.
+
+    `revalidar_territorio_archivos` (aditivo, opt-in, sólo focal): rutas ya
+    publicadas que se vuelven a resolver con la validación territorial
+    vigente -- ver `recalculo_ruta_planta.revalidar_rutas_territoriales`.
 
     `recalcular_rutas_archivos` (aditivo, opt-in -- `None` conserva el
     comportamiento de siempre): documentos, identificados por `archivo`,
@@ -1032,6 +1037,8 @@ def reconciliar_estado_derivado(
     raiz = Path(raiz_atlas)
     if recalcular_rutas_archivos is not None and guias_objetivo is None:
         raise ValueError("recalcular_rutas_archivos exige una reconciliación focal (guias_objetivo).")
+    if revalidar_territorio_archivos is not None and guias_objetivo is None:
+        raise ValueError("revalidar_territorio_archivos exige una reconciliación focal (guias_objetivo).")
     actual = raiz / "operacion" / "actual"
     dataset = actual / "analisis_completo_guias.csv"
     catalogos = raiz / "catalogos_privados"
@@ -1229,7 +1236,7 @@ def reconciliar_estado_derivado(
     if (
         not migracion and not por_reintentar and not reporte_desactualizado
         and not estado_derivado_incoherente and not falta_tarjeta_destino
-        and not capacidades_a_reevaluar and not recalcular_rutas_archivos
+        and not capacidades_a_reevaluar and not recalcular_rutas_archivos and not revalidar_territorio_archivos
         and not previa_comuna["guias_actualizadas"]
     ):
         return {
@@ -1330,6 +1337,8 @@ def reconciliar_estado_derivado(
             "huella_idempotencia": huella_idempotencia_actual,
             **({"recalcular_rutas_archivos": sorted(recalcular_rutas_archivos)}
                if recalcular_rutas_archivos else {}),
+            **({"revalidar_territorio_archivos": sorted(revalidar_territorio_archivos)}
+               if revalidar_territorio_archivos else {}),
         }, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
 
         # Recálculo explícito de rutas hacia planta confirmada (opt-in):
@@ -1341,6 +1350,13 @@ def reconciliar_estado_derivado(
             recalculo_rutas_planta = recalcular_rutas_hacia_planta_conocida(
                 raiz_atlas=raiz, archivos=recalcular_rutas_archivos,
                 proveedor_rutas=proveedor_rutas, reloj=reloj,
+            )
+        revalidacion_territorial = {"recalculadas": [], "retiradas": [], "abstenciones": [], "guias_actualizadas": []}
+        if revalidar_territorio_archivos:
+            from atlas_core.recalculo_ruta_planta import revalidar_rutas_territoriales
+            revalidacion_territorial = revalidar_rutas_territoriales(
+                raiz_atlas=raiz, archivos=revalidar_territorio_archivos, proveedor_rutas=proveedor_rutas,
+                proveedor_rutas_fallback=proveedor_rutas_fallback, reloj=reloj,
             )
 
         # Bloque P1 ELIMINAR DOBLE RECONCILIACIÓN -- si `revalidar_y_
@@ -2141,8 +2157,10 @@ def reconciliar_estado_derivado(
             | set(recuperacion_material_focal["recuperados"])
             | set(sincronizacion_tipo_carga["guias_actualizadas"])
             | set(recalculo_rutas_planta["guias_actualizadas"])
+            | set(revalidacion_territorial["guias_actualizadas"])
         ),
         "rutas_recalculadas_planta": recalculo_rutas_planta,
+        "revalidacion_territorial": revalidacion_territorial,
         "destino_vacio_confirmado_desde_ledger": destino_vacio_confirmado["guias_actualizadas"],
         "destinos_historial_recuperados": recuperacion_historial_destino,
         "destinos_historial_revertidos": reversion_historial_destino,
