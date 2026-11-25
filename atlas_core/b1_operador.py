@@ -380,6 +380,8 @@ _PATENTE_SUELTA = re.compile(r"^[A-Z]{2,4}\d{2,4}$")
 # campo de la tarjeta -> (cómo lo nombra el operador, frase canónica de B1,
 # valor que se acepta escrito solo, cómo se nombra en los mensajes, ejemplo)
 _REVISION_CAMPOS = {
+    "fecha": (r"FECHA(?:\s+DE\s+EMISION)?", "La fecha de emision de la guia {guia} es {valor}",
+              re.compile(r"^\d{1,2}[-/.]\d{1,2}[-/.]\d{4}$"), "la fecha de emision", "la fecha es 24-11-2026"),
     # Un número suelto va siempre al validador de peso, que explica el formato.
     "peso_kg": (r"PESO", "En la guía {guia} el peso correcto es {valor}", re.compile(r"^-?\d"),
                 "el peso", "el peso correcto es 12.450 kg"),

@@ -240,6 +240,52 @@ def test_misma_fecha_no_pide_confirmacion(con_guia):
     assert _sha(con_guia["dataset"]) == sha
 
 
+def test_confirmar_fecha_antigua_registra_confirmacion_y_retira_alerta(con_guia):
+    from atlas_core.alertas_fecha import alerta_fecha
+    from atlas_core.revalidacion_documental import reconciliar_bandeja_decisiones
+    filas = _filas(con_guia)
+    for fila in filas:
+        if fila['numero_guia'] == GUIA:
+            fila['fecha'] = '18-10-2020'
+            fila['metricas_procesamiento_json'] = json.dumps({'fecha_recepcion_utc': '2026-10-18T12:00:00Z'})
+    _escribir(con_guia, filas)
+    fila_antes = _fila_guia(con_guia)
+    assert alerta_fecha(fila_antes, _ledger(con_guia))
+    reconciliar_bandeja_decisiones(raiz_atlas=con_guia['raiz'], guias_objetivo={GUIA})
+    assert sum(d.get('tipo') == 'FECHA_SOSPECHOSA' for d in _bandeja(con_guia)) == 1
+    b1 = OperadorB1(con_guia['raiz'], usuario='JAVIER')
+    tarjeta = next(d for d in _bandeja(con_guia) if d['tipo'] == 'FECHA_SOSPECHOSA')
+    previo = b1.atender('fecha-antigua', f"@revision:{tarjeta['decision_id']} la fecha es 18-10-2020")
+    assert previo['estado'] == 'PREVIEW_PENDIENTE', previo
+    confirmado = b1.atender('fecha-antigua', 'si')
+    assert confirmado['estado'] == 'EJECUTADA', confirmado
+    assert _fila_guia(con_guia)['fecha'] == '18-10-2020'
+    assert alerta_fecha(_fila_guia(con_guia), _ledger(con_guia)) is None
+    assert not any(d.get('tipo') == 'FECHA_SOSPECHOSA' for d in _bandeja(con_guia))
+
+
+def test_corregir_fecha_alertada_conserva_ocr_y_no_reabre_tarjeta(con_guia):
+    from atlas_core.revalidacion_documental import reconciliar_bandeja_decisiones
+    filas = _filas(con_guia)
+    for fila in filas:
+        if fila['numero_guia'] == GUIA:
+            fila['fecha'] = '18-10-2020'
+            fila['metricas_procesamiento_json'] = json.dumps({'fecha_recepcion_utc': '2026-10-18T12:00:00Z', 'ocr': '18-10-2020'})
+    _escribir(con_guia, filas)
+    original = _sha(con_guia['original'])
+    reconciliar_bandeja_decisiones(raiz_atlas=con_guia['raiz'], guias_objetivo={GUIA})
+    assert sum(d.get('tipo') == 'FECHA_SOSPECHOSA' for d in _bandeja(con_guia)) == 1
+    b1 = OperadorB1(con_guia['raiz'], usuario='JAVIER')
+    tarjeta = next(d for d in _bandeja(con_guia) if d['tipo'] == 'FECHA_SOSPECHOSA')
+    assert b1.atender('fecha-alerta', f"@revision:{tarjeta['decision_id']} la fecha es 18-10-2026")['estado'] == 'PREVIEW_PENDIENTE'
+    assert b1.atender('fecha-alerta', 'si')['estado'] == 'EJECUTADA'
+    assert _fila_guia(con_guia)['fecha'] == '18-10-2026'
+    assert json.loads(_fila_guia(con_guia)['metricas_procesamiento_json'])['ocr'] == '18-10-2020'
+    assert _sha(con_guia['original']) == original
+    reconciliar_bandeja_decisiones(raiz_atlas=con_guia['raiz'], guias_objetivo={GUIA})
+    assert not any(d.get('tipo') == 'FECHA_SOSPECHOSA' for d in _bandeja(con_guia))
+
+
 # ------------------------------------------------------------ confirmación
 
 

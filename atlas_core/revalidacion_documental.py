@@ -8112,11 +8112,13 @@ def reconciliar_bandeja_decisiones(
     relaciones_historicas: list[dict[str, object]] = []
     def en_alcance(decision):
         return guias_objetivo is None or str((decision.get('documento') or {}).get('numero_guia','')) in guias_objetivo
+    ledger_fecha_disponible = False
     try:
         _ledger = json.loads((actual / "decisiones_aplicadas.json").read_text(encoding="utf-8"))
         decisiones_aplicadas_ledger = [
             a for a in (_ledger.get("aplicaciones") or []) if isinstance(a, dict)
         ]
+        ledger_fecha_disponible = isinstance(_ledger.get("aplicaciones"), list)
     except (OSError, json.JSONDecodeError, AttributeError):
         decisiones_aplicadas_ledger = []
 
@@ -8145,6 +8147,15 @@ def reconciliar_bandeja_decisiones(
         pendientes_actuales = artefacto_actual.get("decisiones", [])
     except (OSError, json.JSONDecodeError):
         pendientes_actuales = []
+
+    # La misma reconciliación atiende ingresos focales e históricos; la
+    # recepción sólo genera una pregunta, nunca una fecha nueva ni ledger.
+    if ledger_fecha_disponible:
+        from atlas_core.alertas_fecha import actualizar_alertas
+        pendientes_actuales = actualizar_alertas(
+            _leer_filas(dataset), pendientes_actuales, decisiones_aplicadas_ledger,
+            guias_objetivo=guias_objetivo,
+        )
 
     # Bloque 472339/CASA HELSINSKI -- red de seguridad GENERAL: antes de
     # reconciliar, se completa cualquier decisión de obra/destino

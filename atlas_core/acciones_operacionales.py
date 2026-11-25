@@ -1806,6 +1806,12 @@ def _plan_documento_campo(ctx: _Contexto, p: dict) -> Plan:
     actual = str(fila.get(campo, "")).strip()
     if actual == valor:
         sin_cambios = True
+        if campo == "fecha":
+            from atlas_core.alertas_fecha import alerta_fecha
+            ledger_fecha = _leer_json(ctx.archivos["ledger_decisiones"], {"aplicaciones": []})
+            aplicaciones_fecha = ledger_fecha.get("aplicaciones", []) if isinstance(ledger_fecha, dict) else []
+            if alerta_fecha(fila, aplicaciones_fecha):
+                sin_cambios = False
     else:
         # El propio reparador focal valida el valor y el guardián del ledger
         # (dry-run: nunca escribe).
@@ -1837,7 +1843,11 @@ def _plan_documento_campo(ctx: _Contexto, p: dict) -> Plan:
     if campo == "numero_transporte":
         return _plan_documento_transporte(ctx, p, fila, sin_cambios=sin_cambios)
     if campo == "fecha":
-        return _plan_documento_fecha(ctx, fila, actual, valor, sin_cambios=sin_cambios)
+        plan = _plan_documento_fecha(ctx, fila, actual, valor, sin_cambios=sin_cambios)
+        if actual == valor and not sin_cambios:
+            plan.datos["confirmar_fecha_existente"] = True
+            plan.consecuencias = ["La fecha actual se registrará como confirmada por una persona; no se modificará el original."]
+        return plan
     if campo == "descripcion_material":
         return _plan_documento_material_humano(ctx, fila, actual, valor, sin_cambios=sin_cambios)
     obsoletas = [d for d in ctx.decisiones() if _decision_obsoleta_por_campo(d, archivo, campo, valor)]
@@ -2107,6 +2117,21 @@ def _plan_documento_transporte(ctx: _Contexto, p: dict, fila: dict[str, str], *,
 def _aplicar_documento_campo(ctx: _Contexto, p: dict, plan: Plan, actor: str) -> dict:
     from atlas_core.reprocesamiento_reparador import CAMPOS_DOCUMENTALES_CONTROLADOS, reparar_documento_focal_con_valores_conocidos
     campo, valor, archivo = str(p["campo"]).lower(), str(p["valor"]), str(plan.datos["archivo"])
+    if plan.datos.get("confirmar_fecha_existente"):
+        with bloqueo_sesion(ctx.actual, "aplicar_decision_obra"):
+            ledger = _leer_json(ctx.archivos["ledger_decisiones"], {"schema_version": 1, "aplicaciones": []})
+            ledger.setdefault("aplicaciones", []).append({
+                "decision_id": f"ACCION_OPERACIONAL:{ctx.token}", "tipo": TIPO_LEDGER_CORRECCION,
+                "accion": "CORREGIR_CAMPO", "actor": actor, "confirmado_por": ctx.confirmado_por,
+                "fecha": ctx.reloj().astimezone(timezone.utc).isoformat(),
+                "documento": {"archivo": archivo, "numero_guia": plan.datos["guia"],
+                              "numero_transporte": plan.datos["transporte"]},
+                "campo": campo, "valor_documental": valor, "valor_corregido": valor,
+                "referencia": str(p.get("referencia", "")),
+            })
+            escribir_json_atomico(ctx.archivos["ledger_decisiones"], ledger)
+        return {"despues": {campo: valor}, "reconciliar": True,
+                "guias_revalidar": [plan.datos["guia"]], "regenerar_reporte": True}
     resultado = reparar_documento_focal_con_valores_conocidos(
         raiz_atlas=ctx.raiz, archivo=archivo, valores={campo: valor}, dry_run=False,
         reconciliar=False, tipos_ledger_superables=frozenset({TIPO_LEDGER_CORRECCION}),
