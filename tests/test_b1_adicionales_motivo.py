@@ -48,6 +48,17 @@ def test_motivo_libre_se_conserva_tal_cual(orden, texto, guias):
     assert intencion.parametros == {"guias": guias, "texto": texto}
 
 
+def test_lista_declarativa_completa():
+    orden = ("Las guías 475609, 482229, 482308, 483017, 483375, 483732, "
+             "483859, 483934 y 484418 tienen adicional de $30.000 por carga en Portezuelo")
+    intencion = interpretar_determinista(orden)
+    assert intencion.accion == "VIAJE_AGREGAR_OBSERVACION"
+    assert intencion.parametros == {
+        "guias": ["475609", "482229", "482308", "483017", "483375", "483732", "483859", "483934", "484418"],
+        "texto": "ESTE VIAJE TIENE ADICIONAL DE $30.000 POR CARGA EN PORTEZUELO",
+    }
+
+
 @pytest.mark.parametrize("orden,motivo", [
     ("Agrega un adicional de $15.000 por peaje de $5.000 a las guías 483082 y 483043", "otro importe"),
     ("Agrega un adicional de $15.000 por cada guía a las guías 483082 y 483043", "por viaje o por guía"),
