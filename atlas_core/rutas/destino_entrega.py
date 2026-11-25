@@ -47,8 +47,10 @@ from atlas_core.catalogo_destinos import (
     EstadoCalidadDestino,
     EstadoVigenciaDestino,
     consolidar_destinos_equivalentes,
+    _distancia_metros,
     direccion_confirmada_coincide,
     normalizar_nombre_destino,
+    nucleo_direccion_equivalente,
     numeracion_con_ruido_ocr,
     variantes_nombre_via,
 )
@@ -860,6 +862,17 @@ def _candidato_geocodificacion_desde_base_local(
         base_geografica_local, despachar_a_crudo,
         comuna=str(comuna_territorial_conocida or ""),
     )
+    if evidencia.resultado != "DIRECCION_EXACTA" and str(comuna_territorial_conocida or "").strip():
+        # Casos reales "HOLANDA 2040 PROVIDENCIA PROVIDENCIA" y "AV. VICUNA
+        # MACKENNA 3451 SAN JOAQUIN SANTIAGO": la cola territorial repetida
+        # o la etiqueta de ciudad final impiden separar la calle. Con la
+        # comuna ya conocida se consulta sólo calle + numeración (mismo
+        # núcleo que usa el catálogo, sin complementos de oficina/piso).
+        nucleo = nucleo_direccion_equivalente(sin_complementos_direccion(despachar_a_crudo))
+        if nucleo and nucleo != despachar_a_crudo:
+            evidencia = evidencia_local_para_direccion(
+                base_geografica_local, nucleo, comuna=str(comuna_territorial_conocida),
+            )
     if evidencia.resultado != "DIRECCION_EXACTA" or len(evidencia.candidatos) != 1:
         return None
     fila = evidencia.candidatos[0]
@@ -1797,6 +1810,9 @@ def _motivo_incoherencia_destino_validado(
     region: str,
     etiqueta_geocodificada: str,
     comuna_confirmada_humano: str = "",
+    coordenadas: Coordenadas | None = None,
+    base_geografica_local: "BaseGeograficaLocal | None" = None,
+    comuna_territorial_conocida: str = "",
 ) -> str:
     """Motivo por el que un destino RESUELTO por el geocodificador debe
     RECHAZARSE por incoherencia con la evidencia documental -- ``""`` si es
@@ -1835,11 +1851,104 @@ def _motivo_incoherencia_destino_validado(
             "GEOCODIFICACION_NUMERO_INCOMPATIBLE: "
             f"{_numero_calle(despachar_a_crudo or '')} != {_numero_calle(etiqueta_geocodificada or '')}"
         )
-    return motivo_incoherencia_destino_documental(
+    motivo = motivo_incoherencia_destino_documental(
         despachar_a_crudo=despachar_a_crudo or "",
         etiqueta_geocodificada=etiqueta_geocodificada or "",
         localidad=localidad or "", region=region or "",
     )
+    if motivo:
+        return motivo
+    return motivo_punto_fuera_de_comuna_conocida(
+        coordenadas, base_geografica_local, despachar_a_crudo=despachar_a_crudo or "",
+        comunas=(despachar_a_crudo or "", comuna_confirmada_humano or "", comuna_territorial_conocida or ""),
+    )
+
+
+MOTIVO_FUERA_DE_COMUNA_CONOCIDA = "GEOCODIFICACION_FUERA_DE_COMUNA_CONOCIDA"
+
+
+def motivo_punto_fuera_de_comuna_conocida(
+    coordenadas: Coordenadas | None, base_geografica_local: "BaseGeograficaLocal | None", *,
+    comunas: Iterable[str], despachar_a_crudo: str = "",
+) -> str:
+    """Casos reales HELSINSKI 5810 LA REINA (472096/472339/475603/483277/
+    83277; el punto cae en Huechuraba) y VICUÑA MACKENNA 3451 SAN JOAQUIN
+    (cae en Ñuñoa): el geocodificador devolvió un punto en otra comuna con
+    la etiqueta de ciudad "Santiago", compatible con cualquier comuna de la
+    RM, así que ninguna comparación de TEXTO lo detectaba.
+
+    Para cada comuna conocida con certeza (nombrada inequívocamente en
+    DESPACHAR A, confirmada por un humano o territorial conocida) se
+    exige evidencia POSITIVA de incompatibilidad en la base territorial
+    local: ninguna dirección de esa comuna a <=1 km del punto Y alguna
+    dirección de OTRA comuna de la misma región a <=1 km. Un punto sin
+    cobertura de ninguna comuna (zona rural, p. ej. AZA COLINA) o una comuna
+    fuera de la base (fuera de la RM) no se rechaza. La etiqueta de ciudad
+    "Santiago" nunca se usa como comuna de control."""
+    if coordenadas is None or base_geografica_local is None:
+        return ""
+    cubre = getattr(base_geografica_local, "comuna_cubre_punto", None)
+    revisadas: set[str] = set()
+    for texto in comunas:
+        comuna = _comuna_documental_inequivoca(texto or "")
+        clave = _texto_normalizado_sin_acentos(comuna).upper()
+        if not comuna or clave == "SANTIAGO" or clave in revisadas:
+            continue
+        revisadas.add(clave)
+        # Sólo un punto que la base sitúa FUERA de la comuna (ninguna
+        # dirección suya a <=1 km) es candidato a rechazo; dentro de ella, o
+        # sin cobertura (comuna fuera de la base), la ruta no se toca.
+        if cubre is None or cubre(comuna=comuna, latitud=coordenadas.latitud, longitud=coordenadas.longitud,
+                                  radio_m=DISTANCIA_PUNTO_EN_COMUNA_M) is not False:
+            continue
+        # 1) La base conoce la dirección EXACTA en esa comuna (HOLANDA 2040,
+        #    VICUÑA MACKENNA 3451): evidencia inequívoca; el rescate INE la
+        #    toma en lugar del punto rechazado.
+        exacta = _candidato_geocodificacion_desde_base_local(
+            base_geografica_local, despachar_a_crudo, comuna_territorial_conocida=comuna,
+        ) if despachar_a_crudo else None
+        if exacta is not None and exacta.coordenadas is not None:
+            return f"{MOTIVO_FUERA_DE_COMUNA_CONOCIDA}: {comuna} (dirección exacta en la base territorial)"
+        # 2) Sin dirección exacta: sólo evidencia positiva de OTRA comuna.
+        otra = _comuna_que_cubre_punto(cubre, coordenadas, excluir=comuna)
+        if otra:
+            return f"{MOTIVO_FUERA_DE_COMUNA_CONOCIDA}: {comuna} (punto en {otra})"
+    return ""
+
+
+
+def coordenada_de_destino_fuera_de_su_comuna(destino, base_geografica_local: "BaseGeograficaLocal | None") -> str:
+    """Motivo si las coordenadas guardadas de un destino del catálogo caen,
+    con evidencia positiva de la base territorial, fuera de su PROPIA comuna
+    (caso real 77a085b2 HELSINSKI 5810 / LA REINA, confirmado con el punto
+    del geocodificador en Conchalí); '' si son coherentes o no se puede
+    afirmar. Un consumidor de coordenadas confirmadas debe abstenerse ante
+    un motivo: nunca se elige otra coordenada en su lugar."""
+    try:
+        coordenadas = Coordenadas(longitud=float(destino.longitud), latitud=float(destino.latitud))
+    except (TypeError, ValueError, AttributeError):
+        return ""
+    return motivo_punto_fuera_de_comuna_conocida(
+        coordenadas, base_geografica_local, comunas=(str(getattr(destino, "comuna", "") or ""),),
+        despachar_a_crudo=str(getattr(destino, "direccion", "") or ""),
+    )
+
+def _comuna_que_cubre_punto(cubre, coordenadas: Coordenadas, *, excluir: str) -> str:
+    """Primera comuna de la misma región que `excluir` con alguna dirección
+    a <=1 km del punto, o ''."""
+    geografia = cargar_geografia("CL")
+    propia = geografia.normalizar(excluir)
+    if propia.estado != EstadoNormalizacion.EXACTA or propia.unidad is None:
+        return ""
+    region = geografia.parametros_geocodificacion(propia.unidad).codigo_contexto
+    for unidad in geografia.unidades:
+        if (unidad.nivel != propia.unidad.nivel or unidad.codigo == propia.unidad.codigo
+                or geografia.parametros_geocodificacion(unidad).codigo_contexto != region):
+            continue
+        if cubre(comuna=unidad.nombre_canonico, latitud=coordenadas.latitud, longitud=coordenadas.longitud,
+                 radio_m=DISTANCIA_PUNTO_EN_COMUNA_M) is True:
+            return unidad.nombre_canonico
+    return ""
 
 
 def resolver_destino_entrega_validado(
@@ -1903,6 +2012,8 @@ def resolver_destino_entrega_validado(
         localidad=resultado.localidad or "", region=resultado.region or "",
         etiqueta_geocodificada=resultado.etiqueta_geocodificada or "",
         comuna_confirmada_humano=comuna_confirmada_humano,
+        coordenadas=resultado.coordenadas, base_geografica_local=base_geografica_local,
+        comuna_territorial_conocida=comuna_territorial_conocida,
     )
     if not motivo_incoherencia:
         return precisar_comuna_tras_etiqueta_santiago(
@@ -1923,6 +2034,9 @@ def resolver_destino_entrega_validado(
         comuna_territorial_conocida=(
             comuna_territorial_conocida
             or _comuna_documental_inequivoca(comuna_confirmada_humano or "")
+            # VICUÑA MACKENNA 3451 SAN JOAQUIN SANTIAGO: la etiqueta de ciudad
+            # final no es la comuna; la inequívoca del propio texto sí.
+            or _comuna_documental_inequivoca(despachar_a_crudo or "")
         ),
     )
     if (
@@ -1933,6 +2047,8 @@ def resolver_destino_entrega_validado(
             localidad=ine.localidad or "", region=ine.region or "",
             etiqueta_geocodificada=ine.etiqueta or "",
             comuna_confirmada_humano=comuna_confirmada_humano,
+            coordenadas=ine.coordenadas, base_geografica_local=base_geografica_local,
+            comuna_territorial_conocida=comuna_territorial_conocida,
         )
     ):
         return ResultadoDestinoEntrega(

@@ -388,3 +388,223 @@ def recalcular_rutas_hacia_planta_conocida(
         if cambios:
             _escribir_filas_completas(dataset, filas)
     return resultado
+
+
+# --- Revalidación territorial explícita (25/11/2026) -------------------------
+#
+# Rutas YA publicadas con un punto fuera de la comuna conocida (HELSINSKI 5810
+# LA REINA en Conchalí, VICUÑA MACKENNA 3451 SAN JOAQUIN en Santiago centro...).
+# El dataset no guarda coordenadas, así que la validación territorial de
+# `destino_entrega` sólo actúa al volver a resolver. Este recálculo, opt-in y
+# sólo para los documentos pedidos por `archivo`, vuelve a resolver DESPACHAR A
+# con las reglas vigentes:
+# - resultado aceptado (p. ej. dirección exacta de la base territorial) ->
+#   publica esa ruta;
+# - rechazado por estar fuera de la comuna conocida -> retira los kilómetros y
+#   deja la ruta en revisión (comprobación pendiente);
+# - cualquier otro resultado (proveedor caído, otra incoherencia) -> no toca.
+# Nunca modifica el ledger, decisiones, eventos, catálogos ni el estado
+# operacional; documentos con destino operacional humano se abstienen (su ruta
+# la gobierna la decisión). Toda escritura deja la ruta anterior en auditoría.
+
+CLAVE_AUDITORIA_TERRITORIAL = "revalidacion_territorial_ruta"
+_CAMPOS_RUTA_TERRITORIAL = (
+    "direccion_entrega", "localidad_entrega", "region_entrega", "codigo_pais", "codigo_unidad",
+    "codigo_contexto", "distancia_km", "duracion_min", "proveedor_ruta", "estado_ruta", "motivo_ruta",
+    "estado_entrega",
+)
+
+
+def _comuna_confirmada_por_humano(entradas: list[dict], carpeta: Path) -> str:
+    """Comuna del destino que un humano confirmó para ESTE documento (caso
+    real 83277: CONFIRMAR del destino HELSINSKI 5810 / LA REINA; o
+    REGISTRAR_DIRECCION con comuna). Gana la última decisión; '' si no hay."""
+    comuna = ""
+    destinos = None
+    for entrada in entradas:
+        if entrada.get("accion") == "REGISTRAR_DIRECCION" and str(entrada.get("comuna_manual") or "").strip():
+            comuna = str(entrada["comuna_manual"]).strip()
+        elif (entrada.get("tipo") == "DESTINO_SIN_CONFIRMAR" and entrada.get("accion") == "CONFIRMAR"
+              and entrada.get("destino_id")):
+            if destinos is None:
+                from atlas_core.catalogo_destinos import CatalogoDestinos
+                try:
+                    destinos = {d.destino_id: d for d in CatalogoDestinos(carpeta / "destinos_maestros.json").listar()}
+                except (OSError, ValueError):
+                    destinos = {}
+            destino = destinos.get(str(entrada["destino_id"]))
+            comuna = str(getattr(destino, "comuna", "") or "").strip() or comuna
+    return comuna
+
+
+def revalidar_rutas_territoriales(
+    *, raiz_atlas: str | Path, archivos: Iterable[str], proveedor_rutas=None, proveedor_rutas_fallback=None,
+    reloj=lambda: datetime.now(timezone.utc),
+) -> dict[str, object]:
+    """Ver bloque «Revalidación territorial explícita». Devuelve
+    recalculadas, retiradas, abstenciones (con motivo) y guías actualizadas."""
+    from atlas_core.almacenamiento_portable import bloqueo_sesion
+    from atlas_core.catalogo_destinos import CatalogoDestinos, EstadoCalidadDestino
+    from atlas_core.catalogo_plantas import CatalogoPlantas
+    from atlas_core.destino_operacional import TIPO
+    from atlas_core.geografia.base_local import cargar_base_geografica_local_ine
+    from atlas_core.revalidacion_documental import (
+        _escribir_filas_completas, _leer_filas, _proveedor_rutas_fallback_predeterminado,
+        _proveedor_rutas_ors_predeterminado,
+    )
+    from atlas_core.rutas.destino_entrega import (
+        MOTIVO_FUERA_DE_COMUNA_CONOCIDA, _comuna_documental_inequivoca, _texto_normalizado_sin_acentos,
+        calcular_ruta_con_planta_conocida,
+    )
+
+    def _clave_comuna(comuna: str) -> str:
+        return _texto_normalizado_sin_acentos(comuna).strip().upper()
+
+    raiz = Path(raiz_atlas)
+    actual = raiz / "operacion" / "actual"
+    dataset = actual / "analisis_completo_guias.csv"
+    carpeta = raiz / "catalogos_privados"
+    pedidos = list(dict.fromkeys(str(a).strip() for a in archivos if str(a).strip()))
+    resultado: dict[str, object] = {"recalculadas": [], "retiradas": [], "abstenciones": [], "guias_actualizadas": []}
+    if not pedidos:
+        return resultado
+    plantas = CatalogoPlantas(carpeta / "plantas.json").listar()
+    plantas_por_id = {p.planta_id: p for p in plantas}
+    try:
+        confirmados = [d for d in CatalogoDestinos(carpeta / "destinos_maestros.json",
+                                                   ruta_clientes=carpeta / "clientes.json").listar()
+                       if d.estado_calidad == EstadoCalidadDestino.CONFIRMADO.value]
+    except (OSError, ValueError):
+        confirmados = []
+    if proveedor_rutas is None:
+        proveedor_rutas = _proveedor_rutas_ors_predeterminado(raiz_atlas=raiz)
+        if proveedor_rutas_fallback is None:
+            proveedor_rutas_fallback = _proveedor_rutas_fallback_predeterminado(raiz_atlas=raiz)
+    base_local = cargar_base_geografica_local_ine(raiz=raiz)
+
+    def leer_ledger() -> list:
+        ruta = actual / "decisiones_aplicadas.json"
+        if not ruta.is_file():
+            return []
+        aplicaciones = json.loads(ruta.read_text(encoding="utf-8-sig")).get("aplicaciones", [])
+        if not isinstance(aplicaciones, list):
+            raise ValueError("Ledger de decisiones sin aplicaciones validas")
+        return aplicaciones
+
+    def preparar(filas, aplicaciones, archivo):
+        coincidentes = [f for f in filas if str(f.get("archivo") or "").strip() == archivo]
+        if len(coincidentes) != 1:
+            return None, f"DOCUMENTO_NO_UNICO:{len(coincidentes)}"
+        fila = coincidentes[0]
+        if str(fila.get("estado_ruta") or "").strip() != "RUTA_CALCULADA":
+            return None, "RUTA_NO_PUBLICADA"
+        if not str(fila.get("despachar_a_crudo") or "").strip():
+            return None, "SIN_DESPACHAR_A"
+        origen = plantas_por_id.get(str(fila.get("planta_origen_id") or "").strip())
+        if origen is None:
+            return None, "PLANTA_ORIGEN_DESCONOCIDA"
+        entradas = _entradas_del_documento(aplicaciones, fila)
+        if any(e.get("tipo") == TIPO for e in entradas):
+            return None, "DESTINO_HUMANO_VIGENTE"
+        comuna_humana = _comuna_confirmada_por_humano(entradas, carpeta)
+        conocida = (_comuna_documental_inequivoca(str(fila.get("despachar_a_crudo") or ""))
+                    or _comuna_documental_inequivoca(comuna_humana))
+        if not conocida:
+            return None, "SIN_COMUNA_CONOCIDA"
+        # Una ruta publicada con la comuna conocida como localidad ya es
+        # territorialmente coherente (p. ej. VICUÑA MACKENNA 3451 resuelta
+        # por el catálogo en San Joaquín): no se vuelve a resolver. Sólo la
+        # etiqueta de ciudad "Santiago" u otra comuna dejan dudas.
+        publicada = _comuna_documental_inequivoca(str(fila.get("localidad_entrega") or ""))
+        if publicada and _clave_comuna(publicada) == _clave_comuna(conocida):
+            return None, "PUBLICADA_EN_SU_COMUNA"
+        return (fila, origen, comuna_humana), ""
+
+    def abstener(archivo, motivo):
+        resultado["abstenciones"].append({"archivo": archivo, "motivo": motivo})
+
+    try:
+        filas = _leer_filas(dataset, completas=True)
+        aplicaciones = leer_ledger()
+    except (OSError, ValueError) as error:
+        resultado["abstenciones"] = [{"archivo": a, "motivo": f"LECTURA_FALLIDA:{type(error).__name__}"}
+                                     for a in pedidos]
+        return resultado
+
+    # 1) Resolución con el proveedor real, fuera del lock.
+    calculos: dict[str, dict] = {}
+    for archivo in pedidos:
+        preparado, motivo = preparar(filas, aplicaciones, archivo)
+        if motivo:
+            abstener(archivo, motivo)
+            continue
+        fila, origen, comuna_humana = preparado
+        ruta = calcular_ruta_con_planta_conocida(
+            planta=origen, despachar_a_crudo=str(fila["despachar_a_crudo"]), proveedor_rutas=proveedor_rutas,
+            origen_determinado_por=str(fila.get("origen_determinado_por") or ""),
+            evidencia_origen=str(fila.get("evidencia_origen") or ""),
+            destinos_confirmados=confirmados, proveedor_geocodificacion_fallback=proveedor_rutas_fallback,
+            comuna_territorial_conocida=comuna_humana, comuna_confirmada_humano=comuna_humana,
+            base_geografica_local=base_local, plantas_conocidas=plantas,
+        )
+        if ruta.estado_ruta == "RUTA_CALCULADA" and str(ruta.distancia_km or "").strip():
+            nueva = {
+                "direccion_entrega": ruta.direccion_entrega_geocodificada, "localidad_entrega": ruta.localidad_entrega,
+                "region_entrega": ruta.region_entrega, "codigo_pais": ruta.codigo_pais,
+                "codigo_unidad": ruta.codigo_unidad, "codigo_contexto": ruta.codigo_contexto,
+                "distancia_km": ruta.distancia_km, "duracion_min": ruta.duracion_min,
+                "proveedor_ruta": ruta.proveedor_ruta, "estado_ruta": "RUTA_CALCULADA", "motivo_ruta": "",
+                "estado_entrega": "RESUELTO",
+            }
+            tipo = "recalculadas"
+        elif str(ruta.motivo_ruta or "").startswith(MOTIVO_FUERA_DE_COMUNA_CONOCIDA):
+            # Sin evidencia inequívoca de la ubicación correcta: se retiran
+            # los kilómetros incorrectos; la ruta queda por comprobar.
+            nueva = {
+                "direccion_entrega": str(fila.get("despachar_a_crudo") or ""), "localidad_entrega": "",
+                "region_entrega": "", "codigo_pais": "", "codigo_unidad": "", "codigo_contexto": "",
+                "distancia_km": "", "duracion_min": "", "proveedor_ruta": "",
+                "estado_ruta": "REQUIERE_REVISION", "motivo_ruta": str(ruta.motivo_ruta),
+                "estado_entrega": "REVISAR",
+            }
+            tipo = "retiradas"
+        else:
+            abstener(archivo, f"SIN_RESULTADO_CONCLUYENTE:{ruta.motivo_ruta or ruta.estado_ruta}")
+            continue
+        calculos[archivo] = {"nueva": nueva, "tipo": tipo, "huella": _huella_ruta(fila)}
+
+    if not calculos:
+        return resultado
+    instante = reloj().astimezone(timezone.utc).isoformat()
+    # 2) Escritura bajo el lock común del dataset, re-verificando todo.
+    with bloqueo_sesion(actual, "revalidacion_dataset"):
+        filas = _leer_filas(dataset, completas=True)
+        aplicaciones = leer_ledger()
+        cambios = False
+        for archivo, calculo in calculos.items():
+            preparado, motivo = preparar(filas, aplicaciones, archivo)
+            if motivo or _huella_ruta(preparado[0]) != calculo["huella"]:
+                abstener(archivo, f"CAMBIO_DURANTE_CALCULO:{motivo}" if motivo else "CAMBIO_DURANTE_CALCULO")
+                continue
+            fila = preparado[0]
+            anterior = {c: str(fila.get(c) or "") for c in _CAMPOS_RUTA_TERRITORIAL}
+            nueva = {c: str(v or "") for c, v in calculo["nueva"].items()}
+            if anterior == nueva:
+                abstener(archivo, "SIN_CAMBIO")
+                continue
+            fila.update(nueva)  # el estado operacional no se toca
+            metricas = _metricas(fila)
+            auditoria = metricas.get(CLAVE_AUDITORIA_TERRITORIAL)
+            auditoria = list(auditoria) if isinstance(auditoria, list) else []
+            auditoria.append({"fecha": instante, "resultado": calculo["tipo"], "ruta_anterior": anterior,
+                              "ruta_nueva": nueva})
+            metricas[CLAVE_AUDITORIA_TERRITORIAL] = auditoria
+            fila["metricas_procesamiento_json"] = json.dumps(metricas, ensure_ascii=False)
+            cambios = True
+            guia = str(fila.get("numero_guia") or "").strip()
+            resultado["guias_actualizadas"].append(guia)
+            resultado[calculo["tipo"]].append({"archivo": archivo, "numero_guia": guia,
+                                               "anterior": anterior, "nueva": nueva})
+        if cambios:
+            _escribir_filas_completas(dataset, filas)
+    return resultado
