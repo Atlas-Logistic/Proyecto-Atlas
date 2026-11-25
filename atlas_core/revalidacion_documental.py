@@ -4685,6 +4685,15 @@ def revalidar_ruta_con_destino_confirmado_en_catalogo_sin_ocr(
             # exigiría geocodificar -- se abstiene, nunca contradice.
             if solo_con_coordenadas and (destino.latitud is None or destino.longitud is None):
                 continue
+            # Caso real 77a085b2 (HELSINSKI 5810 / LA REINA, guías 83277 y
+            # 483277): el destino quedó CONFIRMADO con el punto del
+            # geocodificador en Conchalí. Coordenadas que la base territorial
+            # sitúa fuera de la propia comuna del destino no se usan: la fila
+            # sigue pendiente (nunca se elige otra coordenada).
+            if destino.latitud is not None and destino.longitud is not None:
+                from atlas_core.rutas.destino_entrega import coordenada_de_destino_fuera_de_su_comuna
+                if coordenada_de_destino_fuera_de_su_comuna(destino, base_geografica_local_ine):
+                    continue
             coordenada_origen = coordenada_ruteo_planta(planta)
             if coordenada_origen is None:
                 continue
@@ -4724,6 +4733,9 @@ def revalidar_ruta_con_destino_confirmado_en_catalogo_sin_ocr(
                 # el proveedor real sigue sin poder ubicarla (aquí, la
                 # canónica es idéntica al texto que ya fallaba), la fila
                 # queda intacta -- nunca se inventa una coordenada.
+                comuna_destino_control = str(destino.comuna or "").strip()
+                if normalizar_nombre_destino(comuna_destino_control) == "SANTIAGO":
+                    comuna_destino_control = ""
                 resultado = calcular_ruta_con_planta_conocida(
                     planta=planta, despachar_a_crudo=destino.direccion, proveedor_rutas=proveedor_rutas,
                     origen_determinado_por=str(fila.get("origen_determinado_por", "")),
@@ -4732,6 +4744,12 @@ def revalidar_ruta_con_destino_confirmado_en_catalogo_sin_ocr(
                     proveedor_geocodificacion_fallback=proveedor_rutas_fallback,
                     base_geografica_local=base_geografica_local_ine,
                     plantas_conocidas=tuple(plantas_por_id.values()),
+                    # Caso real 484099: la comuna del destino CONFIRMADO de la
+                    # obra ("SAN MARTIN 262", CONCEPCION) no viajaba y el
+                    # respaldo ubicó la calle homónima de Santiago (21,4 km).
+                    # La etiqueta de ciudad "Santiago" no es comuna de control.
+                    comuna_territorial_conocida=comuna_destino_control,
+                    comuna_confirmada_humano=comuna_destino_control,
                 )
                 if resultado.estado_ruta != EstadoRuta.RUTA_CALCULADA.value:
                     continue
