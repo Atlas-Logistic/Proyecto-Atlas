@@ -24,7 +24,7 @@ from typing import Mapping, Sequence
 
 from atlas_core.consultas_atlas import (
     _CHOFERES_AUSENTES, _COLUMNA_RELACION, _COLUMNAS_MULTIVALOR, DOMINIO_ASOCIACIONES_PATENTE_CHOFER,
-    DOMINIO_EVENTOS, DOMINIO_VIAJES, METRICA_COUNT_DISTINCT_CHOFER, METRICA_COUNT_DISTINCT_RELACION,
+    DOMINIO_EVENTOS, DOMINIO_VIAJES, FILTROS_OBSERVACION, METRICA_COUNT_DISTINCT_CHOFER, METRICA_COUNT_DISTINCT_RELACION,
     METRICA_COUNT_GUIAS,
     METRICA_COUNT_PATENTES_SIN_CHOFER, METRICA_COUNT_VIAJES, METRICA_LIST_DISTINCT_CHOFER,
     METRICA_LIST_RELACION, METRICA_LISTAR_VIAJES, METRICA_SUM_KM, METRICA_SUM_PESO, METRICA_SUM_TIEMPO,
@@ -139,6 +139,32 @@ def _soporte_eventos(resultado: ResultadoConsultaAtlas) -> dict:
     )
 
 
+def _pesos(valor: str) -> str:
+    return "$" + f"{int(valor):,}".replace(",", ".") if str(valor).isdigit() else ""
+
+
+def _soporte_observaciones(viajes) -> dict:
+    """Viajes con su adicional (confirmado o pendiente, con monto
+    confirmado o declarado y su origen) y la observación que lo sustenta."""
+    filas = []
+    for v in viajes:
+        estado = _texto(v.get("_adicional_estado"))
+        montos = [m for m in _texto(v.get("_adicional_montos")).split("|") if m]
+        if estado == "CONFIRMADO":
+            adicional = "Confirmado"
+            monto = " + ".join(_pesos(m) for m in montos)
+        elif estado == "PENDIENTE":
+            adicional = "Pendiente de confirmar monto"
+            declarado = _texto(v.get("_adicional_declarado"))
+            monto = f"{_pesos(declarado)} declarado" if declarado else "Sin monto"
+        else:
+            adicional, monto = "Sin adicional", ""
+        filas.append(_fila_viaje(v, adicional, monto, _texto(v.get("_adicional_origen")),
+                                 _texto(v.get("_observaciones_texto"))[:300]))
+    return _soporte("VIAJES", [*_COLUMNAS_VIAJE, "Adicional", "Monto", "Origen", "Observación"], filas,
+                    resumen=_plural(len(filas), "viaje", "viajes"))
+
+
 def soporte_semantico(resultado: ResultadoConsultaAtlas) -> dict | None:
     consulta = resultado.consulta_interpretada
     viajes = list(resultado.viajes_soporte)
@@ -154,6 +180,9 @@ def soporte_semantico(resultado: ResultadoConsultaAtlas) -> dict | None:
         return _soporte_eventos(resultado)
     if consulta.dominio != DOMINIO_VIAJES:
         return None  # incidencias/eventos ya tienen su propia vista semántica en Desktop
+
+    if any(f in consulta.filtros for f in FILTROS_OBSERVACION):
+        return _soporte_observaciones(viajes)
 
     if metrica in (METRICA_COUNT_DISTINCT_CHOFER, METRICA_LIST_DISTINCT_CHOFER):
         entidades = _entidades_con_viajes(

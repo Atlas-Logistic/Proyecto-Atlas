@@ -6,7 +6,7 @@ import pytest
 
 from atlas_core.b1_operador import OperadorB1, interpretar_determinista
 from atlas_core.acciones_operacionales import CapaAccionesOperacionales
-from atlas_core.consulta_adicionales import consultar_adicionales
+from atlas_core.responder_consulta_atlas import responder_consulta_atlas
 from atlas_core.registro_eventos_operacionales import leer_eventos_operacionales, registrar_evento
 
 from tests.test_b1_adicionales_operacion import Escritor, raiz  # noqa: F401  (fixture sintética de Codex)
@@ -86,9 +86,16 @@ def test_confirmado_es_idempotente_y_las_consultas_lo_cuentan(raiz):
     assert b.atender("c", CASO)["estado"] == "SIN_CAMBIOS"
     viajes = [{"viaje_id": "v1", "numero_transporte": "0000366043"}, {"viaje_id": "v2", "numero_transporte": "0000365998"},
               {"viaje_id": "v3", "numero_transporte": "0000900001"}]
-    tipo, resultado, mensaje = consultar_adicionales("¿Cuántos viajes tienen adicional de $15.000?", viajes, raiz)
-    assert (tipo, resultado.resultado) == ("resultado", 2), mensaje
-    assert consultar_adicionales("¿Cuántos viajes tienen adicional superior a $20.000?", viajes, raiz)[1].resultado == 0
+    import csv
+    ruta = raiz / "viajes_prueba.csv"
+    with ruta.open("w", encoding="utf-8-sig", newline="") as f:
+        w = csv.DictWriter(f, fieldnames=list(viajes[0]), delimiter=";"); w.writeheader(); w.writerows(viajes)
+    r = responder_consulta_atlas("¿Cuántos viajes tienen adicional de $15.000?", ruta_viajes=ruta, raiz_atlas=raiz)
+    assert r.resultado.resultado == 2, r.texto_respuesta
+    r = responder_consulta_atlas("¿Cuántos viajes tienen adicional superior a $20.000?", ruta_viajes=ruta, raiz_atlas=raiz)
+    assert r.resultado.resultado == 0
+    r = responder_consulta_atlas("¿Cuánto suman los adicionales?", ruta_viajes=ruta, raiz_atlas=raiz)
+    assert r.resultado.resultado == 30000 and "$30.000" in r.texto_respuesta
 
 
 @pytest.mark.parametrize("previa", ["ESTE VIAJE TIENE ADICIONAL DE $15.000",

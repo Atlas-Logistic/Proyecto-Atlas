@@ -93,15 +93,40 @@ METRICA_LIST_RELACION = "LIST_RELACION"
 # dimensiones para las que hoy no existe ningún conteo dedicado.
 METRICA_COUNT_DISTINCT_RELACION = "COUNT_DISTINCT_RELACION"
 METRICA_COUNT_PATENTES_SIN_CHOFER = "COUNT_PATENTES_SIN_CHOFER"
+# Suma de adicionales CONFIRMADOS (pesos) de los viajes que cumplen el
+# filtro. Los pendientes nunca se suman: su monto no está registrado.
+METRICA_SUM_ADICIONAL = "SUM_ADICIONAL"
+
+# --- Observaciones operacionales por viaje (adicionales, motivo, lugar de
+# retiro). Columnas VIRTUALES: no existen en `viajes.csv`; las agrega
+# `consulta_adicionales.indexar_observaciones` a partir del registro
+# canónico de eventos antes de ejecutar. Un filtro de observaciones sobre
+# filas sin estas columnas es un error, nunca "cero coincidencias". ---
+ADICIONAL_CONFIRMADO = "CONFIRMADO"
+ADICIONAL_PENDIENTE = "PENDIENTE"
+COLUMNA_OBSERVACIONES = "_observaciones"
+COLUMNA_OBSERVACIONES_TEXTO = "_observaciones_texto"
+COLUMNA_ADICIONAL_ESTADO = "_adicional_estado"
+COLUMNA_ADICIONAL_MONTOS = "_adicional_montos"
+COLUMNA_ADICIONAL_DECLARADO = "_adicional_declarado"
+COLUMNA_ADICIONAL_ORIGEN = "_adicional_origen"
+# Viaje con monto confirmado que ademas tiene otra observacion de adicional
+# sin monto inequivoco: se informa, nunca se suma ni se oculta.
+COLUMNA_ADICIONAL_OTRAS_PENDIENTES = "_adicional_otras_pendientes"
+FILTROS_OBSERVACION = ("observacion", "adicional", "adicional_estado")
+# Comparadores canónicos del filtro `adicional` ("CUALQUIERA" o
+# "<COMPARADOR> <monto>[,<monto>...]").
+COMPARADORES_ADICIONAL = ("IGUAL", "MAYOR", "MENOR", "MAYOR_IGUAL", "MENOR_IGUAL")
 METRICAS_SOPORTADAS = frozenset({
     METRICA_COUNT_VIAJES, METRICA_COUNT_GUIAS, METRICA_SUM_PESO,
     METRICA_SUM_KM, METRICA_SUM_TIEMPO, METRICA_LISTAR_VIAJES,
     METRICA_COUNT_DISTINCT_CHOFER, METRICA_COUNT_INCIDENCIAS,
     METRICA_COUNT_EVENTOS, METRICA_LIST_RELACION, METRICA_COUNT_DISTINCT_RELACION,
     METRICA_COUNT_DISTINCT_VIAJE, METRICA_LIST_DISTINCT_CHOFER, METRICA_LIST_VIAJES,
-    METRICA_COUNT_PATENTES_SIN_CHOFER,
+    METRICA_COUNT_PATENTES_SIN_CHOFER, METRICA_SUM_ADICIONAL,
 })
 _UNIDADES_POR_METRICA = {
+    METRICA_SUM_ADICIONAL: "pesos",
     METRICA_COUNT_VIAJES: "viajes", METRICA_COUNT_GUIAS: "guías",
     # Bloque 10 -- "km calculados", nunca "km" a secas: `distancia_km`
     # sale del ruteo (ORS driving-hgv), no de un GPS real de recorrido
@@ -219,7 +244,7 @@ FILTROS_SOPORTADOS = frozenset(_CAMPO_A_COLUMNA) | frozenset({
     # `fecha_ingesta` (timestamp real de ingesta a Atlas), nunca por la
     # fecha documental. Ver `_rango_fecha_ingesta_de_consulta`.
     "periodo_ingesta", "fecha_ingesta_desde", "fecha_ingesta_hasta", "dias_ingesta",
-    *FILTROS_PRESENCIA,
+    *FILTROS_PRESENCIA, *FILTROS_OBSERVACION,
 })
 
 # --- Bloque 4: agrupaciones V1. ---
@@ -234,6 +259,7 @@ AGRUPACIONES_SOPORTADAS = frozenset({
 # futuro que reutilice el mismo nombre de campo por casualidad.
 _CAMPOS_EXCLUSIVOS_POR_DOMINIO = {
     "estado_gestion": DOMINIO_EVENTOS,
+    **{campo: DOMINIO_VIAJES for campo in FILTROS_OBSERVACION},
 }
 
 # --- Bloque UNIVERSAL V1 (Bloque 8 del ticket): RELACIÓN -- proyecta
@@ -351,6 +377,15 @@ def validar_consulta(consulta: ConsultaAtlas) -> None:
             campos = _campos_presencia(consulta.filtros[campo])
             if not campos or any(c not in CAMPOS_PRESENCIA for c in campos):
                 raise ErrorConsultaAtlas(f"Campo de {campo} no soportado: {consulta.filtros[campo]!r}")
+    if consulta.metrica == METRICA_SUM_ADICIONAL and "adicional" not in consulta.filtros:
+        raise ErrorConsultaAtlas("SUM_ADICIONAL requiere el filtro `adicional`.")
+    if "adicional" in consulta.filtros:
+        parsear_filtro_adicional(consulta.filtros["adicional"])
+    estado_adicional = consulta.filtros.get("adicional_estado")
+    if estado_adicional is not None and estado_adicional not in (ADICIONAL_CONFIRMADO, ADICIONAL_PENDIENTE):
+        raise ErrorConsultaAtlas(f"Estado de adicional no soportado: {estado_adicional!r}")
+    if "observacion" in consulta.filtros and not terminos_observacion(consulta.filtros["observacion"]):
+        raise ErrorConsultaAtlas("El filtro de observación no tiene términos.")
     if consulta.agrupacion is not None and consulta.agrupacion not in AGRUPACIONES_SOPORTADAS:
         raise ErrorConsultaAtlas(f"Agrupación no soportada: {consulta.agrupacion!r}")
     dominio_exclusivo_agrupacion = _CAMPOS_EXCLUSIVOS_POR_DOMINIO.get(consulta.agrupacion or "")
@@ -465,6 +500,111 @@ def normalizar_texto_atlas(texto: str) -> str:
     mayuscula = " ".join(str(texto or "").strip().upper().split())
     sin_acentos = unicodedata.normalize("NFKD", mayuscula)
     return "".join(c for c in sin_acentos if not unicodedata.combining(c))
+
+
+def normalizar_observacion(texto: object) -> str:
+    """Nota de observación en mayúsculas, sin acentos; conserva saltos de
+    línea, "$" y separadores de miles (necesarios para leer importes)."""
+    sin_acentos = unicodedata.normalize("NFKD", str(texto or "").upper())
+    plano = "".join(c for c in sin_acentos if not unicodedata.combining(c))
+    plano = re.sub(r"[^A-Z0-9$.,/\n -]+", " ", plano.replace("\r", "\n"))
+    return "\n".join(" ".join(linea.split()) for linea in plano.split("\n") if linea.strip())
+
+
+def terminos_observacion(valor: str) -> tuple[str, ...]:
+    return tuple(t.strip() for t in normalizar_texto_atlas(valor).split("|") if t.strip())
+
+
+def _distancia_maxima_uno(a: str, b: str) -> bool:
+    if a == b:
+        return True
+    if abs(len(a) - len(b)) > 1:
+        return False
+    if len(a) == len(b):
+        return sum(x != y for x, y in zip(a, b)) == 1
+    corto, largo = (a, b) if len(a) < len(b) else (b, a)
+    return any(largo[:i] + largo[i + 1:] == corto for i in range(len(largo)))
+
+
+def palabra_en_observacion(palabra: str, palabras_nota) -> bool:
+    """Coincidencia tolerante a la escritura libre de Mobile: exacta, o con
+    una letra de diferencia en palabras de 5+ letras (VERSALLE/VERSALLES,
+    ADISIONAL/ADICIONAL)."""
+    if palabra in palabras_nota:
+        return True
+    # Con 5 letras o menos una letra cambia la palabra ("MARTE"/"MARTES").
+    if len(palabra) < 6:
+        return False
+    return any(len(p) >= 5 and _distancia_maxima_uno(palabra, p) for p in palabras_nota)
+
+
+_PALABRAS_VACIAS_TERMINO = frozenset({"DE", "DEL", "EL", "LA", "LOS", "LAS", "EN", "A", "AL"})
+
+
+def termino_en_observacion(termino: str, texto_observaciones: str) -> bool:
+    palabras_nota = set(re.findall(r"[A-Z0-9]+", re.sub(r"\bAFUERA\b", "FUERA", texto_observaciones)))
+    palabras = [p for p in re.findall(r"[A-Z0-9]+", termino) if p not in _PALABRAS_VACIAS_TERMINO]
+    return bool(palabras) and all(palabra_en_observacion(p, palabras_nota) for p in palabras)
+
+
+def parsear_filtro_adicional(valor: str) -> tuple[str | None, tuple[int, ...]]:
+    texto = str(valor or "").strip().upper()
+    if texto == "CUALQUIERA":
+        return None, ()
+    partes = texto.split(" ", 1)
+    if len(partes) != 2 or partes[0] not in COMPARADORES_ADICIONAL:
+        raise ErrorConsultaAtlas(f"Filtro de adicional no soportado: {valor!r}")
+    try:
+        montos = tuple(int(m) for m in partes[1].split(","))
+    except ValueError as error:
+        raise ErrorConsultaAtlas(f"Monto de adicional inválido: {valor!r}") from error
+    if not montos or any(m <= 0 for m in montos) or (len(montos) > 1 and partes[0] != "IGUAL"):
+        raise ErrorConsultaAtlas(f"Monto de adicional inválido: {valor!r}")
+    return partes[0], montos
+
+
+def monto_cumple(monto: int, comparador: str | None, montos: tuple[int, ...]) -> bool:
+    if comparador is None:
+        return True
+    referencia = montos[0]
+    return {"IGUAL": monto in montos, "MAYOR": monto > referencia, "MENOR": monto < referencia,
+            "MAYOR_IGUAL": monto >= referencia, "MENOR_IGUAL": monto <= referencia}[comparador]
+
+
+def montos_adicional_confirmados(viaje: Mapping[str, str]) -> tuple[int, ...]:
+    if viaje.get(COLUMNA_ADICIONAL_ESTADO) != ADICIONAL_CONFIRMADO:
+        return ()
+    return tuple(int(m) for m in str(viaje.get(COLUMNA_ADICIONAL_MONTOS) or "").split("|") if m.strip().isdigit())
+
+
+def _coincide_observaciones(viaje: Mapping[str, str], consulta: "ConsultaAtlas") -> bool:
+    filtros = consulta.filtros
+    if not any(c in filtros for c in FILTROS_OBSERVACION):
+        return True
+    if COLUMNA_OBSERVACIONES not in viaje:
+        raise ErrorConsultaAtlas("Las observaciones operacionales no fueron cargadas para esta consulta.")
+    if "observacion" in filtros and not all(
+            termino_en_observacion(t, str(viaje.get(COLUMNA_OBSERVACIONES) or ""))
+            for t in terminos_observacion(filtros["observacion"])):
+        return False
+    estado = viaje.get(COLUMNA_ADICIONAL_ESTADO) or ""
+    if "adicional_estado" in filtros and estado != filtros["adicional_estado"]:
+        return False
+    if "adicional" in filtros:
+        if not estado:
+            return False
+        comparador, montos = parsear_filtro_adicional(filtros["adicional"])
+        if comparador is not None:
+            declarado = str(viaje.get(COLUMNA_ADICIONAL_DECLARADO) or "")
+            if estado == ADICIONAL_CONFIRMADO:
+                candidatos = montos_adicional_confirmados(viaje)
+            elif filtros.get("adicional_estado") == ADICIONAL_PENDIENTE and declarado.isdigit():
+                candidatos = (int(declarado),)
+            else:
+                candidatos = ()
+            if not any(monto_cumple(m, comparador, montos) for m in candidatos):
+                return False
+    return True
 
 
 def _parsear_fecha_dataset(texto: str) -> date | None:
@@ -628,6 +768,8 @@ def _fila_coincide(
         fecha_ingesta = _parsear_fecha_ingesta_dataset(viaje.get("fecha_ingesta", ""))
         if fecha_ingesta is None or not (rango_fecha_ingesta[0] <= fecha_ingesta <= rango_fecha_ingesta[1]):
             return False
+    if not _coincide_observaciones(viaje, consulta):
+        return False
     for campo, valor in consulta.filtros.items():
         if campo in ("periodo", "fecha_desde", "fecha_hasta", "dias"):
             continue
@@ -635,6 +777,8 @@ def _fila_coincide(
             continue
         if campo == "tipo_evento":
             continue  # Bloque UNIVERSAL V1 -- sólo aplica al dominio EVENTOS
+        if campo in FILTROS_OBSERVACION:
+            continue  # ver `_coincide_observaciones`, evaluado una vez por fila
         if campo == "ausente_alguno":
             if not campos_ausentes_en_viaje(viaje, _campos_presencia(valor)):
                 return False
@@ -692,6 +836,10 @@ def _valor_metrica(viaje: Mapping[str, str], metrica: str, consulta: ConsultaAtl
         return _num(viaje.get("distancia_km"))
     if metrica == METRICA_SUM_TIEMPO:
         return _num(viaje.get("duracion_min"))
+    if metrica == METRICA_SUM_ADICIONAL:
+        filtro = (consulta.filtros if consulta is not None else {}).get("adicional", "CUALQUIERA")
+        comparador, montos = parsear_filtro_adicional(filtro)
+        return float(sum(m for m in montos_adicional_confirmados(viaje) if monto_cumple(m, comparador, montos)))
     return 0.0
 
 

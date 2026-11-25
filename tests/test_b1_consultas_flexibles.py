@@ -5,14 +5,21 @@ from tests.test_b1_consulta_adicionales import fuente
 
 @pytest.mark.parametrize('pregunta,total', [
     ('Cuantos viajes tienen adicional', 3),
-    ('Cuantos viajes tienen adicional de 575', 0),
+    ('Cuantos viajes tienen adicional de 575000', 0),
     ('Cuantos viajes tienen adicional de 15000 o 30000', 2),
-    ('Cuantos viajes tienen adicional de 10 o 12 o 28', 0),
+    ('Cuantos viajes tienen adicional de 10.000 o 12.000 o 28.000', 0),
 ])
 def test_adicionales_dinamicos(fuente, pregunta, total):
     raiz, ruta, *_ = fuente
     r = responder_consulta_atlas(pregunta, ruta_viajes=ruta, raiz_atlas=raiz)
     assert r.resultado.resultado == total
+
+
+@pytest.mark.parametrize('pregunta', ['Cuantos viajes tienen adicional de 575', 'viajes con adicional de 30'])
+def test_monto_sin_miles_pide_aclaracion_real(fuente, pregunta):
+    raiz, ruta, *_ = fuente
+    r = responder_consulta_atlas(pregunta, ruta_viajes=ruta, raiz_atlas=raiz)
+    assert r.estado == 'AMBIGUA' and r.resultado is None and r.opciones_aclaracion
 
 
 def test_pendientes_tecnicos_son_registro_no_estado(fuente):
