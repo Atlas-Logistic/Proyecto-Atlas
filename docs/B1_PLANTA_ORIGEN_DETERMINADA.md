@@ -42,7 +42,7 @@ Origen y destino son independientes: un destino confirmado ya no bloquea la corr
   - si la ruta anterior tenía coordenadas, se conservan (junto con la región y los códigos territoriales) y solo se pide al proveedor el recorrido hasta ellas; el destino no se vuelve a geocodificar;
   - si no las tenía, se usa el mismo cálculo de la confirmación (`calcular_ruta_operacional`), con la comuna confirmada como control.
 - Si el proveedor no responde, la ruta queda pendiente (`ORIGEN_MODIFICADO_RUTA_PENDIENTE`): se publican el destino y sus coordenadas, pero nunca los kilómetros anteriores.
-- En las decisiones con «conservar estado», la ruta sigue requiriendo comprobación; la distancia documental (calculada desde la planta anterior y protegida en el dataset) deja de publicarse.
+- En las decisiones con «conservar estado», la distancia documental (calculada desde la planta anterior y protegida en el dataset) deja de publicarse. Si hay una ruta recalculada válida desde la planta actual para esa decisión, se publica como calculada: es la comprobación pendiente. Si no la hay, la ruta sigue requiriendo comprobación.
 
 La ruta se guarda en `metricas_procesamiento_json.ruta_operacional_recalculada`, ligada a la decisión, la dirección, la comuna y la **planta de origen** (`planta_origen_id`). Se escribe en el mismo bloqueo que la planta nueva. La auditoría `recalculo_ruta_origen` registra la ruta anterior y la nueva.
 

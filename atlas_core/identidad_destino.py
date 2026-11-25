@@ -209,21 +209,27 @@ class IndiceIdentidadDestinos:
         (`consolidar_destinos_equivalentes`, <=150 m). Caso real 485242
         (SANTA ISABEL 585, LAMPA): dos destinos confirmados de la misma
         obra a 535 m -- ambigüedad real, se abstiene."""
+        puntos = self.puntos_confirmados(direccion, comuna)
+        return puntos[0] if puntos is not None and len(puntos) == 1 else None
+
+    def puntos_confirmados(self, direccion: str, comuna: str) -> list | None:
+        """Puntos distintos (coordenadas válidas, consolidados a <=150 m)
+        que el catálogo confirma para esta dirección + comuna. ``None`` si
+        el catálogo no conoce esa identidad; ``[]`` si la conoce sin
+        coordenadas; más de uno = ambigüedad (nunca se elige)."""
         identidad = self.identificar((direccion,), comunas_conocidas={comuna_oficial(comuna)} - {""})
         if identidad is None:
             return None
         clave = next(c for c in self._destinos if _texto_clave(c) == identidad.clave)
-        puntos = consolidar_destinos_equivalentes(self._destinos[clave])
-        if len(puntos) != 1:
-            return None
-        destino = puntos[0]
-        try:
-            latitud, longitud = float(destino.latitud), float(destino.longitud)
-        except (TypeError, ValueError):
-            return None
-        if not (-90 <= latitud <= 90 and -180 <= longitud <= 180):
-            return None
-        return destino
+        validos = []
+        for destino in self._destinos[clave]:
+            try:
+                latitud, longitud = float(destino.latitud), float(destino.longitud)
+            except (TypeError, ValueError):
+                continue
+            if -90 <= latitud <= 90 and -180 <= longitud <= 180:
+                validos.append(destino)
+        return consolidar_destinos_equivalentes(validos)
 
 
 def _texto_clave(clave: tuple) -> str:

@@ -300,6 +300,9 @@ def test_conservar_estado_tras_correccion_publica_solo_la_ruta_de_la_planta_actu
                 'ruta': {**RUTA, 'distancia_km': '8', 'planta_origen_id': 'P2'}}
     fila = _fila('P2', metricas_procesamiento_json=json.dumps({'ruta_operacional_recalculada': registro}))
     vista = proyectar_destino(fila, ledger)
-    assert vista['distancia_km'] == '8' and vista['estado_ruta'] == 'REQUIERE_COMPROBACION'
+    # La ruta recalculada desde la planta actual ES la comprobación pendiente
+    # (recuperación de comunas 25/11): se publica como calculada.
+    assert vista['distancia_km'] == '8' and vista['estado_ruta'] == 'RUTA_CALCULADA'
+    assert vista['ruta_requiere_comprobacion'] is False
     vista = proyectar_destino({**fila, 'planta_origen_id': 'P3'}, ledger)
     assert vista['distancia_km'] == '' and vista['motivo_ruta'] == 'ORIGEN_MODIFICADO_RUTA_PENDIENTE'

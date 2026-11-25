@@ -242,21 +242,32 @@ def test_recalculo_explicito_publica_ruta_de_decision_existente(raiz):
     assert r2["abstenciones"] == [{"archivo": "mobile/7cf1/original.jpg", "motivo": "SIN_CAMBIO"}]
 
 
-def test_recalculo_explicito_se_abstiene_ante_ambiguedad_y_conservar(raiz):
+def test_recalculo_explicito_se_abstiene_ante_ambiguedad(raiz):
+    proveedor = Proveedor()
+    r = recalcular_rutas_hacia_planta_conocida(raiz_atlas=raiz, archivos=["485242.jpeg", "485469.jpeg"],
+                                               proveedor_rutas=proveedor)
+    assert r["recalculadas"] == [] and proveedor.destinos == [] and proveedor.geocodificaciones == []
+    assert {a["archivo"]: a["motivo"] for a in r["abstenciones"]} == {
+        "485242.jpeg": "DESTINO_CATALOGO_AMBIGUO",
+        "485469.jpeg": "DESTINO_NO_ES_PLANTA_CONOCIDA_INEQUIVOCA",
+    }
+
+
+def test_conservar_estado_con_identidad_de_catalogo_se_comprueba(raiz):
     ruta = raiz / "operacion/actual/decisiones_aplicadas.json"
     ledger = _ledger(raiz)
     ledger["aplicaciones"][0]["conservar_estado_operacional"] = True
     ruta.write_text(json.dumps(ledger), encoding="utf-8")
     proveedor = Proveedor()
-    r = recalcular_rutas_hacia_planta_conocida(
-        raiz_atlas=raiz, archivos=["mobile/7cf1/original.jpg", "485242.jpeg", "485469.jpeg"],
-        proveedor_rutas=proveedor)
-    assert r["recalculadas"] == [] and proveedor.destinos == [] and proveedor.geocodificaciones == []
-    assert {a["archivo"]: a["motivo"] for a in r["abstenciones"]} == {
-        "mobile/7cf1/original.jpg": "DESTINO_HUMANO_CONSERVA_ESTADO",
-        "485242.jpeg": "DESTINO_NO_ES_PLANTA_CONOCIDA_INEQUIVOCA",
-        "485469.jpeg": "DESTINO_NO_ES_PLANTA_CONOCIDA_INEQUIVOCA",
-    }
+    r = recalcular_rutas_hacia_planta_conocida(raiz_atlas=raiz, archivos=["mobile/7cf1/original.jpg"],
+                                               proveedor_rutas=proveedor)
+    assert [x["numero_guia"] for x in r["recalculadas"]] == ["492111"]
+    assert proveedor.geocodificaciones == [] and proveedor.destinos == [VISTA_CLARA]
+    assert _ledger(raiz) == ledger
+    vista = proyectar_destino(_filas(raiz)["mobile/7cf1/original.jpg"], ledger)
+    assert (vista["estado_ruta"], vista["distancia_km"], vista["ruta_requiere_comprobacion"]) == (
+        "RUTA_CALCULADA", "17.4211", False)
+    assert vista["estado_operacional"] == "REQUIERE_REVISION"  # conservado
 
 
 def test_recalculo_explicito_sin_ruta_del_proveedor_no_escribe(raiz):
@@ -280,3 +291,37 @@ def test_cola_tecnica_excluye_ruta_resuelta_por_destino_humano(raiz):
     recalcular_rutas_hacia_planta_conocida(raiz_atlas=raiz, archivos=["mobile/7cf1/original.jpg"],
                                            proveedor_rutas=Proveedor())
     assert cola() == ["485242", "485469"]
+
+
+def test_conservar_con_destino_ambiguo_no_se_geocodifica(raiz):
+    # Caso real 485242: "conservar estado" + SANTA ISABEL 585 con dos puntos
+    # confirmados distintos. La comprobación no puede desempatar
+    # geocodificando: se abstiene.
+    ruta = raiz / "operacion/actual/decisiones_aplicadas.json"
+    ledger = _ledger(raiz)
+    ledger["aplicaciones"][1]["conservar_estado_operacional"] = True
+    ruta.write_text(json.dumps(ledger), encoding="utf-8")
+    proveedor = Proveedor()
+    r = recalcular_rutas_hacia_planta_conocida(raiz_atlas=raiz, archivos=["485242.jpeg"], proveedor_rutas=proveedor)
+    assert r["recalculadas"] == [] and proveedor.geocodificaciones == [] and proveedor.destinos == []
+    assert r["abstenciones"] == [{"archivo": "485242.jpeg", "motivo": "DESTINO_CATALOGO_AMBIGUO"}]
+
+
+@pytest.mark.parametrize("entrada,recalcula", [
+    ({"tipo": "CORRECCION_DOCUMENTAL_OPERADOR", "accion": "CORREGIR_CAMPO", "campo": "cliente"}, True),
+    ({"tipo": "CORRECCION_DOCUMENTAL_OPERADOR", "accion": "CORREGIR_CAMPO", "campo": "patente_rampla"}, True),
+    ({"tipo": "CHOFER_OPERACIONAL_DOCUMENTO", "accion": "CORREGIR_CHOFER_OPERACIONAL"}, True),
+    ({"tipo": "CORRECCION_DOCUMENTAL_OPERADOR", "accion": "CORREGIR_CAMPO", "campo": "planta_origen_id"}, False),
+    ({"tipo": "CORRECCION_DOCUMENTAL_OPERADOR", "accion": "CORREGIR_CAMPO", "campo": "despachar_a_crudo"}, False),
+    ({"tipo": "DESTINO_NO_RESUELTO", "accion": "REGISTRAR_DIRECCION"}, False),
+    ({"tipo": "ORIGEN_NO_CONFIRMADO", "accion": "CONFIRMAR"}, False),
+])
+def test_correcciones_sin_efecto_en_la_ruta_del_destino_humano(raiz, entrada, recalcula):
+    ruta = raiz / "operacion/actual/decisiones_aplicadas.json"
+    ledger = _ledger(raiz)
+    ledger["aplicaciones"].insert(0, {**entrada, "decision_id": "X", "documento": {
+        "archivo": "mobile/7cf1/original.jpg", "numero_guia": "492111", "numero_transporte": "No encontrado"}})
+    ruta.write_text(json.dumps(ledger), encoding="utf-8")
+    r = recalcular_rutas_hacia_planta_conocida(raiz_atlas=raiz, archivos=["mobile/7cf1/original.jpg"],
+                                               proveedor_rutas=Proveedor())
+    assert bool(r["recalculadas"]) is recalcula, r["abstenciones"]

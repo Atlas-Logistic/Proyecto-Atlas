@@ -662,13 +662,39 @@ VIA_FALLBACK_ESTRUCTURADO = "FALLBACK_GEOCODER_ESTRUCTURADO"
 # documento/OCR -- sólo interpreta mejor el texto YA extraído.
 _PATRON_NUMERO_CON_PREFIJO_OCR = re.compile(r"\b[A-Za-zÁÉÍÓÚÜÑáéíóúüñ]\d{1,6}\b")
 
+# Caso real 492036 ("APOQUINDO OE.605 PISO 6 6410 LAS CONDES"): el número
+# de una oficina, piso, departamento o local NO es el número de la calle.
+# Leer "605" como número de casa rechazaba la geocodificación correcta
+# (APOQUINDO 6410) por GEOCODIFICACION_NUMERO_INCOMPATIBLE y la ruta
+# quedaba sin kilómetros. Sólo se reconoce un complemento con su palabra
+# explícita delante del número; "OE." únicamente con punto (lectura OCR de
+# "OF." en ese caso), nunca "OE" suelto. Un piso tiene a lo más 2 dígitos y
+# una oficina/depto/local a lo más 4: "PISO 6410" (decisión de 492036, el
+# "PISO 6 6410" del documento sin espacio) no es un piso, así que 6410
+# sigue siendo el número de la calle. Un texto cuyo único número es un
+# complemento queda SIN número de calle (ausencia, no contradicción).
+_PATRON_COMPLEMENTO_DIRECCION = re.compile(
+    r"\bPISO\b\.?\s*(?:N[°º]?\.?\s*)?\d{1,2}\b"
+    r"|\b(?:OF|OFIC|OFICINA|DEPTO|DPTO|DEPARTAMENTO|LOCAL)\b\.?\s*(?:N[°º]?\.?\s*)?\d{1,4}\b"
+    r"|\bOE\.\s*\d{1,4}\b",
+    re.IGNORECASE,
+)
+
+
+def sin_complementos_direccion(texto: str) -> str:
+    """`texto` sin los complementos numerados (oficina, piso, depto,
+    local): lo que queda es la calle con su numeración propia."""
+    return re.sub(r"\s+", " ", _PATRON_COMPLEMENTO_DIRECCION.sub(" ", str(texto or ""))).strip()
+
 
 def _numeros_de_calle(texto: str) -> set[str]:
     """Números de calle presentes en `texto` -- tokens numéricos
     completos, MÁS tokens con un único carácter pegado adelante
     (`_PATRON_NUMERO_CON_PREFIJO_OCR`) interpretados por su parte
     numérica (nunca por el prefijo, que un geocodificador estructurado
-    tampoco trae en su propio `house_number`)."""
+    tampoco trae en su propio `house_number`). Los números de oficina,
+    piso, depto o local no son números de calle."""
+    texto = sin_complementos_direccion(texto)
     numeros = set(_PATRON_NUMERO_CALLE.findall(texto))
     numeros.update(token[1:] for token in _PATRON_NUMERO_CON_PREFIJO_OCR.findall(texto))
     return numeros
@@ -1112,6 +1138,52 @@ def _trae_numero_calle(texto: str) -> bool:
         any(c.isdigit() for c in token) and any(c.isalpha() for c in token)
         for token in _PATRON_TOKEN_ALFANUMERICO_CORTO.findall(texto)
     )
+
+
+DISTANCIA_PUNTO_EN_COMUNA_M = 1000.0
+
+
+def precisar_comuna_tras_etiqueta_santiago(
+    resultado: ResultadoDestinoEntrega, *, despachar_a_crudo: str, comuna_confirmada_humano: str = "",
+    base_geografica_local: "BaseGeograficaLocal | None" = None,
+) -> ResultadoDestinoEntrega:
+    """Casos reales 492008/484015 (VISTA CLARA 2351 CERRILLOS, PEDRO AGUIRRE
+    CERDA 7060): el geocodificador ubica bien el punto, pero su localidad es
+    la etiqueta de CIUDAD "Santiago" (13101); la comuna real que trae
+    DESPACHAR A se perdía en la fila y el reporte.
+
+    Sólo se precisa cuando todo coincide: la localidad devuelta es
+    exactamente "Santiago"; DESPACHAR A nombra inequívocamente UNA comuna
+    (o la confirmó un humano; si ambas existen deben ser la misma), distinta
+    de Santiago y territorialmente compatible; y la base territorial local
+    confirma que el punto cae en esa comuna (alguna dirección suya a <=1 km,
+    mismo umbral que el catálogo). Nunca usa el campo COMUNA del sitio
+    registrado ni mueve coordenadas. Sin base local, o si no lo confirma,
+    el resultado queda como estaba."""
+    if (resultado.estado != ESTADO_RESUELTO or resultado.coordenadas is None or base_geografica_local is None
+            or _texto_normalizado_sin_acentos(resultado.localidad or "").strip().upper() != "SANTIAGO"):
+        return resultado
+    candidatas = {c for c in (_comuna_documental_inequivoca(despachar_a_crudo or ""),
+                              _comuna_documental_inequivoca(comuna_confirmada_humano or "")) if c}
+    if len(candidatas) != 1:
+        return resultado
+    comuna = next(iter(candidatas))
+    if (_texto_normalizado_sin_acentos(comuna).upper() == "SANTIAGO"
+            or not _comunas_territorialmente_compatibles(comuna, resultado.localidad)):
+        return resultado
+    cubre = getattr(base_geografica_local, "comuna_cubre_punto", None)
+    if cubre is None or cubre(comuna=comuna, latitud=resultado.coordenadas.latitud,
+                              longitud=resultado.coordenadas.longitud,
+                              radio_m=DISTANCIA_PUNTO_EN_COMUNA_M) is not True:
+        return resultado
+    geografia = cargar_geografia("CL")
+    normalizada = geografia.normalizar(comuna)
+    if normalizada.estado != EstadoNormalizacion.EXACTA or normalizada.unidad is None:
+        return resultado
+    contexto = geografia.parametros_geocodificacion(normalizada.unidad)
+    return replace(resultado, localidad=contexto.nombre_unidad, region=contexto.nombre_contexto or resultado.region,
+                   codigo_pais=contexto.codigo_pais, codigo_unidad=contexto.codigo_unidad,
+                   codigo_contexto=contexto.codigo_contexto)
 
 
 def _etiqueta_geocodificada_o_texto_documental(*, etiqueta: str, texto_documental: str) -> str:
@@ -1833,7 +1905,10 @@ def resolver_destino_entrega_validado(
         comuna_confirmada_humano=comuna_confirmada_humano,
     )
     if not motivo_incoherencia:
-        return resultado
+        return precisar_comuna_tras_etiqueta_santiago(
+            resultado, despachar_a_crudo=despachar_a_crudo or "",
+            comuna_confirmada_humano=comuna_confirmada_humano, base_geografica_local=base_geografica_local,
+        )
     # GEOGRAFÍA 3 -- el candidato del geocodificador es incoherente con la
     # dirección documental; ANTES de rechazar, se prueba el candidato de
     # la base territorial INE v3 (calle + número confirmados en el maestro,
@@ -2860,8 +2935,9 @@ def texto_destino_degradado(texto: str) -> bool:
 def _numero_calle(texto: str) -> str:
     """Primer número de casa reconocible en una dirección (el que va justo
     después del nombre de calle, antes de la comuna). Cadena vacía si no
-    hay ninguno."""
-    coincidencia = re.search(r"\b(\d{1,6})\b", str(texto or ""))
+    hay ninguno. Los números de oficina, piso, depto o local no cuentan
+    (`sin_complementos_direccion`)."""
+    coincidencia = re.search(r"\b(\d{1,6})\b", sin_complementos_direccion(texto))
     return coincidencia.group(1) if coincidencia else ""
 
 
@@ -2935,6 +3011,16 @@ def _nucleo_calle(texto: str, *comunas_a_excluir: str) -> set[str]:
         excluir |= {
             t for t in re.findall(r"[A-Z0-9]+", _texto_normalizado_sin_acentos(comuna or "").upper())
         }
+    texto = sin_complementos_direccion(texto)
+    # Caso real 492036: el geocodificador escribe el número ANTES de la
+    # calle ("6410 Avenida Apoquindo, Santiago, RM, Chile"). Leer sólo lo
+    # anterior al número dejaba la calle vacía y la etiqueta se rechazaba
+    # como DEMASIADO_GENERICA aunque calle y número coincidieran. Si el
+    # primer segmento empieza por el número, la calle es lo que sigue.
+    segmento = texto.split(",", 1)[0]
+    inicial = re.match(r"\s*\d{1,6}\s+(?=\D)", segmento)
+    if inicial:
+        texto = segmento[inicial.end():]
     coincidencia = re.search(r"\b\d{1,6}\b", texto or "")
     cabeza = (texto or "")[: coincidencia.start()] if coincidencia else (texto or "")
     nucleo: set[str] = set()

@@ -254,11 +254,22 @@ def test_otra_decision_humana_sobre_el_documento_se_respeta(raiz):
     assert _sin_cambios(raiz, ["477043.jpeg"]) == ["DECISION_HUMANA_AFECTA_RUTA:DESTINO_NO_RESUELTO"]
 
 
-def test_destino_humano_que_conserva_estado_se_respeta(raiz):
+def test_destino_humano_que_conserva_estado_recibe_su_comprobacion(raiz):
+    # "Conservar estado" deja la ruta de la dirección confirmada por
+    # comprobar; el recálculo explícito la hace sin tocar la decisión ni la
+    # fila documental, y la proyección la publica como calculada.
     ledger = _ledger(raiz)
     ledger["aplicaciones"][0]["conservar_estado_operacional"] = True
     (raiz / "operacion/actual/decisiones_aplicadas.json").write_text(json.dumps(ledger), encoding="utf-8")
-    assert _sin_cambios(raiz, ["mobile/82f1/original.jpg"]) == ["DESTINO_HUMANO_CONSERVA_ESTADO"]
+    antes = _filas(raiz)["mobile/82f1/original.jpg"]
+    r = recalcular_rutas_hacia_planta_conocida(raiz_atlas=raiz, archivos=["mobile/82f1/original.jpg"],
+                                               proveedor_rutas=Proveedor())
+    assert [x["numero_guia"] for x in r["recalculadas"]] == ["488100"] and _ledger(raiz) == ledger
+    fila = _filas(raiz)["mobile/82f1/original.jpg"]
+    assert all(fila[c] == antes[c] for c in ("distancia_km", "estado_ruta", "estado_operacional"))
+    vista = proyectar_destino(fila, ledger)
+    assert (vista["estado_ruta"], vista["distancia_km"]) == ("RUTA_CALCULADA", "13.8198")
+    assert vista["estado_operacional"] == antes["estado_operacional"]  # conservado
 
 
 def test_destino_humano_hacia_otra_direccion_no_se_recalcula(raiz):

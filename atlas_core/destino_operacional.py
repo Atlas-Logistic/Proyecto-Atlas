@@ -166,6 +166,21 @@ def proyectar_destino(fila: Mapping[str, object], ledger: Mapping[str, object]) 
         if conservar:
             salida["direccion_entrega"], salida["localidad_entrega"] = direccion, comuna
             salida["estado_ruta_historica"] = salida.get("estado_ruta", "")
+            from atlas_core.recalculo_ruta_planta import ruta_operacional_recalculada
+            comprobada = ruta_operacional_recalculada(fila, decision_id=decision_id, direccion=direccion,
+                                                      comuna=comuna)
+            if (ruta_valida(comprobada, comuna) and str(comprobada.get("planta_origen_id") or "").strip()
+                    and ruta_de_planta_actual(comprobada, fila, origen_corregido_despues=True)):
+                # Casos reales 492059/492036: la comprobación pendiente ya se
+                # hizo -- ruta calculada para ESTA decisión, dirección y
+                # comuna desde la planta que el documento tiene hoy. Se
+                # publica como calculada; el estado operacional se conserva.
+                for campo in CAMPOS_RUTA:
+                    salida[campo] = str(comprobada.get(campo) or "")
+                salida["motivo_ruta"] = ""
+                salida["estado_entrega"] = "RESUELTO"
+                salida["ruta_requiere_comprobacion"] = False
+                return salida
             salida["estado_ruta"] = "REQUIERE_COMPROBACION"
             salida["ruta_requiere_comprobacion"] = True
             if vigente["origen_corregido_despues"]:
