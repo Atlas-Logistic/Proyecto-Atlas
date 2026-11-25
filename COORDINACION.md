@@ -49,3 +49,12 @@ El estado del reporte ya publicado **sigue bloqueado** para folio, obra y destin
 ## B1: error documental de patente (23/11/2026)
 
 Sobre 96c9351, integrada la interfaz f9074bc. B1 exige declaracion explicita de error documental u OCR, guia, tipo y patente; contrasta la propuesta con la unica discrepancia de la accion oficial y exige confirmacion humana. Se conservan asignaciones, documento y OCR; respaldo, auditoria y proyeccion siguen el canal oficial. Si hay otras discrepancias, B1 se abstiene. Pruebas sinteticas: 70 focales aprobadas; regresion B1 y acciones 1035 aprobadas y una falla preexistente reproducida en la base (test_bandeja_se_reconcilia_una_sola_vez). No instalado ni se modificaron datos reales, Cloud, Mobile o PULL.
+
+## Reserva activa — OFICINA (JAVO): actualización Motor + Desktop (2026-11-25)
+
+- Equipo: OFICINA, hostname JAVO, MachineGuid 354cc598-6628-4cb1-af15-05fa4ee7f1a8. Autoriza Javier.
+- Desde: Motor Estable `918d629` (rama local deploy/estable-oficina-20261111) y Desktop app.asar de `f41a13a` (31099128…3030).
+- Objetivo verificado en CASA el 24-11: Motor `26fa210` (origin/fix/destinos-conocidos-20261124), Desktop `327c69e` (origin/feat/polizas-coberturas-humanas-20261124, asar 9B8A688A…). Mobile 0.17.23 sin cambios.
+- Alcance exclusivo: pausar PULL de OFICINA, respaldo, avance directo del Motor con `scripts/actualizar_equipo_relevo.ps1`, reemplazo del app.asar de Desktop, verificaciones de solo lectura y reactivación de PULL.
+- Fuera de alcance: Mobile, Worker/Cloud, CASA, desarrollos parciales (multiempresa f4b7775/b09bd28, acceso admin MBT), escrituras de datos operacionales.
+- Respaldo y reversión: `C:\Atlas\actualizacion-oficina-20261125\respaldo`.
