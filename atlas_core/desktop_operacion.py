@@ -308,15 +308,18 @@ def ejecutar(solicitud):
     # otro proceso y conserva su propio lanzador/configuración.
     proveedor_anterior = os.environ.get('ATLAS_OCR_PROVIDER')
     python_rapidocr_anterior = os.environ.get('ATLAS_RAPIDOCR_PYTHON')
+    registro_documental = accion == 'script' and Path(solicitud['argumentos'][0]).name == 'registrar_expediente_digital.py'
     if accion == 'ingresar':
         os.environ['ATLAS_OCR_PROVIDER'] = 'rapidocr'
         os.environ['ATLAS_RAPIDOCR_PYTHON'] = str(RUNTIME_RAPIDOCR_MANUAL)
+    elif registro_documental and os.environ.get('ATLAS_OCR_PROVIDER') == 'rapidocr':
+        os.environ.setdefault('ATLAS_RAPIDOCR_PYTHON', str(RUNTIME_RAPIDOCR_MANUAL))
     else:
         os.environ.setdefault('ATLAS_OCR_PROVIDER','easyocr')
-    # Solo el ingreso manual RapidOCR puede lanzar este worker exacto.
-    # Los scripts operacionales y cualquier otro proceso siguen bloqueados.
+    # Solo ingreso y registro documental pueden lanzar el worker RapidOCR exacto.
+    # Los demas scripts y cualquier otro proceso siguen bloqueados.
     permiso = None
-    if accion == 'ingresar' and os.environ.get('ATLAS_OCR_PROVIDER') == 'rapidocr':
+    if (accion == 'ingresar' or registro_documental) and os.environ.get('ATLAS_OCR_PROVIDER') == 'rapidocr':
         python = Path(os.environ.get('ATLAS_RAPIDOCR_PYTHON') or sys.executable).resolve()
         if python.name.lower() not in {'python.exe', 'python', 'python3'} or not python.is_file():
             raise PermissionError('El runtime OCR manual debe ser un intérprete Python existente.')

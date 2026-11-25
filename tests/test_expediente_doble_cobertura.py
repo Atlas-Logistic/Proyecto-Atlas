@@ -31,9 +31,13 @@ def raiz(tmp_path):
     return tmp_path
 
 
+def contenido(cobertura, tipo=RC, vencimiento="30/09/2027", patente=PATENTE):
+    return JPEG + f"{tipo}|{cobertura}|{vencimiento}|{patente}".encode()
+
+
 def registrar(raiz, cobertura, *, empresa="MBT", tipo=RC, vencimiento="30/09/2027", patente=PATENTE):
     return registrar_documento_vehiculo_desktop(
-        raiz, empresa=empresa, referencia=PATENTE, tipo=tipo, contenido=JPEG, mime_type="image/jpeg", reloj=RELOJ,
+        raiz, empresa=empresa, referencia=PATENTE, tipo=tipo, contenido=contenido(cobertura, tipo, vencimiento, patente), mime_type="image/jpeg", reloj=RELOJ,
         fabrica_ocr=lambda: OCR(patente, cobertura, vencimiento))
 
 
@@ -58,7 +62,7 @@ def test_cobertura_por_evidencia_sin_duplicar_original(raiz, texto, cubiertas, a
     assert vista["documentos"][0]["tipos_cubiertos"] == cubiertas
     assert faltantes(vista) == ausentes
     assert len(list((raiz / "fichas_digitales" / "MBT" / "archivos" / "expediente").rglob("*.jpg"))) == 1
-    assert (raiz / "fichas_digitales" / "MBT" / doc["archivo"]).read_bytes() == JPEG
+    assert (raiz / "fichas_digitales" / "MBT" / doc["archivo"]).read_bytes() == contenido(texto)
 
 
 def test_poliza_con_menos_coberturas_no_retira_la_anterior(raiz):
@@ -84,7 +88,7 @@ def test_renovacion_con_iguales_coberturas_reemplaza_y_conserva_historial(raiz):
     assert not faltantes(vista)
     assert [d["documento_id"] for d in vista["historico"]] == [primera["documento_id"]]
     assert vista["historico"][0]["reemplazado_por"] == nueva["documento_id"]
-    assert (raiz / "fichas_digitales" / "MBT" / primera["archivo"]).read_bytes() == JPEG
+    assert (raiz / "fichas_digitales" / "MBT" / primera["archivo"]).read_bytes() == contenido("COBERTURAS: RESPONSABILIDAD CIVIL Y ROBO")
 
 
 def test_vencimiento_y_aislamiento_multiempresa(raiz):
@@ -105,7 +109,7 @@ def test_anulacion_retira_ambas_coberturas_sin_borrar_el_original(raiz):
     vista = consulta(raiz)
     assert faltantes(vista) == {RC: False}
     assert vista["historico"][0]["documento_id"] == doc["documento_id"]
-    assert (raiz / "fichas_digitales" / "MBT" / doc["archivo"]).read_bytes() == JPEG
+    assert (raiz / "fichas_digitales" / "MBT" / doc["archivo"]).read_bytes() == contenido("COBERTURAS: RESPONSABILIDAD CIVIL Y ROBO")
 
 
 def test_separadas_acreditan_solo_su_cobertura(raiz):
