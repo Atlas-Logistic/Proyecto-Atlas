@@ -92,3 +92,8 @@ Sobre 96c9351, integrada la interfaz f9074bc. B1 exige declaracion explicita de 
 - Validación: Electron real + Motor real (`e1fa560`, Worker `117899d` en proceso, MBT y Transportes Andes ficticias) 24/24 (`docs/evidencia/identidad_desktop_20261126.json`); regresión del acceso previo 6/6; unitarias nuevas 16 + acceso 20; suite completa 1571 OK y 8 fallas preexistentes (ya en el merge; subconjunto de las 11 de `2914483`).
 - No se tocó producción, OFICINA, G:, PULL, Cloud desplegado, plantas configurables ni los worktrees de Codex. `node_modules` enlazado (junction) desde el repo principal, sin instalar nada.
 - Para activar: instalar este Desktop con un Motor que incluya `e1fa560`, crear `desktop_acceso.json` con `carpeta_motor`; cada empresa activa la exigencia con `usuarios_atlas.py exigir-identidad --activar`. Un rol `administrador` antiguo debe pasar a `administrador_empresa` antes. Detalle: `docs/IDENTIDAD_DESKTOP_20261126.md` (Desktop).
+
+## Reserva — Integración conjunta multiempresa (2026-11-26)
+
+- Alcance exclusivo: ramas `integracion/multiempresa-20261126` en Motor (desde `4b6ba30` ⊃ `e1fa560`), Cloud (desde `fcc2051` ⊃ `117899d`), Mobile (desde `94099ef`) y Desktop (desde `5665982`); worktrees en `C:/Atlas/pruebas/integracion-multiempresa-20261126/`. Validación del ciclo completo de Transportes Andes y MBT ficticias (alta, plantas, Mobile, Cloud local, PULL, Desktop, corrección, informe) y de aislamiento/permisos.
+- Fuera de alcance: ramas B1 de Codex (`feat/b1-observaciones-listados-20261126` y similares), producción, G:, PULL, Cloudflare real, OFICINA/CASA e instalaciones.
