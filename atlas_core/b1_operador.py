@@ -804,6 +804,10 @@ _ADICIONAL_GUIAS = re.compile(
     r"(?:A|PARA|EN)\s+(?:(?:CADA\s+UNO\s+DE\s+)?(?:ESTOS\s+)?VIAJES?\s*,?\s*(?:DE\s+)?)?(?:LA\s+)?"
     rf"{_GUIAS_OBS}{_LISTA_GUIAS_OBS}"
     rf"(?:\s*,?\s+(?P<motivo_final>{_CONECTOR_MOTIVO_ADICIONAL}\s+.+))?$")
+_ADICIONAL_GUIAS_DECLARATIVO = re.compile(
+    rf"^{_GUIAS_OBS}{_LISTA_GUIAS_OBS}\s+(?:TIENEN|TIENE)\s+(?:UN\s+)?ADICIONAL\s+(?:DE\s+)?"
+    r"(?P<monto>\$?\s*(?:\d{1,3}(?:[.]\d{3})+|\d+)(?:\s*(?:MIL|LUCAS|PESOS))?)"
+    rf"(?:\s+(?P<motivo_final>{_CONECTOR_MOTIVO_ADICIONAL}\s+.+))?$")
 _ORDEN_ADICIONAL = re.compile(rf"^{_VERBO_OBSERVACION}\s+(?:UN\s+)?ADICIONAL\b")
 _DIAS_SEMANA = ("LUNES", "MARTES", "MIERCOLES", "JUEVES", "VIERNES", "SABADO", "DOMINGO")
 
@@ -836,7 +840,7 @@ def _adicional_guias(original: str, plano: str) -> tuple[Intencion | None, str]:
     (None, motivo de aclaración) si es una orden de adicional que no puede
     proponerse sin preguntar; (None, "") si no es una orden de adicional."""
     from atlas_core.consulta_adicionales import _monto
-    m = _ADICIONAL_GUIAS.fullmatch(plano)
+    m = _ADICIONAL_GUIAS.fullmatch(plano) or _ADICIONAL_GUIAS_DECLARATIVO.fullmatch(plano)
     if not m:
         if _ORDEN_ADICIONAL.match(plano) and re.search(r"\bGUIAS?\b\D*\d{3,12}", plano):
             return None, ("no pude separar el monto, el motivo y las guías. Escribe, por ejemplo: «agrega un adicional "
@@ -845,9 +849,10 @@ def _adicional_guias(original: str, plano: str) -> tuple[Intencion | None, str]:
     importe = _monto(m.group("monto"))
     if importe is None or importe <= 0:
         return None, ""
-    if m.group("motivo") and m.group("motivo_final"):
+    motivo_inicial = m.groupdict().get("motivo")
+    if motivo_inicial and m.group("motivo_final"):
         return None, "la orden trae dos motivos; indica uno solo"
-    grupo = "motivo" if m.group("motivo") else "motivo_final" if m.group("motivo_final") else ""
+    grupo = "motivo" if motivo_inicial else "motivo_final" if m.group("motivo_final") else ""
     texto = f"ESTE VIAJE TIENE ADICIONAL DE ${importe:,}".replace(",", ".")
     if grupo:
         problema = _problema_motivo_adicional(m.group(grupo))
@@ -1640,9 +1645,11 @@ def _describir_preview(preview: Mapping[str, object]) -> str:
     elif accion == "VIAJE_AGREGAR_OBSERVACION":
         detalle = propuesto.get("guias") or []
         agregar = [d for d in detalle if d.get("estado") == "AGREGAR"]
+        corregir = [d for d in detalle if d.get("estado") == "CORREGIR_MOTIVO"]
         viajes = len(propuesto.get("observaciones") or {})
         texto = (f"Agregar la observación «{propuesto.get('texto')}» a {len(agregar)} "
-                 f"{_plural(len(agregar), 'guía', 'guías')} ({viajes} {_plural(viajes, 'viaje', 'viajes')}).")
+                 f"{_plural(len(agregar), 'guía', 'guías')} y corregir el motivo en {len(corregir)} "
+                 f"({_plural(viajes, 'viaje', 'viajes')}: {viajes}).")
         return " ".join([texto, *(str(c) for c in preview.get("consecuencias") or [])])
     elif accion == "DESTINO_CONFIRMAR_COORDENADA":
         texto = (f"Confirmar la coordenada del destino {entidad.get('direccion')!r}: "
@@ -1707,6 +1714,8 @@ def _describir_preview(preview: Mapping[str, object]) -> str:
 
 _ESTADO_OBSERVACION_LEGIBLE = {
     "AGREGAR": "Se agrega", "YA_PRESENTE": "Ya la tiene (sin cambio)",
+    "CORREGIR_MOTIVO": "Se corrige el motivo (requiere confirmación)",
+    "CONFLICTO_ADICIONAL": "Adicional ambiguo (revisar; no se aplica)",
     "NO_ENCONTRADA": "No existe en Atlas (no se aplica)", "SIN_TRANSPORTE": "Sin transporte (no se aplica)",
     "TRANSPORTE_AMBIGUO": "Transporte ambiguo (no se aplica)",
 }
@@ -1717,7 +1726,8 @@ def _tablas_observacion(preview: Mapping[str, object]) -> list[dict[str, object]
     propuesto = (preview.get("valor_propuesto") or {}).get("texto", "")
     filas = [[d.get("numero_guia", ""), d.get("numero_transporte", "") or "-",
               _ESTADO_OBSERVACION_LEGIBLE.get(d.get("estado"), d.get("estado")),
-              " | ".join(d.get("observaciones_vigentes") or []) or "-", propuesto] for d in detalle]
+              " | ".join(d.get("observaciones_vigentes") or []) or "-",
+              propuesto if d.get("estado") in {"AGREGAR", "CORREGIR_MOTIVO"} else "-"] for d in detalle]
     return [{"tipo": "observacion_viaje_preview", "resumen": "",
              "columnas": ["Guia", "Transporte", "Resultado", "Observacion vigente", "Cambio propuesto"],
              "filas": filas}] if filas else []
@@ -3363,7 +3373,7 @@ class OperadorB1:
             tablas = _tablas_observacion(preview)
             if preview.get("estado") == "SIN_CAMBIOS":
                 return {"estado": "SIN_CAMBIOS", "accion": intencion.accion, "preview": publico, "tablas": tablas,
-                        "mensaje": "Las guías indicadas ya tienen esa observación; no hay nada que confirmar."}
+                        "mensaje": "No hay cambios válidos que confirmar; revisa el resultado de cada guía."}
             self._fijar_pendiente(estado, conversacion_id, {
                 "token": preview["token"], "accion": intencion.accion, "parametros": parametros,
                 "referencia": str(texto)[:500], "creado_en": self.reloj().isoformat()})

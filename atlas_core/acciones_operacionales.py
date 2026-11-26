@@ -3458,6 +3458,63 @@ def _adicional_ya_registrado(texto: str, eventos: list[dict], transporte: str) -
     return False
 
 
+def _evaluar_adicional(texto: str, eventos: list[dict], transporte: str, previa: str) -> tuple[str, str]:
+    """No modifica notas ajenas ni interpreta como corrección una línea ambigua."""
+    from atlas_core.consulta_adicionales import _MONTO, _monto, _normalizar, _sin_motivo_canonico
+    propuesta = _normalizar(texto).strip()
+    patron = r"ESTE VIAJE TIENE ADICIONAL DE (" + _MONTO + r")"
+    m = re.fullmatch(patron, _sin_motivo_canonico(propuesta))
+    if not m:
+        return ("YA_PRESENTE", previa) if _observacion_contiene(previa, texto) else ("AGREGAR", previa)
+    # También admite la forma histórica sin signo $, conservando los demás
+    # renglones y modificando sólo una línea del evento operacional editable.
+    linea_patron = re.compile(r"ESTE VIAJE TIENE ADICIONAL DE (" + _MONTO +
+                              r")(?:\s+((?:POR|DEBIDO A|CORRESPONDIENTE A) .+))?$")
+    propuesta_linea = linea_patron.fullmatch(propuesta)
+    lineas_adicional = [linea for e in eventos if e.get("estado") == "ACTIVO"
+                        and str(e.get("numero_transporte", "")).strip() == transporte
+                        for linea in str(e.get("nota") or "").splitlines()
+                        if re.search(r"\bADICIONAL(?:ES)?\b", _normalizar(linea))]
+    if propuesta_linea and len(lineas_adicional) == 1:
+        linea = lineas_adicional[0]
+        anterior = linea_patron.fullmatch(_normalizar(linea).strip())
+        if anterior and _monto(anterior.group(1)) == _monto(propuesta_linea.group(1)):
+            motivo = anterior.group(2) or ""
+            if re.search(r"\$|\b(?:MIL|LUCAS|PESOS|ADICIONAL(?:ES)?)\b|\b(?:POR|CADA)\s+(?:GUIA|DOCUMENTO|FOTO)\b", motivo):
+                return "CONFLICTO_ADICIONAL", previa
+            if (anterior.group(2) or "") == (propuesta_linea.group(2) or ""):
+                return "YA_PRESENTE", previa
+            if linea in previa.splitlines():
+                lineas = previa.splitlines(keepends=True)
+                nueva = "".join(texto + parte[len(parte.rstrip('\r\n')):] if parte.rstrip('\r\n') == linea
+                                else parte for parte in lineas)
+                return "CORREGIR_MOTIVO", nueva
+            return "CONFLICTO_ADICIONAL", previa
+    try:
+        if _adicional_ya_registrado(texto, eventos, transporte):
+            return "YA_PRESENTE", previa
+    except ErrorAccionOperacional as exc:
+        # Sólo se corrige una línea canónica inequívoca de la nota editable.
+        # Las observaciones de otras fuentes se conservan intactas.
+        candidatos = []
+        for linea in previa.splitlines():
+            normal = _normalizar(linea).strip()
+            anterior = re.fullmatch(patron, _sin_motivo_canonico(normal))
+            if anterior and _monto(anterior.group(1)) == _monto(m.group(1)):
+                candidatos.append(linea)
+        notas_adicional = [linea for e in eventos if e.get("estado") == "ACTIVO"
+                           and str(e.get("numero_transporte", "")).strip() == transporte
+                           for linea in str(e.get("nota") or "").splitlines()
+                           if re.search(r"\bADICIONAL(?:ES)?\b", _normalizar(linea))]
+        if "otro motivo" in str(exc) and len(candidatos) == 1 and len(notas_adicional) == 1:
+            lineas = previa.splitlines(keepends=True)
+            nueva = "".join(texto + linea[len(linea.rstrip('\r\n')):] if linea.rstrip('\r\n') == candidatos[0]
+                            else linea for linea in lineas)
+            return "CORREGIR_MOTIVO", nueva
+        return "CONFLICTO_ADICIONAL", previa
+    return "AGREGAR", previa
+
+
 def _plan_viaje_observacion(ctx: _Contexto, p: dict) -> Plan:
     from atlas_core.registro_eventos_operacionales import CONTEXTO_EMPRESARIAL_SIN_ASIGNAR
     texto = str(p["texto"])
@@ -3490,22 +3547,25 @@ def _plan_viaje_observacion(ctx: _Contexto, p: dict) -> Plan:
             estado = "SIN_TRANSPORTE"
         elif len(transportes) > 1:
             estado = "TRANSPORTE_AMBIGUO"
-        elif _observacion_contiene(previa, texto) or _adicional_ya_registrado(texto, eventos, transporte):
-            estado = "YA_PRESENTE"
         else:
-            estado = "AGREGAR"
-            agregar.setdefault(transporte, f"{previa.rstrip()}\n{texto}" if previa.strip() else texto)
+            estado, nueva = _evaluar_adicional(texto, eventos, transporte, previa)
+            if estado == "AGREGAR":
+                agregar.setdefault(transporte, f"{previa.rstrip()}\n{texto}" if previa.strip() else texto)
+            elif estado == "CORREGIR_MOTIVO":
+                agregar.setdefault(transporte, nueva)
         detalle.append({"numero_guia": guia, "numero_transporte": transporte or ", ".join(transportes),
                         "estado": estado, "observaciones_vigentes": vigentes})
-    resolubles = [d for d in detalle if d["estado"] in {"AGREGAR", "YA_PRESENTE"}]
-    if not resolubles:
-        raise ErrorAccionOperacional("PRECONDICION_FALLIDA", "ninguna de las guías indicadas existe con un "
-                                     "transporte único en el dataset vigente")
-    guias_agregar = [d["numero_guia"] for d in detalle if d["estado"] == "AGREGAR"]
-    excluidas = [d for d in detalle if d["estado"] not in {"AGREGAR", "YA_PRESENTE"}]
+    if not any(d["estado"] in {"AGREGAR", "YA_PRESENTE", "CORREGIR_MOTIVO"} for d in detalle):
+        from atlas_core.consulta_adicionales import _MONTO, _normalizar, _sin_motivo_canonico
+        if not re.fullmatch(r"ESTE VIAJE TIENE ADICIONAL DE (" + _MONTO + r")",
+                            _sin_motivo_canonico(_normalizar(texto).strip())):
+            raise ErrorAccionOperacional("PRECONDICION_FALLIDA", "ninguna de las guías indicadas existe con un "
+                                         "transporte único en el dataset vigente")
+    guias_agregar = [d["numero_guia"] for d in detalle if d["estado"] in {"AGREGAR", "CORREGIR_MOTIVO"}]
+    excluidas = [d for d in detalle if d["estado"] not in {"AGREGAR", "YA_PRESENTE", "CORREGIR_MOTIVO"}]
     consecuencias = [
-        "Se agrega como observación canónica del viaje (una línea más); las observaciones anteriores, las "
-        "notas manuales de Desktop y los demás datos de la guía no se modifican.",
+        "Se agrega la observación o se corrige la línea de adicional indicada; las demás observaciones, las "
+        "notas manuales de Desktop y los demás datos de la guía se conservan.",
         "Sin OCR, sin reconciliación de bandeja ni regeneración de reportes.",
     ]
     if excluidas:

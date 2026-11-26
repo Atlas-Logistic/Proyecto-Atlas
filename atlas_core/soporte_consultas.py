@@ -160,7 +160,7 @@ def _soporte_observaciones(viajes) -> dict:
         else:
             adicional, monto = "Sin adicional", ""
         filas.append(_fila_viaje(v, adicional, monto, _texto(v.get("_adicional_origen")),
-                                 _texto(v.get("_observaciones_texto"))[:300]))
+                                 _texto(v.get("_observaciones_texto"))))
     return _soporte("VIAJES", [*_COLUMNAS_VIAJE, "Adicional", "Monto", "Origen", "Observación"], filas,
                     resumen=_plural(len(filas), "viaje", "viajes"))
 

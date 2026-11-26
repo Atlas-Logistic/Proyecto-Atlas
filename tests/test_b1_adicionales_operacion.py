@@ -62,7 +62,9 @@ def test_referencia_sin_guias_no_inventa_destinatarios(raiz):
 
 def test_nota_ambigua_no_permite_cambio(raiz):
     registrar_evento(raiz=raiz,tipo_evento='OBSERVACION_OPERACIONAL',numero_transporte='0000365998',nota='ADICIONAL DE 15 MIL POR GUIA',origen='TEST')
-    r=operador(raiz).atender('c',ORDEN); assert r['estado']=='RECHAZADA',r
+    r=operador(raiz).atender('c',ORDEN); assert r['estado']=='PREVIEW_PENDIENTE',r
+    filas={f[0]:f for f in r['tablas'][0]['filas']}
+    assert 'ambiguo' in filas['483043'][2] and filas['483082'][2]=='Se agrega'
 
 
 def test_confirmacion_sin_escritor_no_modifica(raiz):

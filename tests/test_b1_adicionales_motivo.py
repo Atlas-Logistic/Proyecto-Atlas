@@ -48,6 +48,17 @@ def test_motivo_libre_se_conserva_tal_cual(orden, texto, guias):
     assert intencion.parametros == {"guias": guias, "texto": texto}
 
 
+def test_lista_declarativa_completa():
+    orden = ("Las guías 475609, 482229, 482308, 483017, 483375, 483732, "
+             "483859, 483934 y 484418 tienen adicional de $30.000 por carga en Portezuelo")
+    intencion = interpretar_determinista(orden)
+    assert intencion.accion == "VIAJE_AGREGAR_OBSERVACION"
+    assert intencion.parametros == {
+        "guias": ["475609", "482229", "482308", "483017", "483375", "483732", "483859", "483934", "484418"],
+        "texto": "ESTE VIAJE TIENE ADICIONAL DE $30.000 POR CARGA EN PORTEZUELO",
+    }
+
+
 @pytest.mark.parametrize("orden,motivo", [
     ("Agrega un adicional de $15.000 por peaje de $5.000 a las guías 483082 y 483043", "otro importe"),
     ("Agrega un adicional de $15.000 por cada guía a las guías 483082 y 483043", "por viaje o por guía"),
@@ -105,7 +116,8 @@ def test_mismo_importe_con_otro_motivo_no_se_adivina(raiz, previa):
                      origen="TEST")
     antes = json.dumps(eventos(raiz), sort_keys=True)
     r = operador(raiz).atender("c", CASO)
-    assert r["estado"] == "RECHAZADA" and "otro motivo" in r["mensaje"], r
+    assert r["estado"] == "PREVIEW_PENDIENTE", r
+    assert {f[0]: f[2] for f in r["tablas"][0]["filas"]}["483043"].startswith("Se corrige el motivo")
     assert json.dumps(eventos(raiz), sort_keys=True) == antes
 
 
@@ -113,7 +125,34 @@ def test_orden_sin_motivo_frente_a_adicional_previo_con_motivo_no_duplica(raiz):
     registrar_evento(raiz=raiz, tipo_evento="OBSERVACION_OPERACIONAL", numero_transporte="0000365998", nota=TEXTO_CASO,
                      origen="TEST")
     r = operador(raiz).atender("c", "Agrega un adicional de $15.000 a las guías 483043")
-    assert r["estado"] == "RECHAZADA" and "otro motivo" in r["mensaje"], r
+    assert r["estado"] == "PREVIEW_PENDIENTE", r
+    assert "corrige el motivo" in r["tablas"][0]["filas"][0][2]
+
+
+def test_lote_corrige_motivo_y_agrega_sin_duplicar_con_auditoria(raiz):
+    previa = "OTRA OBSERVACIÓN\nESTE VIAJE TIENE ADICIONAL DE 15.000 POR ESPERA\nNOTA FINAL"
+    registrar_evento(raiz=raiz, tipo_evento="OBSERVACION_OPERACIONAL", numero_transporte="0000365998",
+                     nota=previa, origen="TEST")
+    b = operador(raiz)
+    orden = "Agrega un adicional de $15.000 por carga a las guías 483082, 483043 y 999999"
+    antes = json.dumps(eventos(raiz), sort_keys=True)
+    r = b.atender("c", orden)
+    assert r["estado"] == "PREVIEW_PENDIENTE", r
+    filas = {f[0]: f for f in r["tablas"][0]["filas"]}
+    assert filas["483082"][2] == "Se agrega"
+    assert "corrige el motivo" in filas["483043"][2]
+    assert "No existe" in filas["999999"][2]
+    assert json.dumps(eventos(raiz), sort_keys=True) == antes
+    assert b.atender("c", "si")["estado"] == "EJECUTADA"
+    assert notas(raiz)["0000365998"] == "OTRA OBSERVACIÓN\nESTE VIAJE TIENE ADICIONAL DE $15.000 POR CARGA\nNOTA FINAL"
+    assert notas(raiz)["0000366043"] == "NOTA ANTERIOR\nESTE VIAJE TIENE ADICIONAL DE $15.000 POR CARGA"
+    auditoria = b.capa.auditoria()
+    entrada = next(a for a in auditoria if a.get("resultado") == "APLICADA")
+    assert entrada["antes"]["observaciones"]["0000365998"] == previa
+    assert entrada["despues"]["observaciones"]["0000365998"] == notas(raiz)["0000365998"]
+    assert entrada["confirmado_por"]
+    assert b.atender("c", orden)["estado"] == "SIN_CAMBIOS"
+    assert any(e.get("historial") for e in eventos(raiz))
 
 
 def test_motivo_sobrevive_dos_pull_y_regeneracion(raiz, tmp_path, monkeypatch):
