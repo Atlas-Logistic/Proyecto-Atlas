@@ -74,8 +74,13 @@ Sobre 96c9351, integrada la interfaz f9074bc. B1 exige declaracion explicita de 
 - Observación menor, sin cambio: la ventana de vista previa B1 conserva el título «Vista previa — Informe MBT PDF», aunque su cabecera dice «Vista previa - Listado».
 - Reversión: deshabilitar la tarea y esperar el fin del ciclo. Restaurar `app.asar.antes-b1-pdf-20261125` (0C1159AD) sobre `app.asar`. En Estable (rama local deploy/estable-oficina-20261125), `git reset --keep 26fa210`. Luego reactivar la tarea.
 
-## Reserva activa — Plantas configurables por empresa (2026-11-26)
+## Reserva liberada — Plantas configurables por empresa (2026-11-26)
 
-- Entorno aislado `C:/Atlas/pruebas/plantas-empresas-20261126/{motor,cloud,mobile}`, rama `feat/plantas-configurables-20261126` en cada repo. Bases: Motor `e1fa560` + `dc29287` (resolver por `planta_id`), Cloud `117899d`, Mobile `8f10a61` (0.17.23).
-- Alcance: catálogo de plantas por empresa servido por Cloud a Mobile autenticado; Mobile, Worker y Motor aceptan el `planta_id` de su empresa; MBT conserva AZA_COLINA/AZA_RENCA. Validación con Transportes Andes ficticia.
-- No toca producción, G:, PULL, OFICINA (actualización de Code), Desktop ni instalaciones. Sin despliegue.
+- Entorno aislado `C:/Atlas/pruebas/plantas-empresas-20261126/{motor,cloud,mobile}`. No se tocó producción, Cloudflare/D1, G:, PULL, OFICINA (actualización de Code), Desktop ni instalaciones. **Nada desplegado.**
+- Un agente Codex trabajó en paralelo en el mismo entorno (39fdea6, 082f902, 5f05cd3) y cerró declarando Mobile/Cloud listos; 082f902 llamaba a `AtlasSync.configurarPlantas`, que no existe, así que Mobile rechazaba localmente toda planta no AZA. Corregido aquí.
+- Publicado:
+  - Motor `4b6ba30` (`feat/plantas-configurables-20261126`, sobre e1fa560 + 89a1310/39fdea6/5f05cd3): publica a Cloud las plantas CONFIRMADA+ACTIVA de la empresa en cada ciclo PULL; MBT nunca publica; catálogo ilegible no publica. El resolver por `planta_id` conserva el origen de una planta desactivada después de la captura.
+  - Cloud `fcc2051` (`feat/plantas-configurables-cloud-20261126`, sobre 117899d): migración aditiva `0013`, `POST /api/motor/plantas`, `GET /api/mobile/plantas`; AZA sólo para la empresa histórica; bajas sin borrado, aceptadas si `capturado_en` es anterior; idempotencia de reintentos.
+  - Mobile `94099ef` (`feat/plantas-configurables-mobile-20261126`, 0.17.24, shell-v53, sobre 8f10a61 0.17.23 + 082f902): catálogo por usuario+chofer guardado para uso offline, consulta en segundo plano con timeout de 8 s, tarjetas por guía desde el catálogo; MBT sin catálogo sigue con Colina/Renca.
+- Pruebas: Cloud 137/138 (la que falla, `build` de mobile_24_7, también falla en la base porque depende de la ruta hermana); Mobile 400/400; Motor focales 47/47 y 578/580 en 45 archivos relacionados (2 fallas preexistentes, reproducidas en 5f05cd3: `test_ambiguedad_real_de_origen_desde_mobile_genera_decision_visible` y `test_e2e_http_real_con_procesamiento_automatico_y_reintento_sin_duplicar`). Validación integrada `scripts/validacion_multiempresa/validar_plantas.py` (Motor + Worker real local + código Mobile real, MBT y Transportes Andes ficticia): 14/14.
+- Para activar: aplicar D1 `0013` antes del Worker nuevo (el Worker tolera que falte), desplegar Worker + PWA 0.17.24 vía `preparar_despliegue` y actualizar el Motor escritor. MBT no requiere configuración. Estado: `docs/PLANTAS_CONFIGURABLES_ESTADO.md` (Motor).
