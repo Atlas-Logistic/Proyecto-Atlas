@@ -7,6 +7,14 @@
 - Pruebas focales: `tests/test_plantas_id_mobile.py` y `tests/test_mobile_planta_origen_v1.py`, 9 aprobadas.
 - Límite explícito: Mobile/Cloud siguen con la lista fija AZA y no se han desplegado ni configurado catálogos Cloud; su integración se mantiene pendiente y no se reserva este árbol.
 
+## Reserva liberada — Mobile/Cloud: plantas configurables por empresa (2026-11-26)
+
+- Trabajo aislado en `C:/Atlas/pruebas/plantas-empresas-20261126/{mobile,cloud}`, sobre Cloud `117899d`; no se modificaron Desktop, identidad, OFICINA, Cloudflare, G:, PULL ni instalaciones.
+- Cloud: migración aditiva `0013`, publicación completa autenticada desde Motor, listado Mobile por token y validación de pertenencia por empresa. Las plantas desactivadas no se borran: se admiten sólo para una captura anterior a la baja y los reintentos ya recibidos siguen siendo idempotentes.
+- Mobile: obtiene el catálogo con el token de sesión y presenta únicamente esas plantas; MBT mantiene su selector legado si el Worker no ofrece catálogo.
+- Validación: MBT y Transportes Andes ficticia, catálogo vacío, selección cruzada, baja/reactivación, cola offline e idempotencia. Pruebas Cloud 9/9 y Mobile 30/30 aprobadas.
+- Publicado: Cloud `fcc2051` (`feat/plantas-configurables-cloud-20261126`), Mobile `082f902` (`feat/plantas-configurables-mobile-20261126`). Reserva liberada.
+
 Trabajo aislado en `C:/Atlas/pruebas/b1-correcciones-generales-20261109/motor`, rama `feat/b1-correcciones-generales-20261109`, desde `4204163`. No modificar los worktrees de otros agentes ni datos operacionales.
 
 - `d178377`: recupera el cambio focal de `e478c8b` y sus pruebas; conserva destino y ruta ante corrección de folio.
