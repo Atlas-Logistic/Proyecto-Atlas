@@ -84,3 +84,9 @@ Sobre 96c9351, integrada la interfaz f9074bc. B1 exige declaracion explicita de 
   - Mobile `94099ef` (`feat/plantas-configurables-mobile-20261126`, 0.17.24, shell-v53, sobre 8f10a61 0.17.23 + 082f902): catálogo por usuario+chofer guardado para uso offline, consulta en segundo plano con timeout de 8 s, tarjetas por guía desde el catálogo; MBT sin catálogo sigue con Colina/Renca.
 - Pruebas: Cloud 137/138 (la que falla, `build` de mobile_24_7, también falla en la base porque depende de la ruta hermana); Mobile 400/400; Motor focales 47/47 y 578/580 en 45 archivos relacionados (2 fallas preexistentes, reproducidas en 5f05cd3: `test_ambiguedad_real_de_origen_desde_mobile_genera_decision_visible` y `test_e2e_http_real_con_procesamiento_automatico_y_reintento_sin_duplicar`). Validación integrada `scripts/validacion_multiempresa/validar_plantas.py` (Motor + Worker real local + código Mobile real, MBT y Transportes Andes ficticia): 14/14.
 - Para activar: aplicar D1 `0013` antes del Worker nuevo (el Worker tolera que falte), desplegar Worker + PWA 0.17.24 vía `preparar_despliegue` y actualizar el Motor escritor. MBT no requiere configuración. Estado: `docs/PLANTAS_CONFIGURABLES_ESTADO.md` (Motor).
+
+## Reserva activa — Desktop: identidad y permisos multiempresa (2026-11-26)
+
+- Worktree exclusivo `C:/Atlas/pruebas/identidad-desktop-20261126/desktop`, rama `feat/identidad-desktop-20261126` desde `2914483` (Desktop instalado en OFICINA) + línea de acceso `82df434`. Motor de prueba `e1fa560` (identidad backend) en `.../motor`, sólo lectura.
+- Alcance: login Desktop con roles de e1fa560, `ATLAS_SESION` hacia el Motor, protección de lecturas directas de Desktop y revocación. Validación con Electron real y empresas ficticias.
+- No toca producción, OFICINA, G:, PULL, Cloud, plantas configurables ni los worktrees de Codex (`b1-observaciones-listados-20261126`).
