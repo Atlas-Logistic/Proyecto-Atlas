@@ -165,6 +165,25 @@ def _soporte_observaciones(viajes) -> dict:
                     resumen=_plural(len(filas), "viaje", "viajes"))
 
 
+def _observacion(viaje: Mapping[str, str]) -> str:
+    """Texto ya proyectado por el Motor; elimina repeticiones sin tocar origen."""
+    partes, vistas = [], set()
+    for parte in _texto(viaje.get("_observaciones_texto")).split(" | "):
+        limpio = parte.strip()
+        clave = normalizar_texto_atlas(limpio)
+        if limpio and clave not in vistas:
+            partes.append(limpio); vistas.add(clave)
+    return " | ".join(partes)
+
+
+def _filas_viaje_con_observacion(viajes, construir):
+    filas = [construir(v) for v in viajes]
+    observaciones = [_observacion(v) for v in viajes]
+    if any(observaciones):
+        return [fila + [observaciones[i]] for i, fila in enumerate(filas)], True
+    return filas, False
+
+
 def soporte_semantico(resultado: ResultadoConsultaAtlas) -> dict | None:
     consulta = resultado.consulta_interpretada
     viajes = list(resultado.viajes_soporte)
@@ -246,5 +265,7 @@ def soporte_semantico(resultado: ResultadoConsultaAtlas) -> dict | None:
             filas = [_fila_viaje(v, " | ".join(_claves_agrupacion(v, consulta.agrupacion))) for v in viajes]
         else:
             filas = [_fila_viaje(v) for v in viajes]
+        filas, tiene_obs = _filas_viaje_con_observacion(viajes, lambda v: _fila_viaje(v, " | ".join(_claves_agrupacion(v, consulta.agrupacion))) if consulta.agrupacion and consulta.agrupacion not in ("chofer", "cliente") else _fila_viaje(v))
+        if tiene_obs: columnas.append("Observación")
         return _soporte("VIAJES", columnas, filas, resumen=_plural(len(filas), "viaje", "viajes"))
     return None

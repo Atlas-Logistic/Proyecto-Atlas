@@ -846,7 +846,10 @@ def responder_consulta_atlas(
         usa_observaciones = any(f in consulta.filtros for f in FILTROS_OBSERVACION)
         if usa_observaciones and filas_observacion is None:
             return RespuestaConsultaAtlas(estado=ESTADO_FUENTE_NO_DISPONIBLE, texto_respuesta=error_observacion)
-        resultado = ejecutar_consulta_atlas(consulta, filas_observacion if usa_observaciones else viajes)
+        # Las observaciones enriquecen cualquier listado: no cambian qué
+        # viajes coinciden salvo cuando la pregunta explícitamente las filtra.
+        filas_ejecucion = filas_observacion if filas_observacion is not None else viajes
+        resultado = ejecutar_consulta_atlas(consulta, filas_ejecucion)
         if consulta.filtros.get("ausente"):
             # Detalle por guía de lo que falta; no altera coincidencias ni cifras.
             from dataclasses import replace
