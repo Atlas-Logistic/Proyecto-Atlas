@@ -73,3 +73,9 @@ Sobre 96c9351, integrada la interfaz f9074bc. B1 exige declaracion explicita de 
 - Accesos directos: uno en el escritorio, `Atlas.lnk`, que apunta a `%LOCALAPPDATA%\Programs\Atlas Viajes\Atlas Viajes.exe`. La entrada del menú Inicio del instalador apunta al mismo ejecutable.
 - Observación menor, sin cambio: la ventana de vista previa B1 conserva el título «Vista previa — Informe MBT PDF», aunque su cabecera dice «Vista previa - Listado».
 - Reversión: deshabilitar la tarea y esperar el fin del ciclo. Restaurar `app.asar.antes-b1-pdf-20261125` (0C1159AD) sobre `app.asar`. En Estable (rama local deploy/estable-oficina-20261125), `git reset --keep 26fa210`. Luego reactivar la tarea.
+
+## Reserva activa — Plantas configurables por empresa (2026-11-26)
+
+- Entorno aislado `C:/Atlas/pruebas/plantas-empresas-20261126/{motor,cloud,mobile}`, rama `feat/plantas-configurables-20261126` en cada repo. Bases: Motor `e1fa560` + `dc29287` (resolver por `planta_id`), Cloud `117899d`, Mobile `8f10a61` (0.17.23).
+- Alcance: catálogo de plantas por empresa servido por Cloud a Mobile autenticado; Mobile, Worker y Motor aceptan el `planta_id` de su empresa; MBT conserva AZA_COLINA/AZA_RENCA. Validación con Transportes Andes ficticia.
+- No toca producción, G:, PULL, OFICINA (actualización de Code), Desktop ni instalaciones. Sin despliegue.
