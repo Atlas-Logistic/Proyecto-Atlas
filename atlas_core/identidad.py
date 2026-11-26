@@ -586,6 +586,20 @@ def sesion_proceso() -> dict | None:
     return _sesion_proceso
 
 
+def actor_operacion(declarado: str) -> str:
+    """Actor auditable de una acción del proceso.
+
+    Con identidad exigida, la puerta ya validó la sesión: el actor es la persona
+    identificada (``<empresa>:<usuario>``, mismo formato que la auditoría del
+    registro), no la etiqueta fija que envía el llamador (Desktop manda
+    ``JAVIER_DESKTOP`` para cualquier usuario). Sin exigencia (MBT hoy), el
+    declarado, como siempre."""
+    sesion = _sesion_proceso
+    if not sesion or not sesion.get("usuario") or not sesion.get("empresa_id"):
+        return declarado
+    return f"{sesion['empresa_id']}:{sesion['usuario']}"
+
+
 def entrar_proceso(ctx: ae.ContextoEmpresa | None = None) -> None:
     """Puerta del proceso (al importar ``atlas_core``). Falla cerrado si el
     registro existe pero es ilegible o ajeno."""

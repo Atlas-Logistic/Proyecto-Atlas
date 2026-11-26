@@ -20,7 +20,8 @@ def main(argv=None) -> int:
     parser.add_argument("--texto", required=True)
     parser.add_argument("--usuario", default="JAVIER")
     args = parser.parse_args(argv)
-    operador = OperadorB1(resolver_raiz_atlas(args.raiz_atlas), usuario=args.usuario)
+    from atlas_core.identidad import actor_operacion
+    operador = OperadorB1(resolver_raiz_atlas(args.raiz_atlas), usuario=actor_operacion(args.usuario))
     respuesta = operador.atender(args.conversacion, args.texto)
     print(json.dumps(respuesta, ensure_ascii=True, default=str))
     # Siempre 0 si hubo respuesta: el `estado` (RECHAZADA/FALLIDA incluidos)
