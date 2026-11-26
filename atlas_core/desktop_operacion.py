@@ -11,6 +11,7 @@ import json
 import os
 import runpy
 import shutil
+import hashlib
 import subprocess
 import sys
 import uuid
@@ -237,9 +238,22 @@ def _cli(argumentos, entrada=None):
             sys.stdin = stdin_anterior
     return salida.getvalue()
 
-def ingresar(raiz, archivos, comprobar):
+def _registrar_auditoria_ingreso(entrada, *, empresa_id, perfil_documental, usuario_recibido, originales):
+    """Identidad declarada por Desktop; el Motor no la presenta como autenticada."""
+    contenido = {
+        'version': 1, 'empresa_id': empresa_id, 'perfil_documental': perfil_documental,
+        'usuario_recibido': usuario_recibido, 'usuario_verificado_por_motor': False,
+        'originales': [{'nombre': p.name, 'sha256': hashlib.sha256(p.read_bytes()).hexdigest()} for p in originales],
+    }
+    (entrada/'_ingreso_multiempresa.json').write_text(json.dumps(contenido, ensure_ascii=False, indent=2), encoding='utf-8')
+
+
+def ingresar(raiz, archivos, comprobar, *, empresa_id=None, perfil_documental=None, usuario_recibido=None):
     raiz = Path(raiz).resolve()
     originales = [Path(p).resolve(strict=True) for p in archivos]
+    from atlas_core.ingreso_multiempresa import normalizar_solicitud_ingreso, resolver_perfil
+    empresa_id, perfil_documental = normalizar_solicitud_ingreso(raiz, empresa_id, perfil_documental)
+    resolver_perfil(raiz, empresa_id, perfil_documental)
     if not originales or any(not p.is_file() or p.suffix.lower() not in {'.png','.jpg','.jpeg','.pdf'} for p in originales):
         raise ValueError('Seleccione guías JPG, PNG o PDF válidas.')
     nombres = [p.name.casefold() for p in originales]
@@ -268,6 +282,8 @@ def ingresar(raiz, archivos, comprobar):
     marca = datetime.now().strftime('%Y%m%d_%H%M%S')+'_'+uuid.uuid4().hex[:8]
     entrada = raiz/'operacion'/'entradas'/marca
     entrada.mkdir(parents=True, exist_ok=False)
+    _registrar_auditoria_ingreso(entrada, empresa_id=empresa_id, perfil_documental=perfil_documental,
+                                 usuario_recibido=usuario_recibido, originales=originales)
     for p in originales:
         comprobar()
         with p.open('rb') as fuente, (entrada/p.name).open('xb') as destino:
@@ -275,7 +291,7 @@ def ingresar(raiz, archivos, comprobar):
     snapshot = entrada/'_snapshot_antes.json'
     _cli(['resumen_procesamiento_desktop.py','snapshot','--csv-masivo',dataset,'--salida',snapshot])
     comprobar()
-    _cli(['analizar_guias_masivo.py',entrada,'--salida',dataset,'--catalogos',catalogos,'--reconciliar-focal','--sin-telemetria'])
+    _cli(['analizar_guias_masivo.py',entrada,'--salida',dataset,'--catalogos',catalogos,'--reconciliar-focal','--sin-telemetria', '--perfil-documental', perfil_documental])
     comprobar()
     from atlas_core.publicacion_reportes import ruta_reporte_automatico
     reporte = ruta_reporte_automatico(raiz, 'reporte_desktop_'+marca)
@@ -300,9 +316,12 @@ def ejecutar(solicitud):
     os.environ['ATLAS_DATA_DIR'] = str(raiz)
     os.environ['ATLAS_CATALOGOS_DIR'] = str(raiz/'catalogos_privados')
     accion = solicitud.get('accion')
-    if accion not in {'ingresar','script'}: raise ValueError('Acción Desktop inválida.')
+    if accion not in {'ingresar','script','capacidades'}: raise ValueError('Acción Desktop inválida.')
     if accion == 'script' and Path(solicitud['argumentos'][0]).name not in ESCRITORES:
         raise PermissionError('Acción Desktop no admitida.')
+    if accion == 'capacidades':
+        from atlas_core.ingreso_multiempresa import capacidades
+        return {'ok': True, **capacidades(raiz, solicitud.get('empresa_id'))}
     # El proveedor se decide dentro de esta invocación, no en el entorno de
     # usuario: RapidOCR queda limitado al ingreso manual. PULL arranca en
     # otro proceso y conserva su propio lanzador/configuración.
@@ -329,7 +348,9 @@ def ejecutar(solicitud):
     os.environ['ATLAS_OCR_MANUAL'] = '1' if accion == 'ingresar' else '0'
     try:
         with sesion(raiz) as comprobar:
-            if accion == 'ingresar': return ingresar(raiz, solicitud.get('archivos',[]), comprobar)
+            if accion == 'ingresar': return ingresar(raiz, solicitud.get('archivos',[]), comprobar,
+                empresa_id=solicitud.get('empresa_id'), perfil_documental=solicitud.get('perfil_documental'),
+                usuario_recibido=solicitud.get('usuario'))
             comprobar()
             return {'ok':True,'salida':ejecutar_script(solicitud['argumentos'],solicitud.get('entrada'))}
     finally:

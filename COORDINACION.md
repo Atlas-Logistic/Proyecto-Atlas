@@ -64,3 +64,15 @@ El estado del reporte ya publicado **sigue bloqueado** para folio, obra y destin
 ## B1: error documental de patente (23/11/2026)
 
 Sobre 96c9351, integrada la interfaz f9074bc. B1 exige declaracion explicita de error documental u OCR, guia, tipo y patente; contrasta la propuesta con la unica discrepancia de la accion oficial y exige confirmacion humana. Se conservan asignaciones, documento y OCR; respaldo, auditoria y proyeccion siguen el canal oficial. Si hay otras discrepancias, B1 se abstiene. Pruebas sinteticas: 70 focales aprobadas; regresion B1 y acciones 1035 aprobadas y una falla preexistente reproducida en la base (test_bandeja_se_reconcilia_una_sola_vez). No instalado ni se modificaron datos reales, Cloud, Mobile o PULL.
+
+## Reserva liberada — Motor: ingreso Desktop multiempresa (2026-11-19)
+
+- Alcance reservado: contrato Motor para acciones capacidades e ingresar, validación contextual empresa/perfil, custodia y auditoría por lote, y pruebas sintéticas aisladas.
+- Fuera de alcance: Desktop, Cloud, Mobile, PULL productivo, credenciales y datos CASA/OFICINA.
+- Base documental: `2ae8738` (`feat/perfiles-documentales-20261118`). El contrato Desktop `37edd8b` no está disponible en este repositorio/remoto tras `git fetch`; se implementó una frontera compatible y se deja esta limitación explícita.
+- Cierre: `f4b7775`; pruebas sintéticas aprobadas y rama respaldada en `origin/feat/motor-ingreso-multiempresa-20261119`.
+
+## Reserva liberada — Motor: compatibilidad de ingreso MBT anterior (2026-11-19)
+
+- Alcance reservado: normalización de solicitudes `ingresar` antiguas sin empresa/perfil y pruebas sintéticas de compatibilidad. No se modifican Desktop, OCR, reglas documentales, Mobile, Cloud ni PULL.
+- Cierre: `12c630d`; pruebas aisladas aprobadas y respaldo remoto verificado.

@@ -94,6 +94,7 @@ def crear_parser() -> argparse.ArgumentParser:
             "idéntico a siempre: sólo CSV + bandeja, ninguna reconciliación."
         ),
     )
+    parser.add_argument("--perfil-documental", help="Perfil documental autorizado por el Motor")
     return parser
 
 
@@ -129,6 +130,21 @@ def main(argv: list[str] | None = None) -> None:
             RepositorioTelemetria(Path(estado_catalogos.ruta) / "telemetria_cache.json"),
         )
 
+    if argumentos.perfil_documental is None:
+        # CLI histórico: conserva AZA únicamente cuando no participa del
+        # contrato Desktop. Desktop siempre pasa el perfil explícito.
+        from atlas_core.perfiles_documentales import PERFIL_AZA
+        perfil_documental = PERFIL_AZA
+    else:
+        from atlas_core.ingreso_multiempresa import resolver_perfil
+        try:
+            import os
+            perfil_documental = resolver_perfil(
+                Path(argumentos.salida).parent.parent.parent,
+                os.environ.get("ATLAS_EMPRESA_ID", "mbt"), argumentos.perfil_documental,
+            )
+        except Exception as error:
+            parser.error(str(error))
     resumen = procesar_carpeta(
         argumentos.carpeta,
         argumentos.salida,
@@ -137,6 +153,7 @@ def main(argv: list[str] | None = None) -> None:
         fecha_hasta=argumentos.fecha_hasta,
         carpeta_catalogos=estado_catalogos.ruta,
         servicio_telemetria=servicio_telemetria,
+        perfil_documental=perfil_documental,
     )
     if estado_catalogos.ruta is not None and Path(argumentos.salida).is_file():
         # Bloque BUG: PÉRDIDA DE DECISIÓN PENDIENTE AL AGREGAR OTRA GUÍA AL
