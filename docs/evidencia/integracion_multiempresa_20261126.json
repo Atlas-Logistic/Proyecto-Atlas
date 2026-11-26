@@ -1,0 +1,532 @@
+{
+ "fecha": "2026-11-26T11:58:16-0300",
+ "commits": {
+  "motor": "d890caf",
+  "cloud": "fcc2051",
+  "mobile": "94099ef",
+  "desktop": "5665982"
+ },
+ "total": 24,
+ "fallas": 0,
+ "resultados": [
+  {
+   "etapa": "alta",
+   "prueba": "alta integral de Andes con sus plantas propias como catálogo inicial (sin plantas AZA)",
+   "ok": true,
+   "detalle": {
+    "Puerto Norte ANDESMARCA": "9b890ef2-d18a-470d-b428-968034684de6",
+    "Bodega Lampa ANDESMARCA": "6b73ac3b-51b9-42c2-a883-4f95ad181804"
+   }
+  },
+  {
+   "etapa": "identidad",
+   "prueba": "Andes con administrador y supervisor; exigencia de identidad activa en ambas empresas",
+   "ok": true,
+   "detalle": [
+    {
+     "resultado": "CREADO",
+     "cuenta": {
+      "usuario": "andes.sup",
+      "nombre": "Supervisor Andes",
+      "rol": "supervisor",
+      "activo": true,
+      "creado_por": "andes.admin",
+      "creado_en": "2026-11-26T14:56:26+00:00"
+     }
+    },
+    []
+   ]
+  },
+  {
+   "etapa": "plantas",
+   "prueba": "primer PULL de Andes (proceso de sistema, sin sesión) publica sus 2 plantas a Cloud",
+   "ok": true,
+   "detalle": {
+    "rc": 0,
+    "plantas": {
+     "publicadas": 2,
+     "cambios": 2
+    },
+    "salida": "omitidos_error_persistido\": [],\n  \"licencias_mobile\": {\n    \"encontrados\": 0,\n    \"incorporados\": [],\n    \"vehiculos\": [],\n    \"sin_vincular\": [],\n    \"errores\": []\n  },\n  \"extraccion_licencias\": {\n    \"pendientes\": 0,\n    \"extraidas\": [],\n    \"errores\": []\n  },\n  \"identificacion_patentes\": {\n    \"pendientes\": 0,\n    \"asociados\": [],\n    \"por_clasificar\": [],\n    \"errores\": []\n  },\n  \"vencimientos_vehiculo\": {\n    \"pendientes\": 0,\n    \"extraidos\": [],\n    \"errores\": [],\n    \"activados\": []\n  },\n  \"asignaciones_vehiculo\": {\n    \"publicadas\": null,\n    \"error\": \"cat\\u00e1logo no disponible: esquema V1 inv\\u00e1lido\"\n  },\n  \"plantas_mobile\": {\n    \"publicadas\": 2,\n    \"cambios\": 2\n  }\n}\nWARNING:atlas_core.cloud_asignaciones_vehiculo:Asignaciones de vehículo no publicadas: esquema V1 inválido\n"
+   }
+  },
+  {
+   "etapa": "plantas",
+   "prueba": "PULL de MBT no publica catálogo (conserva AZA por compatibilidad)",
+   "ok": true,
+   "detalle": {
+    "rc": 0,
+    "plantas": {
+     "publicadas": null,
+     "omitido": "MBT usa los códigos AZA_COLINA/AZA_RENCA"
+    }
+   }
+  },
+  {
+   "etapa": "mobile",
+   "prueba": "chofer Andes (alta integral) inicia sesión y Mobile ofrece sólo las plantas de Andes, sin Colina/Renca",
+   "ok": true,
+   "detalle": [
+    {
+     "planta_id": "6b73ac3b-51b9-42c2-a883-4f95ad181804",
+     "nombre": "Bodega Lampa ANDESMARCA"
+    },
+    {
+     "planta_id": "9b890ef2-d18a-470d-b428-968034684de6",
+     "nombre": "Puerto Norte ANDESMARCA"
+    }
+   ]
+  },
+  {
+   "etapa": "mobile",
+   "prueba": "Andes envía su guía con su planta (200); con AZA_COLINA se rechaza (400)",
+   "ok": true,
+   "detalle": [
+    {
+     "envio_id": "guia-andes-7001234-integracion",
+     "status": 200,
+     "cuerpo": {
+      "estado": "RECIBIDO",
+      "envio_id": "guia-andes-7001234-integracion",
+      "documento_id": "doc_guia-andes-7001234-integracion",
+      "idempotente": false
+     }
+    },
+    {
+     "envio_id": "guia-andes-aza-rechazo-01",
+     "status": 400,
+     "cuerpo": {
+      "error": "PLANTA_ORIGEN_INVALIDA"
+     }
+    }
+   ]
+  },
+  {
+   "etapa": "mobile",
+   "prueba": "chofer MBT ve Colina/Renca, envía con AZA_COLINA (200) y no puede usar una planta de Andes (400)",
+   "ok": true,
+   "detalle": {
+    "login": {
+     "ok": true,
+     "chofer": "123456785"
+    },
+    "plantas": [
+     {
+      "planta_id": "AZA_COLINA",
+      "nombre": "Colina"
+     },
+     {
+      "planta_id": "AZA_RENCA",
+      "nombre": "Renca"
+     }
+    ],
+    "envios": [
+     {
+      "envio_id": "guia-mbt-7005678-integracion",
+      "status": 200,
+      "cuerpo": {
+       "estado": "RECIBIDO",
+       "envio_id": "guia-mbt-7005678-integracion",
+       "documento_id": "doc_guia-mbt-7005678-integracion",
+       "idempotente": false
+      }
+     },
+     {
+      "envio_id": "guia-mbt-cruce-andes-01",
+      "status": 400,
+      "cuerpo": {
+       "error": "PLANTA_ORIGEN_INVALIDA"
+      }
+     }
+    ]
+   }
+  },
+  {
+   "etapa": "recepcion",
+   "prueba": "PULL Andes con OCR real recibe su envío en su raíz con su planta_id",
+   "ok": true,
+   "detalle": {
+    "rc": 0,
+    "meta": {
+     "envio_id": "guia-andes-7001234-integracion",
+     "estado": "REQUIERE_REVISION",
+     "planta_origen_informada": "9b890ef2-d18a-470d-b428-968034684de6"
+    }
+   }
+  },
+  {
+   "etapa": "procesamiento",
+   "prueba": "la guía de Andes queda procesada en el dataset de Andes",
+   "ok": true,
+   "detalle": {
+    "rc": 0,
+    "res": {
+     "procesados": null,
+     "errores_procesamiento": null,
+     "persistidos": null,
+     "confirmados": null
+    },
+    "dataset": 1,
+    "salida": "ndes-7001234-integracion\"\n  ],\n  \"fallidos\": {},\n  \"procesados\": [\n    \"guia-andes-7001234-integracion\"\n  ],\n  \"omitidos_por_bloqueo\": [],\n  \"errores_procesamiento\": {},\n  \"detenido_por_escritor\": false,\n  \"reconciliacion_bandeja\": {\n    \"ejecutada\": false,\n    \"pendientes\": 0\n  },\n  \"errores_recepcion\": [],\n  \"omitidos_error_persistido\": [],\n  \"licencias_mobile\": {\n    \"encontrados\": 0,\n    \"incorporados\": [],\n    \"vehiculos\": [],\n    \"sin_vincular\": [],\n    \"errores\": []\n  },\n  \"extraccion_licencias\": {\n    \"pendientes\": 0,\n    \"extraidas\": [],\n    \"errores\": []\n  },\n  \"identificacion_patentes\": {\n    \"pendientes\": 0,\n    \"asociados\": [],\n    \"por_clasificar\": [],\n    \"errores\": []\n  },\n  \"vencimientos_vehiculo\": {\n    \"pendientes\": 0,\n    \"extraidos\": [],\n    \"errores\": [],\n    \"activados\": []\n  },\n  \"asignaciones_vehiculo\": {\n    \"publicadas\": null,\n    \"error\": \"cat\\u00e1logo no disponible: esquema V1 inv\\u00e1lido\"\n  },\n  \"plantas_mobile\": {\n    \"publicadas\": 2,\n    \"cambios\": 0\n  }\n}\nINFO:atlas_core.ocr_provider:RapidOCRProvider iniciado (CPU, worker aislado)\nINFO:atlas_core.ocr_provider:Proveedor OCR: RapidOCR CPU (solicitado explícitamente)\nINFO:atlas_core.cloud_mobile_sync_cliente:PULL Cloud: proveedor OCR efectivo=RapidOCRProvider preferencia=rapidocr\nINFO:atlas_core.procesamiento_masivo:número de guía recuperado mediante numero-guia-geometrico-conservador-v1\nWARNING:atlas_core.cloud_asignaciones_vehiculo:Asignaciones de vehículo no publicadas: esquema V1 inválido\n"
+   }
+  },
+  {
+   "etapa": "recepcion",
+   "prueba": "Cloud marca el envío de Andes como confirmado por el Motor de Andes",
+   "ok": true,
+   "detalle": {
+    "empresa_id": "cloud-andes-prueba",
+    "envio_id": "guia-andes-7001234-integracion",
+    "documento_id": "doc_guia-andes-7001234-integracion",
+    "usuario_id": "a368b720-7144-407a-b67e-1e2a0df52e09",
+    "chofer_id": "123456785",
+    "observacion": "integracion ANDESMARCA",
+    "estado": "RECIBIDO",
+    "creado_en": "2026-11-26T14:56:44.603Z",
+    "recibido_en": "2026-11-26T14:56:44.603Z",
+    "consumo_estado": "COMPLETADO",
+    "lease_consumidor": null,
+    "lease_token": null,
+    "lease_expira_en": null,
+    "confirmado_en": "2026-11-26T14:56:57.568Z",
+    "capturado_en": "2026-11-26T14:56:44.581Z",
+    "tipo_novedad": "",
+    "guia_firmada_correo": 0,
+    "planta_origen_informada": "9b890ef2-d18a-470d-b428-968034684de6",
+    "lote_id": "",
+    "tipos_novedad": "",
+    "rol_documento": "GUIA",
+    "evidencia_de_envio_id": ""
+   }
+  },
+  {
+   "etapa": "aislamiento",
+   "prueba": "MBT ficticia (raíz y estado local) idéntica tras recibir y procesar la guía de Andes",
+   "ok": true,
+   "detalle": ""
+  },
+  {
+   "etapa": "recepcion",
+   "prueba": "MBT recibe y procesa sólo su guía, en su raíz",
+   "ok": true,
+   "detalle": {
+    "rc": 0,
+    "filas": 1,
+    "salida": "   \"extraidos\": [],\n    \"errores\": [],\n    \"activados\": []\n  },\n  \"asignaciones_vehiculo\": {\n    \"publicadas\": null,\n    \"error\": \"cat\\u00e1logo no disponible: esquema V1 inv\\u00e1lido\"\n  },\n  \"plantas_mobile\": {\n    \"publicadas\": null,\n    \"omitido\": \"MBT usa los c\\u00f3digos AZA_COLINA/AZA_RENCA\"\n  }\n}\nINFO:atlas_core.ocr_provider:RapidOCRProvider iniciado (CPU, worker aislado)\nINFO:atlas_core.ocr_provider:Proveedor OCR: RapidOCR CPU (solicitado explícitamente)\nINFO:atlas_core.cloud_mobile_sync_cliente:PULL Cloud: proveedor OCR efectivo=RapidOCRProvider preferencia=rapidocr\nINFO:atlas_core.procesamiento_masivo:número de guía recuperado mediante numero-guia-geometrico-conservador-v1\nWARNING:atlas_core.cloud_asignaciones_vehiculo:Asignaciones de vehículo no publicadas: esquema V1 inválido\n"
+   }
+  },
+  {
+   "etapa": "permisos",
+   "prueba": "sin sesión, la consulta B1 sobre la guía recién procesada de Andes se niega (77 SIN_SESION)",
+   "ok": true,
+   "detalle": [
+    77,
+    "{\"error\": \"SIN_SESION\", \"detalle\": \"inicie sesión\", \"empresa\": \"andes-prueba\"}\n"
+   ]
+  },
+  {
+   "etapa": "desktop",
+   "prueba": "el supervisor de Andes entra a Desktop (pantalla con MBT y Andes) con sesión Motor de Andes",
+   "ok": true,
+   "detalle": {
+    "empresas": [
+     "mbt",
+     "andes-prueba"
+    ],
+    "ingreso": "Abriendo",
+    "sesion": {
+     "empresa": "andes-prueba",
+     "usuario": "andes.sup",
+     "rolSesion": "supervisor"
+    }
+   }
+  },
+  {
+   "etapa": "aislamiento",
+   "prueba": "la carga inicial de Desktop en Andes no contiene datos de MBT",
+   "ok": true,
+   "detalle": "{\"carpetaConfigurada\":\"\",\"demoDesarrollo\":false,\"raizAtlas\":\"C:\\\\Atlas\\\\pruebas\\\\integracion-multiempresa-20261126\\\\mundo\\\\drive\\\\Atlas_empresas\\\\andes-prueba\",\"estadoOperacion\":{\"ok\":false,\"codigo\":\"SIN_OPERACION_ACTIVA\",\"mensaje\":\"Todavía no hay una operación activa publicada.\"},\"viajes\":{\"existe\":false,\"contenido\":null,\"ruta\":\"viajes.csv\"},\"sinTransporte\":{\"existe\":false,\"contenido\":null,\"ruta\":\"documentos_sin_transporte.csv\"},\"decisionesPendientes\":{\"existe\":false,\"contenido\":null,\"ruta\":null},\"pendientesTecnicos\":{\"existe\":false,\"contenido\":null,\"ruta\":\"C:\\\\Atlas\\\\pruebas\\\\integracion-mul"
+  },
+  {
+   "etapa": "consulta",
+   "prueba": "historial Mobile de Desktop muestra el envío de Andes y ninguno de MBT",
+   "ok": true,
+   "detalle": "{\"ok\":true,\"envios\":[{\"schema_version\":1,\"envio_id\":\"guia-andes-7001234-integracion\",\"estado\":\"REQUIERE_REVISION\",\"foto_original\":\"original.jpg\",\"imagen_mime\":\"image/jpeg\",\"imagen_sha256\":\"9c97b9937c24b5ec91fedc99e1fb034cc5120629049b64308d150854d06a19e3\",\"recibido_en\":\"2026-11-26T14:56:51.842539+00:00\",\"empresa_id\":\"cloud-andes-prueba\",\"documento_id\":\"doc_guia-andes-7001234-integracion\",\"chofer_id\":\"123456785\",\"observacion\":\"integracion ANDESMARCA\",\"capturado_en\":\"2026-11-26T14:56:44.581Z\",\"tipo"
+  },
+  {
+   "etapa": "correccion",
+   "prueba": "dos correcciones B1 desde Desktop (vista previa + confirmación humana): transporte y peso escritos en el dataset de Andes",
+   "ok": true,
+   "detalle": {
+    "transporte": [
+     "{\"ok\":true,\"estado\":\"PREVIEW_PENDIENTE\",\"accion\":\"DOCUMENTO_CORREGIR_CAMPO\",\"preview\":{\"estado\":\"PREVIEW\",\"accion\":\"DOCUMENTO_CORREGIR_CAMPO\",\"riesgo\":\"OPERACIONAL_REVERSIBLE\",\"autonomia_b1\":\"CONFIRMACION_HUMANA\",\"entidad\":{\"tipo\":\"DOCUMENTO\",\"id\":\"mobile/guia-andes-7001234-integracion/original.jpg\"",
+     "{\"ok\":true,\"estado\":\"EJECUTADA\",\"accion\":\"DOCUMENTO_CORREGIR_CAMPO\",\"resultado\":{\"estado\":\"APLICADA\",\"token\":\"c6d7c76e933e4289b8e586c83f7db473\",\"accion\":\"DOCUMENTO_CORREGIR_CAMPO\",\"riesgo\":\"OPERACIONAL_REVERSIBLE\",\"entidad\":{\"tipo\":\"DOCUMENTO\",\"id\":\"mobile/guia-andes-7001234-integracion/original.jpg"
+    ],
+    "peso": [
+     "{\"ok\":true,\"estado\":\"PREVIEW_PENDIENTE\",\"accion\":\"DOCUMENTO_CORREGIR_CAMPO\",\"preview\":{\"estado\":\"PREVIEW\",\"accion\":\"DOCUMENTO_CORREGIR_CAMPO\",\"riesgo\":\"OPERACIONAL_REVERSIBLE\",\"autonomia_b1\":\"CONFIRMACION_HUMANA\",\"entidad\":{\"tipo\":\"DOCUMENTO\",\"id\":\"mobile/guia-andes-7001234-integracion/original.jpg\"",
+     "{\"ok\":true,\"estado\":\"EJECUTADA\",\"accion\":\"DOCUMENTO_CORREGIR_CAMPO\",\"resultado\":{\"estado\":\"APLICADA\",\"token\":\"c93b60b14f124dcab90220512d76237d\",\"accion\":\"DOCUMENTO_CORREGIR_CAMPO\",\"riesgo\":\"OPERACIONAL_REVERSIBLE\",\"entidad\":{\"tipo\":\"DOCUMENTO\",\"id\":\"mobile/guia-andes-7001234-integracion/original.jpg"
+    ],
+    "fila": {
+     "numero_transporte": "0000700123",
+     "peso_kg": "25000",
+     "estado_documental": "REQUIERE_REVISION"
+    }
+   }
+  },
+  {
+   "etapa": "correccion",
+   "prueba": "las correcciones quedan en el ledger de Andes atribuidas a la persona identificada (andes-prueba:andes.sup), no a JAVIER_DESKTOP",
+   "ok": true,
+   "detalle": {
+    "actores": [
+     "andes-prueba:andes.sup"
+    ],
+    "ledger": [
+     {
+      "decision_id": "ACCION_OPERACIONAL:c93b60b14f124dcab90220512d76237d",
+      "tipo": "CORRECCION_DOCUMENTAL_OPERADOR",
+      "accion": "CORREGIR_CAMPO",
+      "actor": "B1",
+      "confirmado_por": "andes-prueba:andes.sup",
+      "fecha": "2026-11-26T14:58:05.516812+00:00",
+      "documento": {
+       "archivo": "mobile/guia-andes-7001234-integracion/original.jpg",
+       "numero_guia": "7001234",
+       "numero_transporte": "0000700123"
+      },
+      "campo": "peso_kg",
+      "valor_documental": "No encontrado",
+      "valor_corregido": "25000",
+      "referencia": "En la guía 7001234 el peso correcto es 25.000 kg"
+     }
+    ]
+   }
+  },
+  {
+   "etapa": "reporte",
+   "prueba": "tras la corrección el Motor publica el reporte vigente de Andes con la guía y el peso nuevo",
+   "ok": true,
+   "detalle": "viaje_id;numero_transporte;fecha;estado;motivos_revision;cantidad_documentos;documentos;numeros_guia;clientes;obras_destino;origenes;choferes;ruts_chofer;patentes_tracto;patentes_rampla;materiales;tipos_carga;evidencias_documentos;documentos_operacionales;entregas;fecha_creacion;planta_origen_id;planta_origen_nombre;destino_id;destino_nombre;distancia_km;duracion_min;proveedor_ruta;estado_ruta;mot"
+  },
+  {
+   "etapa": "consulta",
+   "prueba": "Desktop carga ese reporte: la guía recibida por Mobile, corregida, sin datos de MBT",
+   "ok": true,
+   "detalle": "{\"carpetaConfigurada\":\"C:\\\\Atlas\\\\pruebas\\\\integracion-multiempresa-20261126\\\\mundo\\\\drive\\\\Atlas_empresas\\\\andes-prueba\\\\reportes\\\\accion_operacional_20261126_145805_732169\",\"demoDesarrollo\":false,\"raizAtlas\":\"C:\\\\Atlas\\\\pruebas\\\\integracion-multiempresa-20261126\\\\mundo\\\\drive\\\\Atlas_empresas\\\\andes-prueba\",\"estadoOperacion\":{\"ok\":true,\"codigo\":\"OPERACION_ACTIVA\",\"mensaje\":\"Operación activa disponible.\",\"manifiesto\":\"C:\\\\Atlas\\\\pruebas\\\\integracion-multiempresa-20261126\\\\mundo\\\\drive\\\\Atlas_empresas\\\\andes-prueba\\\\operacion\\\\actual\\\\estado_operacion.json\",\"reporteVigente\":\"C:\\\\Atlas\\\\pruebas\\"
+  },
+  {
+   "etapa": "consulta",
+   "prueba": "consulta desde Desktop sobre la guía de Andes (B1 → Consultas Atlas) responde con su peso corregido y la ruta de Andes",
+   "ok": true,
+   "detalle": "{\"via\":\"CONSULTAS_ATLAS\",\"ruta\":\"C:\\\\Atlas\\\\pruebas\\\\integracion-multiempresa-20261126\\\\mundo\\\\drive\\\\Atlas_empresas\\\\andes-prueba\\\\reportes\\\\accion_operacional_20261126_145805_732169\\\\viajes.csv\",\"r\":{\"estado\":\"OK\",\"texto_respuesta\":\"25 toneladas (25000 kg) (guía 7001234).\",\"opciones_aclaracion\":[],\"resultado\":{\"consulta_interpretada\":{\"metrica\":\"SUM_PESO\",\"dominio\":\"VIAJES\",\"filtros\":{\"numero_guia\":\"7001234\"},\"agrupacion\":null,\"orden\":\"DESC\",\"limite\":null},\"resultado\":25000,\"unidades\":\"kg\",\"total_coincidencias\":1,\"viajes_soporte\":[{\"numero_transporte\":\"0000700123\",\"fecha\":\"25-11-2026\",\"numeros_guia\":\"7001234\",\"clientes\":\"\",\"obras_destino\":\"\",\"choferes\":\"\",\"patentes_tracto\":\"\",\"materiales\":\"\",\"tipos_carga\":\"NO DETERMINADO\",\"peso_total_viaje_kg\":\"25000\",\"distancia_km\":\"\",\"duracion_min\":\"\",\"direccion_entrega\":\"\",\"localidad_entrega\":\"\",\"estado_ruta\":\"\",\"estado\":\"REQUIERE_REVISION\"}],\"adver"
+  },
+  {
+   "etapa": "informe",
+   "prueba": "Desktop arma el informe de viajes de Andes con el exportador real (guía con su transporte corregido, sin MBT) y abre su vista previa PDF",
+   "ok": true,
+   "detalle": {
+    "viajes": 1,
+    "vista": true,
+    "titulo": "Vista previa — Informe MBT PDF",
+    "resultado": {
+     "ok": false,
+     "cancelado": true
+    }
+   }
+  },
+  {
+   "etapa": "aislamiento",
+   "prueba": "ingreso de guías por Desktop en Andes se detiene antes de copiar (sin perfil documental propio; nunca cae en AZA)",
+   "ok": true,
+   "detalle": {
+    "respuesta": "RECHAZO Error invoking remote method 'atlas:procesar-imagenes': Error: Transportes Andes (ficticia): el Motor no tiene un perfil documental procesable para esta empresa. No se copió ni procesó ninguna guía; los originales siguen donde estaban.",
+    "entradas": []
+   }
+  },
+  {
+   "etapa": "aislamiento",
+   "prueba": "MBT ficticia (raíz y estado local, fuera del perfil del lanzador) idéntica tras toda la operación de Andes en Desktop",
+   "ok": true,
+   "detalle": {
+    "raiz": [],
+    "local": []
+   }
+  }
+ ],
+ "dependencias_pendientes": [
+  {
+   "componente": "Motor identidad",
+   "descripcion": "No se puede crear un usuario de sólo consulta: usuarios_atlas.py admite sólo administrador_empresa y supervisor (ROLES_EMPRESA), aunque PERMISOS y Desktop reconocen 'consulta'",
+   "evidencia": {
+    "resultado": "RECHAZADO",
+    "codigo": "ROL_INVALIDO",
+    "detalle": "consulta"
+   }
+  },
+  {
+   "componente": "Motor alta/PULL",
+   "descripcion": "Empresa nueva sin reporte vigente: el PULL procesa la guía pero no publica el primer reporte (revalidar_y_regenerar_reporte nunca fuerza una primera regeneración), el alta no lo crea, Desktop ya no reconcilia al abrir y generar_reporte_viajes.py en raíz compartida falla sin turno local. El primer reporte aparece recién con una corrección (B1) que actualiza la guía",
+   "evidencia": {
+    "envio.reconciliacion_reporte": "reporte_regenerado=false, reporte_vigente=null",
+    "generar_reporte_viajes_admin": {
+     "rc": 1,
+     "error": "EscrituraSinTurno"
+    }
+   }
+  },
+  {
+   "componente": "Motor modelo de viaje",
+   "descripcion": "El viaje se identifica por el «número de transporte» de la guía AZA: una guía de otra empresa procesada sin ese dato queda en documentos_sin_transporte y no aparece en viajes, consultas ni informe hasta que una persona le asigna un transporte por B1",
+   "evidencia": {
+    "fila_tras_ocr": {
+     "numero_guia": "7001234",
+     "numero_transporte": "No encontrado"
+    }
+   }
+  },
+  {
+   "componente": "Desktop informe",
+   "descripcion": "El informe de viajes de otra empresa usa el formato y el rótulo de MBT (exportador AtlasExportacionMBT*, vista previa «Informe MBT PDF»); falta un rótulo/plantilla por empresa",
+   "evidencia": {
+    "titulo_vista_previa": "Vista previa — Informe MBT PDF",
+    "html_contiene_MBT": true
+   }
+  },
+  {
+   "componente": "Motor perfil documental",
+   "descripcion": "No existe implementador de perfil documental para otra empresa: Desktop bloquea su ingreso (FORMATO_DOCUMENTAL_DESCONOCIDO), pero la recepción Mobile/PULL procesa sus guías con el pipeline AZA (procesar_archivo sin perfil = PERFIL_AZA): la guía de Andes queda REQUIERE_REVISION con campos AZA",
+   "evidencia": {
+    "ingreso_desktop": "RECHAZO Error invoking remote method 'atlas:procesar-imagenes': Error: Transportes Andes (ficticia): el Motor no tiene un perfil documental procesable para esta empresa. No se copió ni procesó ninguna guía; los originales siguen donde estaban.",
+    "fila_andes": {
+     "estado_documental": "REQUIERE_REVISION",
+     "motivos_revision_documento": "TRANSPORTE_AUSENTE | CHOFER_AUSENTE | CLIENTE_AUSENTE | MATERIAL_AUSENTE | DOCUMENTO_DEGRADADO | DESTINO_CONTAMINADO_POR_OTRA_SECCION",
+     "hora_entrada_aza": "No encontrado"
+    }
+   }
+  },
+  {
+   "componente": "Motor/Desktop atribución",
+   "descripcion": "Resuelto sólo en b1_operador_cli (identidad.actor_operacion): otros escritores que Desktop invoca con actor fijo siguen registrando JAVIER_DESKTOP/DESKTOP con identidad exigida",
+   "evidencia": [
+    "confirmar_incidencias_operacionales.py --actor JAVIER_DESKTOP (main.js)",
+    "asociar_evidencia_mobile.py --actor DESKTOP (main.js)",
+    "aplicar_decisiones_multiples.py --actor JAVIER_DESKTOP (por defecto)",
+    "operaciones_conversacionales_cli.py --actor JAVIER_DESKTOP (por defecto)",
+    "acciones_operacionales_cli.py --actor/--confirmado-por (lo fija el llamador)"
+   ]
+  }
+ ],
+ "estado": {
+  "plantas": {
+   "Puerto Norte ANDESMARCA": "9b890ef2-d18a-470d-b428-968034684de6",
+   "Bodega Lampa ANDESMARCA": "6b73ac3b-51b9-42c2-a883-4f95ad181804"
+  },
+  "sesiones": {
+   "sa": "eCB2VCDw5qMWlm2GJZZIoVuWCrBLFt3HOKxfLQM7eCA",
+   "aa": "7ans7xGWEipGysllhPy1P5KCELRueEM3DGA38zKUD04",
+   "ma": "hA7XxBUiGRjhqCEbtPuZxSKgQF6UXaIt8Q95Mb9hoKk"
+  },
+  "pull_andes": {
+   "rc": 0,
+   "segundos": 13.5,
+   "resultado": {
+    "_salida": "[Atlas OCR] Proveedor activo: RapidOCR CPU (solicitado explícitamente)\n{\n  \"encontrados\": 1,\n  \"leaseados\": [\n    \"guia-andes-7001234-integracion\"\n  ],\n  \"persistidos\": [\n    \"guia-andes-7001234-integracion\"\n  ],\n  \"confirmados\": [\n    \"guia-andes-7001234-integracion\"\n  ],\n  \"fallidos\": {},\n  \"procesados\": [\n    \"guia-andes-7001234-integracion\"\n  ],\n  \"omitidos_por_bloqueo\": [],\n  \"errores_procesamiento\": {},\n  \"detenido_por_escritor\": false,\n  \"reconciliacion_bandeja\": {\n    \"ejecutada\": false,\n    \"pendientes\": 0\n  },\n  \"errores_recepcion\": [],\n  \"omitidos_error_persistido\": [],\n  \"licencias_mobile\": {\n    \"encontrados\": 0,\n    \"incorporados\": [],\n    \"vehiculos\": [],\n    \"sin_vincular\": [],\n    \"errores\": []\n  },\n  \"extraccion_licencias\": {\n    \"pendientes\": 0,\n    \"extraidas\": [],\n    \"errores\": []\n  },\n  \"identificacion_patentes\": {\n    \"pendientes\": 0,\n    \"asociados\": [],\n    \"por_clasificar\": [],\n    \"errores\": []\n  },\n  \"vencimientos_vehiculo\": {\n    \"pendientes\": 0,\n    \"extraidos\": [],\n    \"errores\": [],\n    \"activados\": []\n  },\n  \"asignaciones_vehiculo\": {\n    \"publicadas\": null,\n    \"error\": \"cat\\u00e1logo no disponible: esquema V1 inv\\u00e1lido\"\n  },\n  \"plantas_mobile\": {\n    \"publicadas\": 2,\n    \"cambios\": 0\n  }\n}\n"
+   }
+  },
+  "fila_andes": {
+   "archivo": "mobile/guia-andes-7001234-integracion/original.jpg",
+   "estado_procesamiento": "OK",
+   "error": "",
+   "numero_guia": "7001234",
+   "numero_transporte": "No encontrado",
+   "fecha": "25-11-2026",
+   "chofer": "No encontrado",
+   "rut_chofer": "No encontrado",
+   "cliente": "No encontrado",
+   "obra_destino": "No encontrado",
+   "patente_tracto": "No encontrado",
+   "patente_rampla": "No encontrado",
+   "descripcion_material": "",
+   "tipo_carga": "NO DETERMINADO",
+   "indicador_revision": "REVISAR",
+   "peso_kg": "No encontrado",
+   "hora_entrada_aza": "No encontrado",
+   "hora_salida_aza": "No encontrado",
+   "permanencia_minutos": "No encontrado",
+   "motivos_revision_documento": "TRANSPORTE_AUSENTE | CHOFER_AUSENTE | CLIENTE_AUSENTE | MATERIAL_AUSENTE | DOCUMENTO_DEGRADADO | DESTINO_CONTAMINADO_POR_OTRA_SECCION",
+   "metodos_recuperacion_documento": "GEOMETRICO",
+   "estado_documental": "REQUIERE_REVISION",
+   "estado_operacional": "REQUIERE_REVISION",
+   "metricas_procesamiento_json": "{\"atlas_ia_seg\": 0.0, \"atlas_ia_segundos\": 0, \"carga_preprocesamiento_seg\": 0.0, \"extraccion_parsing_seg\": 0.0084, \"fecha_recepcion_utc\": \"2026-11-26T14:56:51.842539+00:00\", \"geocodificacion_routing_seg\": 0.0, \"ocr_seg\": 3.3026, \"resolucion_corroboracion_seg\": 0.0056, \"telemetria_seg\": 0.0, \"total_documento_seg\": 3.3168}",
+   "resultado_atlas_ia_json": "[{\"campo\": \"cliente\", \"dominio\": \"CLIENTE\", \"elegible_ia\": true, \"llamada_realizada\": false, \"problema\": \"CLIENTE_AUSENTE\", \"razon_no_elegible\": \"SIN_PROVEEDOR_IA_CONFIGURADO\"}, {\"campo\": \"descripcion_material\", \"dominio\": \"MATERIAL\", \"elegible_ia\": true, \"llamada_realizada\": false, \"problema\": \"MATERIAL_AUSENTE\", \"razon_no_elegible\": \"SIN_PROVEEDOR_IA_CONFIGURADO\"}, {\"campo\": \"chofer\", \"dominio\": \"CHOFER\", \"elegible_ia\": true, \"llamada_realizada\": false, \"problema\": \"CHOFER_AUSENTE\", \"razon_no_elegible\": \"SIN_PROVEEDOR_IA_CONFIGURADO\"}, {\"campo\": \"despachar_a_crudo\", \"dominio\": \"DESTINO\", \"elegible_ia\": true, \"llamada_realizada\": false, \"problema\": \"DESTINO_CONTAMINADO_POR_OTRA_SECCION\", \"razon_no_elegible\": \"SIN_PROVEEDOR_IA_CONFIGURADO\"}, {\"campo\": \"motivos_revision_documento\", \"dominio\": \"DOCUMENTAL\", \"elegible_ia\": false, \"llamada_realizada\": false, \"problema\": \"DOCUMENTO_DEGRADADO\", \"razon_no_elegible\": \"FALLA_ESTRUCTURAL_SIN_RAZONAMIENTO_POSIBLE\"}, {\"campo\": \"motivos_revision_documento\", \"dominio\": \"DOCUMENTAL\", \"elegible_ia\": false, \"llamada_realizada\": false, \"problema\": \"TRANSPORTE_AUSENTE\", \"razon_no_elegible\": \"FALLA_ESTRUCTURAL_SIN_RAZONAMIENTO_POSIBLE\"}]",
+   "evidencia_documentos_relacionados": "",
+   "senal_calidad_captura": "",
+   "despachar_a_crudo": "",
+   "direccion_entrega": "",
+   "localidad_entrega": "",
+   "region_entrega": "",
+   "estado_entrega": "",
+   "planta_origen_id": "",
+   "planta_origen_nombre": "",
+   "origen_determinado_por": "",
+   "evidencia_origen": "",
+   "distancia_km": "",
+   "duracion_min": "",
+   "proveedor_ruta": "",
+   "estado_ruta": "",
+   "motivo_ruta": "",
+   "codigo_pais": "",
+   "codigo_unidad": "",
+   "codigo_contexto": "",
+   "proveedor_telemetria": "",
+   "estado_telemetria": "",
+   "origen_gps": "",
+   "planta_gps_id": "",
+   "planta_gps_nombre": "",
+   "hora_entrada_gps": "",
+   "hora_salida_gps": "",
+   "distancia_gps_km": "",
+   "evidencia_telemetria": "",
+   "motivo_origen_gps": "",
+   "latitud_estadia_gps": "",
+   "longitud_estadia_gps": "",
+   "duracion_estadia_gps_min": "",
+   "rut_cliente": "76.111.111-6",
+   "codigo_cliente": "No encontrado",
+   "cod_destinatario": "No encontrado",
+   "fecha_ingesta_utc": "2026-11-26T14:56:56.979655+00:00"
+  },
+  "reporte_tras_pull": false,
+  "electron": "C:\\Atlas\\pruebas\\integracion-multiempresa-20261126\\electron",
+  "carga_inicial_desktop": "{\"carpetaConfigurada\":\"\",\"demoDesarrollo\":false,\"raizAtlas\":\"C:\\\\Atlas\\\\pruebas\\\\integracion-multiempresa-20261126\\\\mundo\\\\drive\\\\Atlas_empresas\\\\andes-prueba\",\"estadoOperacion\":{\"ok\":false,\"codigo\":\"SIN_OPERACION_ACTIVA\",\"mensaje\":\"Todavía no hay una operación activa publicada.\"},\"viajes\":{\"existe\":false,\"contenido\":null,\"ruta\":\"viajes.csv\"},\"sinTransporte\":{\"existe\":false,\"contenido\":null,\"ruta\":\"documentos_sin_transporte.csv\"},\"decisionesPendientes\":{\"existe\":false,\"contenido\":null,\"ruta\":null},\"pendientesTecnicos\":{\"existe\":false,\"contenido\":null,\"ruta\":\"C:\\\\Atlas\\\\pruebas\\\\integracion-mul",
+  "b1_correcciones": {
+   "transporte": {
+    "preview": "{\"ok\":true,\"estado\":\"PREVIEW_PENDIENTE\",\"accion\":\"DOCUMENTO_CORREGIR_CAMPO\",\"preview\":{\"estado\":\"PREVIEW\",\"accion\":\"DOCUMENTO_CORREGIR_CAMPO\",\"riesgo\":\"OPERACIONAL_REVERSIBLE\",\"autonomia_b1\":\"CONFIRMACION_HUMANA\",\"entidad\":{\"tipo\":\"DOCUMENTO\",\"id\":\"mobile/guia-andes-7001234-integracion/original.jpg\",\"numero_guia\":\"7001234\",\"numero_transporte\":\"No encontrado\",\"campo\":\"numero_transporte\"},\"valor_actual\":{\"numero_transporte\":\"No encontrado\"},\"valor_propuesto\":{\"numero_transporte\":\"0000700123\"},\"afectados\":{\"guias\":[\"7001234\"],\"archivo\":\"mobile/guia-andes-7001234-integracion/original.jpg\",\"numero_transporte\":\"No encontrado\",\"transporte_anterior\":\"No encontrado\",\"transporte_nuevo\":\"0000700123\",\"viaje_origen\":{\"numero_transporte\":\"No encontrado\",\"guias_restantes\":[]},\"viaje_destino\":{\"numero_transporte\":\"0000700123\",\"guias_existentes\":[],\"guias_resultantes\":[\"7001234\"]},\"guias_revalidar\":[\"7001234\"],\"decisiones_obsoletas\":[]},\"consecuencias\":[\"La guía 7001234 (mobile/guia-andes-7001234-integracion/original.jpg) pasa del transporte No encontrado al 0000700123; ningún otro campo del documento cambia.\",\"El viaje No encontrado queda con 0 guía(s); el viaje 0000700123 queda con 1 guía(s).\",\"El valor queda protegido en el ledger: un reproceso/OCR no lo revierte.\",\"Se retiran las tarjetas del documento que dependen del transporte anterior y se recalcula la bandeja.\"],\"revalidaciones\":[\"RETIRO_DECISIONES_OBSOLETAS\",\"RECONCILIAR_BANDEJA\",\"MANTENIMIENTO_FOCAL_GUIAS\",\"REGENERAR_REPORTE_VIAJES\"],\"requiere_confirmacion\":true,\"parametros\":{\"numero_guia\":\"7001234\",\"campo\":\"NUMERO_TRANSPORTE\",\"valor\":\"0000700123\",\"referencia\":\"En la guía 7001234 el número de transporte es 0000700123\"},\"huella_base\":\"9cb9021d74194f69476869594034d84da5e78daaa769e7c689fde55f794d6492\",\"idempotency_key\":\"930a9960b665e18fd8769aa26f69dda5ee5353313fcc4e45be2be03d1d5cce4b\",\"solicitado_por\":\"B1\",\"origen\":\"B1\",\"referencia\":\"En la guía 7001234 el número de transporte es 0000700123\",\"creado_en\":\"2026-11-26T14:57:34.500786+00:00\",\"expira_en\":\"2026-11-26T15:27:34.500786+00:00\"},\"mensaje\":\"Corregir numero_transporte de la guía 7001234: 'No encontrado' -> '0000700123'. La guía 7001234 (mobile/guia-andes-7001234-integracion/original.jpg) pasa del transporte No encontrado al 0000700123; ningún otro campo del documento cambia. El viaje No encontrado queda con 0 guía(s); el viaje 0000700123 queda con 1 guía(s). El valor queda protegido en el ledger: un reproceso/OCR no lo revierte. Se retiran las tarjetas del documento que dependen del transporte anterior y se recalcula la bandeja. ¿Confirmas? (sí / no)\"}",
+    "confirmacion": "{\"ok\":true,\"estado\":\"EJECUTADA\",\"accion\":\"DOCUMENTO_CORREGIR_CAMPO\",\"resultado\":{\"estado\":\"APLICADA\",\"token\":\"c6d7c76e933e4289b8e586c83f7db473\",\"accion\":\"DOCUMENTO_CORREGIR_CAMPO\",\"riesgo\":\"OPERACIONAL_REVERSIBLE\",\"entidad\":{\"tipo\":\"DOCUMENTO\",\"id\":\"mobile/guia-andes-7001234-integracion/original.jpg\",\"numero_guia\":\"7001234\",\"numero_transporte\":\"No encontrado\",\"campo\":\"numero_transporte\"},\"antes\":{\"numero_transporte\":\"No encontrado\"},\"despues\":{\"numero_transporte\":\"0000700123\"},\"decisiones_retiradas\":[],\"decisiones_nuevas\":[],\"retiradas_por_red_de_seguridad\":[],\"reconciliacion\":{\"ejecutado\":false,\"motivo\":\"SIN_BANDEJA_O_DATASET\"},\"revalidacion\":{\"focal\":null,\"guias\":{\"ejecutado\":false,\"motivo\":\"SIN_ELEGIBLES\",\"resueltas\":[],\"pendientes\":[]},\"mobile\":{\"envios\":[\"guia-andes-7001234-integracion\"],\"revisados\":1,\"actualizados\":[],\"estados\":{\"guia-andes-7001234-integracion\":\"REQUIERE_REVISION\"}},\"reporte\":{\"regenerado\":true,\"reporte\":\"reportes\\\\accion_operacional_20261126_145743_855747\"}},\"servicio\":null,\"respaldo\":\"respaldos\\\\acciones_operacionales\\\\20261126_145743_c6d7c76e933e\",\"idempotente\":false,\"auditoria_id\":\"0524483fd1c643088444ed4a2493c31b\"},\"mensaje\":\"Aplicado: DOCUMENTO_CORREGIR_CAMPO. Antes: {'numero_transporte': 'No encontrado'}. Después: {'numero_transporte': '0000700123'}. Bandeja no reconciliada (SIN_BANDEJA_O_DATASET). Reporte de viajes regenerado.\"}"
+   },
+   "peso": {
+    "preview": "{\"ok\":true,\"estado\":\"PREVIEW_PENDIENTE\",\"accion\":\"DOCUMENTO_CORREGIR_CAMPO\",\"preview\":{\"estado\":\"PREVIEW\",\"accion\":\"DOCUMENTO_CORREGIR_CAMPO\",\"riesgo\":\"OPERACIONAL_REVERSIBLE\",\"autonomia_b1\":\"CONFIRMACION_HUMANA\",\"entidad\":{\"tipo\":\"DOCUMENTO\",\"id\":\"mobile/guia-andes-7001234-integracion/original.jpg\",\"numero_guia\":\"7001234\",\"numero_transporte\":\"0000700123\",\"campo\":\"peso_kg\"},\"valor_actual\":{\"peso_kg\":\"No encontrado\"},\"valor_propuesto\":{\"peso_kg\":\"25000\"},\"afectados\":{\"guias\":[\"7001234\"],\"numero_transporte\":\"0000700123\",\"decisiones_obsoletas\":[]},\"consecuencias\":[\"El valor queda protegido en el ledger: un reproceso/OCR no lo revierte.\",\"Se retiran sólo las decisiones que preguntaban por el valor anterior; los motivos críticos ajenos se conservan.\",\"Se recalculan datos derivados, la bandeja y el reporte del viaje de esta guía, sin reconciliación global.\"],\"revalidaciones\":[\"RETIRO_DECISIONES_OBSOLETAS\",\"RECONCILIAR_BANDEJA\",\"MANTENIMIENTO_FOCAL_GUIA\",\"REGENERAR_REPORTE_VIAJES\"],\"requiere_confirmacion\":true,\"parametros\":{\"numero_guia\":\"7001234\",\"campo\":\"PESO_KG\",\"valor\":\"25000\",\"referencia\":\"En la guía 7001234 el peso correcto es 25.000 kg\"},\"huella_base\":\"7b75fa09f381cb203480e5551c12093bda665f53c785b9551dc47162bb91bd0a\",\"idempotency_key\":\"1aa7246bf750d166a2162afbeb360a07d14fe5dc86e83420f26dc72b260b530a\",\"solicitado_por\":\"B1\",\"origen\":\"B1\",\"referencia\":\"En la guía 7001234 el peso correcto es 25.000 kg\",\"creado_en\":\"2026-11-26T14:57:52.969934+00:00\",\"expira_en\":\"2026-11-26T15:27:52.969934+00:00\"},\"mensaje\":\"Corregir el peso de la guía 7001234 (transporte 0000700123): peso actual peso no disponible, peso propuesto 25.000 kg. Sólo cambia el peso de esta guía. El valor queda protegido en el ledger: un reproceso/OCR no lo revierte. Se retiran sólo las decisiones que preguntaban por el valor anterior; los motivos críticos ajenos se conservan. Se recalculan datos derivados, la bandeja y el reporte del viaje de esta guía, sin reconciliación global. ¿Confirmas? (sí / no)\"}",
+    "confirmacion": "{\"ok\":true,\"estado\":\"EJECUTADA\",\"accion\":\"DOCUMENTO_CORREGIR_CAMPO\",\"resultado\":{\"estado\":\"APLICADA\",\"token\":\"c93b60b14f124dcab90220512d76237d\",\"accion\":\"DOCUMENTO_CORREGIR_CAMPO\",\"riesgo\":\"OPERACIONAL_REVERSIBLE\",\"entidad\":{\"tipo\":\"DOCUMENTO\",\"id\":\"mobile/guia-andes-7001234-integracion/original.jpg\",\"numero_guia\":\"7001234\",\"numero_transporte\":\"0000700123\",\"campo\":\"peso_kg\"},\"antes\":{\"peso_kg\":\"No encontrado\"},\"despues\":{\"peso_kg\":\"25000\"},\"decisiones_retiradas\":[],\"decisiones_nuevas\":[],\"retiradas_por_red_de_seguridad\":[],\"reconciliacion\":{\"ejecutado\":false,\"motivo\":\"SIN_BANDEJA_O_DATASET\"},\"revalidacion\":{\"focal\":null,\"guias\":{\"ejecutado\":false,\"motivo\":\"SIN_ELEGIBLES\",\"resueltas\":[],\"pendientes\":[]},\"mobile\":{\"envios\":[\"guia-andes-7001234-integracion\"],\"revisados\":1,\"actualizados\":[],\"estados\":{\"guia-andes-7001234-integracion\":\"REQUIERE_REVISION\"}},\"reporte\":{\"regenerado\":true,\"reporte\":\"reportes\\\\accion_operacional_20261126_145805_732169\"}},\"servicio\":null,\"respaldo\":\"respaldos\\\\acciones_operacionales\\\\20261126_145805_c93b60b14f12\",\"idempotente\":false,\"auditoria_id\":\"6a2ffa62bd83414b99bdd4240698b4f5\"},\"mensaje\":\"Listo: la guía 7001234 quedó con peso 25.000 kg (antes peso no disponible). La corrección queda registrada y Atlas no la reemplazará con una nueva lectura.\"}"
+   }
+  },
+  "actores_correccion": [
+   "andes-prueba:andes.sup"
+  ],
+  "consulta_desktop": "{\"via\":\"CONSULTAS_ATLAS\",\"ruta\":\"C:\\\\Atlas\\\\pruebas\\\\integracion-multiempresa-20261126\\\\mundo\\\\drive\\\\Atlas_empresas\\\\andes-prueba\\\\reportes\\\\accion_operacional_20261126_145805_732169\\\\viajes.csv\",\"r\":{\"estado\":\"OK\",\"texto_respuesta\":\"25 toneladas (25000 kg) (guía 7001234).\",\"opciones_aclaracion\":[],\"resultado\":{\"consulta_interpretada\":{\"metrica\":\"SUM_PESO\",\"dominio\":\"VIAJES\",\"filtros\":{\"numero_guia\":\"7001234\"},\"agrupacion\":null,\"orden\":\"DESC\",\"limite\":null},\"resultado\":25000,\"unidades\":\"kg\",\"total_coincidencias\":1,\"viajes_soporte\":[{\"numero_transporte\":\"0000700123\",\"fecha\":\"25-11-2026\",\"numeros_guia\":\"7001234\",\"clientes\":\"\",\"obras_destino\":\"\",\"choferes\":\"\",\"patentes_tracto\":\"\",\"materiales\":\"\",\"tipos_carga\":\"NO DETERMINADO\",\"peso_total_viaje_kg\":\"25000\",\"distancia_km\":\"\",\"duracion_min\":\"\",\"direccion_entrega\":\"\",\"localidad_entrega\":\"\",\"estado_ruta\":\"\",\"estado\":\"REQUIERE_REVISION\"}],\"advertencias\":[],\"soporte\":{\"tipo\":\"VIAJES\",\"resumen\":\"1 viaje usado en el cálculo\",\"columnas\":[\"Fecha\",\"Transporte\",\"Guías\",\"Chofer\",\"Cliente\",\"Kg\"],\"filas\":[[\"25-11-2026\",\"0000700123\",\"7001234\",\"\",\"\",\"25000\"]]}}}}",
+  "informe": {
+   "vista": true,
+   "titulo": "Vista previa — Informe MBT PDF",
+   "resultado": {
+    "ok": false,
+    "cancelado": true
+   },
+   "html_longitud": 2346
+  },
+  "ingreso_desktop": "RECHAZO Error invoking remote method 'atlas:procesar-imagenes': Error: Transportes Andes (ficticia): el Motor no tiene un perfil documental procesable para esta empresa. No se copió ni procesó ninguna guía; los originales siguen donde estaban."
+ },
+ "nota_commits": "Corrida con árbol d890caf + cambios luego commiteados sin modificar como 42474a1 (fix) y 07e9f5c (validador); Desktop 5665982 + arnés commiteado como 64eb90a.",
+ "regresion_motor": {
+  "focal": "269 aprobadas",
+  "amplia": "1566 aprobadas, 15 fallidas en tests/test_procesamiento_masivo.py; las mismas pruebas fallan 8 en 4b6ba30, 13 en b09bd28 y 8 en b0b42e4 (bases sin la integración)"
+ }
+}
