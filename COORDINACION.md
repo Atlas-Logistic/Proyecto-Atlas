@@ -1,5 +1,12 @@
 # Coordinación — B1 correcciones, 2026-11-09
 
+## Reserva liberada — B1: observaciones en listados y PDF (2026-11-26)
+
+- Trabajo aislado en `C:/Atlas/pruebas/b1-observaciones-listados-20261126`, desde Motor `b0b42e4` y Desktop `2914483`; no se tocaron Desktop de Code, OFICINA, G:, PULL, instalaciones ni producción.
+- Motor: los listados de viajes usan la proyección canónica de observaciones para cualquier consulta, agregan la columna sólo si hay texto y eliminan repeticiones sin modificar el origen. El contenido llega al mismo HTML usado por pantalla/PDF; agrupación por chofer y orden cronológico siguen intactos.
+- Desktop: título de vista previa `Listado de viajes` y barra PDF sin margen sobrante. Publicado Motor `be858f4` y Desktop `d653f05`.
+- Pruebas Motor focales: 59 aprobadas. Desktop: las pruebas de renderer aprobaron; la suite PDF no pudo cargar `exceljs` (dependencia ausente del worktree) y una prueba del handler B1 falla ya en la base porque espera el canal lector anterior. No se instalaron dependencias ni se modificó ese flujo fuera de alcance.
+
 Trabajo aislado en `C:/Atlas/pruebas/b1-correcciones-generales-20261109/motor`, rama `feat/b1-correcciones-generales-20261109`, desde `4204163`. No modificar los worktrees de otros agentes ni datos operacionales.
 
 - `d178377`: recupera el cambio focal de `e478c8b` y sus pruebas; conserva destino y ruta ante corrección de folio.
