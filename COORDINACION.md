@@ -64,12 +64,16 @@ Sobre 96c9351, integrada la interfaz f9074bc. B1 exige declaracion explicita de 
 ## Reserva liberada — OFICINA (JAVO): relevo Motor b0b42e4 + Desktop 2914483 (2026-11-26)
 
 - Equipo: OFICINA, hostname JAVO, MachineGuid 354cc598-6628-4cb1-af15-05fa4ee7f1a8. Autoriza Javier (opción 2).
-- Kit oficial `G:\Mi unidad\Atlas\coordinacion\ACTUALIZAR_OFICINA\ACTUALIZAR_ESTE_PC.ps1`: se detuvo antes de cambiar nada porque el app.asar instalado en OFICINA (`0C1159ADC24F833C12E1785ABFB77F28194EEBFB97E6759B3F7843C6D979496D`) no estaba en `$anteriores`. Se confirmó que es la compilación OFICINA de `327c69e`: coincide byte a byte con `C:\Atlasctualizacion-oficina-20261125\desktop-327c69e\dist\win-unpackedesourcespp.asar`, árbol en 327c69e sin cambios. Se agregó ese SHA-256 completo a `$anteriores` sin tocar la comprobación. El kit queda válido para CASA (9B8A688A) y OFICINA (0C1159AD). Respaldo del script previo (A2401F20…): `C:\Atlaselevo-oficina-20261126espaldo_kit\` y `ACTUALIZAR_OFICINAnterior-b1-adicionales-multiples-20261125\ACTUALIZAR_ESTE_PC.ps1.antes-hash-oficina-20261126`.
+- Kit oficial `G:\Mi unidad\Atlas\coordinacion\ACTUALIZAR_OFICINA\ACTUALIZAR_ESTE_PC.ps1`: se detuvo antes de cambiar nada porque el app.asar instalado en OFICINA (`0C1159ADC24F833C12E1785ABFB77F28194EEBFB97E6759B3F7843C6D979496D`) no estaba en `$anteriores`. Se confirmó que es la compilación OFICINA de `327c69e`: coincide byte a byte con `C:\Atlasctualizacion-oficina-20261125\desktop-327c69e\dist\win-unpacked
+esourcespp.asar`, árbol en 327c69e sin cambios. Se agregó ese SHA-256 completo a `$anteriores` sin tocar la comprobación. El kit queda válido para CASA (9B8A688A) y OFICINA (0C1159AD). Respaldo del script previo (A2401F20…): `C:\Atlas
+elevo-oficina-20261126
+espaldo_kit\` y `ACTUALIZAR_OFICINAnterior-b1-adicionales-multiples-20261125\ACTUALIZAR_ESTE_PC.ps1.antes-hash-oficina-20261126`.
 - Paquete `b1-pdf.asar`: SHA-256 completo `E2C7E61B106A8E244E7649DB9DD6DE636871A60909DE5F534F8B3C2728030C05` verificado antes de instalar.
 - Relevo de escritor previo: el ciclo de las 09:29 (Motor 26fa210) perdió el lease durante el arranque en frío y terminó con código 1, sin confirmar nada en Cloud. El ciclo 09:37–09:46 terminó con FIN 0: confirmó 2 envíos Mobile (a9cc50f4, 27015b62). OFICINA tomó el turno: época 7812 → 8195. Custodia antes del kit: v695, 1302 archivos, 0 distintos.
 - Kit ejecutado entre 09:47 y 09:48:43, EXIT 0. El script oficial pausó la tarea PULL, esperó el fin natural del ciclo, hizo fast-forward `26fa210` → `b0b42e4` y reactivó la tarea. Verificación en solo lectura: v696, 1311 archivos, 0 distintos. Desktop app.asar = E2C7E61B; respaldo `app.asar.antes-b1-pdf-20261125` = 0C1159AD. Mobile 0.17.23, Worker y CASA sin cambios.
 - PULL con b0b42e4: ciclos 09:51:13–09:51:48 y 09:55:55–09:56:29, ambos FIN 0, sin pérdida de escritor. Tarea en Ready. Época 8197. Custodia final: v696, 1311 archivos, 0 distintos.
-- Verificado por CDP con la ventana visible: Desktop carga 728 viajes sin franja de modo. B1 «Viajes de ayer» devuelve 7 viajes (periodo AYER) con tabla y botón «Exportar PDF». La vista previa «listado_viajes.pdf · 1 página» muestra 7 viajes del 25-11 agrupados por chofer (captura `C:\Atlaselevo-oficina-20261126ista_previa_b1_pdf.png`). Se cerró con «Volver», sin descargar. Atlas se reabrió desde el acceso directo normal, sin puerto de depuración.
+- Verificado por CDP con la ventana visible: Desktop carga 728 viajes sin franja de modo. B1 «Viajes de ayer» devuelve 7 viajes (periodo AYER) con tabla y botón «Exportar PDF». La vista previa «listado_viajes.pdf · 1 página» muestra 7 viajes del 25-11 agrupados por chofer (captura `C:\Atlas
+elevo-oficina-20261126ista_previa_b1_pdf.png`). Se cerró con «Volver», sin descargar. Atlas se reabrió desde el acceso directo normal, sin puerto de depuración.
 - Accesos directos: uno en el escritorio, `Atlas.lnk`, que apunta a `%LOCALAPPDATA%\Programs\Atlas Viajes\Atlas Viajes.exe`. La entrada del menú Inicio del instalador apunta al mismo ejecutable.
 - Observación menor, sin cambio: la ventana de vista previa B1 conserva el título «Vista previa — Informe MBT PDF», aunque su cabecera dice «Vista previa - Listado».
 - Reversión: deshabilitar la tarea y esperar el fin del ciclo. Restaurar `app.asar.antes-b1-pdf-20261125` (0C1159AD) sobre `app.asar`. En Estable (rama local deploy/estable-oficina-20261125), `git reset --keep 26fa210`. Luego reactivar la tarea.
@@ -93,7 +97,25 @@ Sobre 96c9351, integrada la interfaz f9074bc. B1 exige declaracion explicita de 
 - No se tocó producción, OFICINA, G:, PULL, Cloud desplegado, plantas configurables ni los worktrees de Codex. `node_modules` enlazado (junction) desde el repo principal, sin instalar nada.
 - Para activar: instalar este Desktop con un Motor que incluya `e1fa560`, crear `desktop_acceso.json` con `carpeta_motor`; cada empresa activa la exigencia con `usuarios_atlas.py exigir-identidad --activar`. Un rol `administrador` antiguo debe pasar a `administrador_empresa` antes. Detalle: `docs/IDENTIDAD_DESKTOP_20261126.md` (Desktop).
 
-## Reserva — Integración conjunta multiempresa (2026-11-26)
+## Reserva liberada — Integración conjunta multiempresa (2026-11-26)
 
 - Alcance exclusivo: ramas `integracion/multiempresa-20261126` en Motor (desde `4b6ba30` ⊃ `e1fa560`), Cloud (desde `fcc2051` ⊃ `117899d`), Mobile (desde `94099ef`) y Desktop (desde `5665982`); worktrees en `C:/Atlas/pruebas/integracion-multiempresa-20261126/`. Validación del ciclo completo de Transportes Andes y MBT ficticias (alta, plantas, Mobile, Cloud local, PULL, Desktop, corrección, informe) y de aislamiento/permisos.
 - Fuera de alcance: ramas B1 de Codex (`feat/b1-observaciones-listados-20261126` y similares), producción, G:, PULL, Cloudflare real, OFICINA/CASA e instalaciones.
+- Cierre: rama `integracion/multiempresa-20261126` publicada y verificada: Motor `f33a470` (= `4b6ba30` + merges `b0b42e4` y `b09bd28` + fix `42474a1` + validador `07e9f5c` + evidencia), Cloud `fcc2051` y Mobile `94099ef` sin cambios, Desktop `64eb90a` (= `5665982` + arnés Electron). **Nada desplegado ni instalado.**
+- Incompatibilidades resueltas:
+  - Motor de plantas sin la contraparte del ingreso Desktop (`b09bd28`); solo hubo conflicto en COORDINACION.
+  - Rama por detrás del Motor de OFICINA (`b0b42e4`).
+  - Corrección B1 registrada como `JAVIER_DESKTOP` con identidad exigida. Ahora `identidad.actor_operacion` → `<empresa>:<usuario>`; MBT sin cambios.
+- Validación integral `scripts/validacion_multiempresa/validar_integracion.py`, con Transportes Andes y MBT ficticias: **24/24**. Cubre alta con plantas propias, publicación por PULL, Mobile real, Worker real, PULL con OCR RapidOCR real, permisos (77 sin sesión), y Desktop Electron real (historial, corrección de transporte y peso con confirmación, ledger atribuido a `andes-prueba:andes.sup`, reporte, consulta, informe con vista previa PDF, ingreso Desktop bloqueado sin copiar). MBT quedó idéntica byte a byte. Evidencia en Motor: `docs/INTEGRACION_MULTIEMPRESA_20261126.md` y `docs/evidencia/integracion_multiempresa_20261126.json`.
+- Regresión del Motor integrado:
+  - Focal: 269 aprobadas.
+  - Amplia: 1566 aprobadas y 15 fallidas, todas en `test_procesamiento_masivo.py`. Sin la integración fallan 8 en `4b6ba30`, 13 en `b09bd28` y 8 en `b0b42e4`. Comparación por conteo; falta revisarlas una por una.
+- Dependencias pendientes (registradas, no desarrolladas):
+  1. Sin perfil documental para otra empresa, el PULL procesa sus guías con el pipeline AZA, mientras que Desktop sí bloquea el ingreso.
+  2. El viaje exige el «número de transporte» AZA.
+  3. Una empresa nueva no tiene vía para su primer reporte.
+  4. El informe lleva el rótulo y el formato de MBT.
+  5. No se puede crear un rol `consulta`.
+  6. Otros 5 escritores aún usan un actor fijo de Desktop.
+- Límite: el mundo está en C:, así que Desktop escribe sin lease ni turno. No se tocaron producción, G:, PULL, Cloudflare, OFICINA/CASA ni las ramas B1 de Codex.
+
