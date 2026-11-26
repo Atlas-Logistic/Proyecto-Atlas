@@ -60,3 +60,9 @@ Sobre 96c9351, integrada la interfaz f9074bc. B1 exige declaracion explicita de 
 - PULL: el ciclo de las 06:48 (Motor 918d629) tardó 15 min en arrancar tras el encendido (INICIO 07:03:41, espera de E/S, sin escrituras); Javier lo finalizó. Con 26fa210: ciclo 07:13:14–07:15:41 FIN 0 (alineación) y 07:20:47–07:21:33 FIN 0. Tarea reactivada.
 - Verificado en solo lectura: Desktop carga el reporte vigente (719 viajes; ayer 8, 15 días 64), bandeja Revisión de Atlas sin pendientes (10 fotos descartadas, 9 guías móviles), B1 responde desde Desktop, informe MBT genera el PDF (la vista previa no dibuja con la ventana oculta tras VS Code: falta mirarla en pantalla), expediente SX4253 (5 activos + 1 pendiente; revisión técnica y gases vencen 25-11), coberturas confirmables a mano (RC, seguro de carga, robo). El CLI B1 sin turno queda bloqueado por EscrituraSinTurno, como corresponde.
 - Respaldo y reversión: `C:\Atlas\actualizacion-oficina-20261125\respaldo` (bundle 918d629, app.asar f41a13a, config, tarea XML). Revertir: deshabilitar tarea y esperar ciclo, `git switch deploy/estable-oficina-20261111` en Estable, copiar el app.asar del respaldo, reactivar.
+
+## Reserva activa — OFICINA (JAVO): relevo Motor b0b42e4 + Desktop 2914483 (2026-11-26)
+
+- Equipo: OFICINA, hostname JAVO, MachineGuid 354cc598-6628-4cb1-af15-05fa4ee7f1a8. Autoriza Javier (opción 2: ampliar la lista de versiones anteriores del kit con el hash OFICINA de 327c69e).
+- Kit oficial: `G:\Mi unidad\Atlas\coordinacion\ACTUALIZAR_OFICINA\ACTUALIZAR_ESTE_PC.ps1`. Objetivo: Motor `b0b42e4` (fix/b1-adicionales-multiples-20261125); Desktop `2914483`, app.asar E2C7E61B…030C05; Mobile 0.17.23 sin cambios.
+- Reservado: Motor Estable OFICINA, app.asar instalado, tarea PULL (pausa controlada por el script oficial), kit en G:. No tocar hasta la liberación.
