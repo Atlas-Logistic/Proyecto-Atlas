@@ -7,6 +7,12 @@
 - Desktop: título de vista previa `Listado de viajes` y barra PDF sin margen sobrante. Publicado Motor `be858f4` y Desktop `d653f05`.
 - Pruebas Motor focales: 59 aprobadas. Desktop: las pruebas de renderer aprobaron; la suite PDF no pudo cargar `exceljs` (dependencia ausente del worktree) y una prueba del handler B1 falla ya en la base porque espera el canal lector anterior. No se instalaron dependencias ni se modificó ese flujo fuera de alcance.
 
+## Cierre de validación — B1 observaciones (2026-11-26)
+
+- `exceljs` se resolvió desde las dependencias ya existentes del checkout Desktop mediante `NODE_PATH`, sin modificar `package.json`, lockfile ni `node_modules` del worktree. La exportación PDF ejecutó 6/7 verificaciones; la restante es una aserción de base que espera la firma de dos parámetros del puente, aunque `tipo` ya forma parte del contrato publicado.
+- Se consultó en modo lectura la copia aislada disponible con «Viajes de Varas del 15/10 al 25/11». El Motor devolvió `NO_INTERPRETADA`; la copia está rotulada `SOLO_DATOS_SINTETICOS`, por lo que no se usó como evidencia de datos operacionales reales ni se accedió a producción.
+- No hubo corrección adicional ni instalación. Reserva liberada; para la evidencia visual real falta una copia autorizada que contenga el período solicitado y un entorno de impresión/Electron aislado.
+
 Trabajo aislado en `C:/Atlas/pruebas/b1-correcciones-generales-20261109/motor`, rama `feat/b1-correcciones-generales-20261109`, desde `4204163`. No modificar los worktrees de otros agentes ni datos operacionales.
 
 - `d178377`: recupera el cambio focal de `e478c8b` y sus pruebas; conserva destino y ruta ante corrección de folio.
