@@ -27,6 +27,7 @@ from atlas_core.almacenamiento_portable import leer_estado_operacion, resolver_r
 from atlas_core.cloud_asignaciones_vehiculo import publicar_asignaciones_cloud
 from atlas_core.cloud_fichas_documentos import sincronizar_licencias_cloud
 from atlas_core.cloud_mobile_sync_cliente import sincronizar_envios_cloud
+from atlas_core.cloud_plantas_mobile import publicar_plantas_cloud
 from atlas_core.escritor_operativo import LeaseEscritorOperativo
 from atlas_core.extraccion_licencias import extraer_licencias_pendientes
 from atlas_core.extraccion_vencimientos_vehiculos import extraer_vencimientos_vehiculos
@@ -149,6 +150,17 @@ def ejecutar_pull_con_escritor(
                 except Exception as error:  # noqa: BLE001 -- nunca corta el PULL
                     logging.getLogger(__name__).warning("Asignaciones de vehículo no publicadas: %s", error)
                     resultado["asignaciones_vehiculo"] = {"error": str(error)}
+            # Plantas de origen de esta empresa -> Cloud -> Mobile. MBT no
+            # publica (códigos AZA de siempre). Un fallo no corta el PULL.
+            if raiz is not None and vigente():
+                try:
+                    resultado["plantas_mobile"] = publicar_plantas_cloud(
+                        base_url=base_url, token_motor=token_motor, raiz=raiz, timeout=timeout,
+                        puede_continuar=vigente,
+                    )
+                except Exception as error:  # noqa: BLE001 -- nunca corta el PULL
+                    logging.getLogger(__name__).warning("Plantas Mobile no publicadas: %s", error)
+                    resultado["plantas_mobile"] = {"error": str(error)}
             # P0 recuperación incremental de campos ausentes: sólo en ciclos
             # sin envíos nuevos (las guías nuevas tienen prioridad), con
             # presupuesto fijo de relecturas y bajo el mismo lease/guardia.

@@ -14,7 +14,9 @@ def test_origen_mobile_por_id_en_catalogo_de_cada_empresa(tmp_path):
     assert resolver_planta_por_codigo_mobile('andes-id', mbt.listar()) is None
     assert resolver_planta_por_codigo_mobile('mbt-id', andes.listar()) is None
     andes.desactivar('andes-id', modificacion_manual=True)
-    assert resolver_planta_por_codigo_mobile('andes-id', andes.listar()) is None
+    # Desactivada despues de capturar: el ID sigue siendo inequivoco y la guia
+    # conserva su origen (Cloud ya rechaza capturas posteriores a la baja).
+    assert resolver_planta_por_codigo_mobile('andes-id', andes.listar()).planta_id == 'andes-id'
 
 
 def test_recepcion_mobile_acepta_solo_catalogo_de_andes(tmp_path):

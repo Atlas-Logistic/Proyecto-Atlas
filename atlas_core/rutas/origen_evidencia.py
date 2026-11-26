@@ -132,15 +132,17 @@ def resolver_planta_por_codigo_mobile(codigo: str | None, plantas: Iterable[Plan
         return None
     plantas = tuple(plantas)
     # El identificador del catalogo sobrevive a cambios del nombre visible.
-    # Si identifica una planta inactiva o no confirmada no se intenta
-    # interpretarlo como un nombre legado de otra planta.
+    # Si identifica una planta no confirmada no se intenta interpretarlo
+    # como un nombre legado de otra planta. La vigencia NO se exige aqui:
+    # el ID es inequivoco y una guia capturada antes de desactivar la planta
+    # (cola offline, reproceso, revalidacion) conserva su origen. Cloud ya
+    # rechaza capturas posteriores a la desactivacion.
     por_id = [p for p in plantas if p.planta_id == texto]
     if por_id:
         if len(por_id) != 1:
             return None
         planta = por_id[0]
-        return planta if (str(planta.estado_calidad).upper() in {"CONFIRMADA", "CONFIRMADO", "CONFIRMADO_DOCUMENTAL"}
-                          and str(planta.estado_vigencia).upper() in {"ACTIVA", "ACTIVO"}) else None
+        return planta if str(planta.estado_calidad).upper() in {"CONFIRMADA", "CONFIRMADO", "CONFIRMADO_DOCUMENTAL"} else None
     objetivo = normalizar_nombre_planta(texto.replace("_", " "))
     candidatas = [
         p for p in plantas
