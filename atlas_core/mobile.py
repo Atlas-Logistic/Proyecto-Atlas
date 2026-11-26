@@ -161,6 +161,29 @@ class ErrorEnvioMobile(ValueError):
     pass
 
 
+def validar_planta_origen_mobile(planta: object, *, raiz_atlas: Path) -> str:
+    """Acepta sólo una planta activa del catálogo de la empresa del proceso.
+
+    MBT conserva los dos códigos publicados por las versiones antiguas de la
+    PWA. Las demás empresas no tienen una lista implícita: deben enviar el
+    ``planta_id`` que recibieron en su catálogo autenticado.
+    """
+    codigo = str(planta or "").strip()
+    from atlas_core.aislamiento_empresas import empresa_de_raiz, EMPRESA_MBT
+    from atlas_core.catalogo_plantas import CatalogoPlantas
+    from atlas_core.rutas.origen_evidencia import resolver_planta_por_codigo_mobile
+    ruta = Path(raiz_atlas) / "catalogos_privados" / "plantas.json"
+    try:
+        plantas = CatalogoPlantas(ruta).listar()
+    except (OSError, ValueError):
+        plantas = []
+    if resolver_planta_por_codigo_mobile(codigo, plantas) is not None:
+        return codigo
+    if empresa_de_raiz(raiz_atlas) == EMPRESA_MBT and codigo in PLANTAS_ORIGEN_MOBILE:
+        return codigo
+    raise ErrorEnvioMobile("planta_origen_informada inválida para esta empresa")
+
+
 def normalizar_observacion_mobile(valor: object) -> str:
     """Normaliza y valida la observación del chofer. `None`/ausente -> "".
 
@@ -374,9 +397,8 @@ class RepositorioEnviosMobile:
         # obligatoria: la propia app ya bloquea el envío sin ella (ver
         # Sección 9 del bloque), y Core nunca confía sólo en esa
         # validación del cliente.
-        planta = str(metadata.get("planta_origen_informada", ""))
-        if planta not in PLANTAS_ORIGEN_MOBILE:
-            raise ErrorEnvioMobile("planta_origen_informada inválida")
+        planta = validar_planta_origen_mobile(metadata.get("planta_origen_informada"), raiz_atlas=self.raiz_atlas)
+        metadata = {**dict(metadata), "planta_origen_informada": planta}
         # Bloque MOBILE OBSERVACIÓN DEL CHOFER V1 -- opcional; un cliente
         # anterior que no manda el campo queda con "" (igual que `lote_id`).
         metadata = {**dict(metadata), "observacion": normalizar_observacion_mobile(metadata.get("observacion"))}

@@ -1,5 +1,6 @@
 ﻿from atlas_core.catalogo_plantas import CatalogoPlantas
 from atlas_core.rutas.origen_evidencia import resolver_planta_por_codigo_mobile
+from atlas_core.mobile import validar_planta_origen_mobile, ErrorEnvioMobile
 
 
 def test_origen_mobile_por_id_en_catalogo_de_cada_empresa(tmp_path):
@@ -14,3 +15,16 @@ def test_origen_mobile_por_id_en_catalogo_de_cada_empresa(tmp_path):
     assert resolver_planta_por_codigo_mobile('mbt-id', andes.listar()) is None
     andes.desactivar('andes-id', modificacion_manual=True)
     assert resolver_planta_por_codigo_mobile('andes-id', andes.listar()) is None
+
+
+def test_recepcion_mobile_acepta_solo_catalogo_de_andes(tmp_path):
+    raiz = tmp_path / 'Atlas_empresas' / 'transportes-andes'
+    catalogo = CatalogoPlantas(raiz / 'catalogos_privados' / 'plantas.json', generador_id=lambda: 'andes-norte')
+    catalogo.crear(nombre='Terminal Norte', pais='Chile', fuente='prueba', estado_calidad='CONFIRMADA')
+    assert validar_planta_origen_mobile('andes-norte', raiz_atlas=raiz) == 'andes-norte'
+    try:
+        validar_planta_origen_mobile('AZA_COLINA', raiz_atlas=raiz)
+    except ErrorEnvioMobile:
+        pass
+    else:
+        raise AssertionError('una planta MBT no puede entrar en Andes')

@@ -1,5 +1,12 @@
 # Coordinación — B1 correcciones, 2026-11-09
 
+## Reserva liberada — Motor: plantas configurables por empresa (2026-11-26)
+
+- Trabajo aislado en `C:/Atlas/pruebas/plantas-empresas-20261126/motor`, sin tocar OFICINA, PULL, G: ni instalaciones.
+- Cierre: el receptor Mobile del Motor valida una planta confirmada y activa del catálogo privado de su propia empresa; Transportes Andes ficticia acepta su ID y rechaza `AZA_COLINA`. MBT conserva íntegramente los códigos heredados `AZA_COLINA`/`AZA_RENCA`.
+- Pruebas focales: `tests/test_plantas_id_mobile.py` y `tests/test_mobile_planta_origen_v1.py`, 9 aprobadas.
+- Límite explícito: Mobile/Cloud siguen con la lista fija AZA y no se han desplegado ni configurado catálogos Cloud; su integración se mantiene pendiente y no se reserva este árbol.
+
 Trabajo aislado en `C:/Atlas/pruebas/b1-correcciones-generales-20261109/motor`, rama `feat/b1-correcciones-generales-20261109`, desde `4204163`. No modificar los worktrees de otros agentes ni datos operacionales.
 
 - `d178377`: recupera el cambio focal de `e478c8b` y sus pruebas; conserva destino y ruta ante corrección de folio.
