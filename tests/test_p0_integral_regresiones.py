@@ -73,6 +73,21 @@ class RaizPublicadaEnProcesos(unittest.TestCase):
             self.assertEqual(Path(resolver_fuente_catalogos(None)).resolve(),
                              (self.trabajo / "catalogos_privados").resolve())
 
+    def test_valores_relativos_no_se_resuelven_contra_la_carpeta_actual(self):
+        # Defecto real (CASA, 27/11): con la carpeta actual dentro de G:, el token
+        # ATLAS_CLOUD_MOTOR_TOKEN "parecía" una ruta bajo la raíz publicada.
+        anterior = os.getcwd()
+        os.chdir(self.publicada)
+        try:
+            entorno = {"ATLAS_CLOUD_MOTOR_TOKEN": "token-sin-barras", "ATLAS_OTRO": "operacion"}
+            with patch.object(sys, "argv", ["x", ".", "operacion", "--texto=."]), patch.dict(os.environ, entorno):
+                self.assertFalse(rp.redirigir_proceso())
+                self.assertEqual(os.environ["ATLAS_CLOUD_MOTOR_TOKEN"], "token-sin-barras")
+                self.assertEqual(os.environ["ATLAS_OTRO"], "operacion")
+                self.assertEqual(sys.argv, ["x", ".", "operacion", "--texto=."])
+        finally:
+            os.chdir(anterior)
+
     def test_sin_configuracion_nada_cambia(self):
         self.cfg.unlink()
         with patch.object(sys, "argv", ["x", str(self.publicada)]):

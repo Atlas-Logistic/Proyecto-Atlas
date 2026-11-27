@@ -67,7 +67,11 @@ NO_REDIRIGIR = frozenset({"ATLAS_EXCLUSION_RAICES"})
 
 def bajo_trabajo(valor: str, publicada: str, trabajo: str) -> str | None:
     """La misma ruta bajo la raíz de trabajo si ``valor`` es la publicada o
-    está dentro de ella; si no, None."""
+    está dentro de ella; si no, None. Sólo rutas ABSOLUTAS: un valor
+    relativo (un token, un texto) no es una ruta y nunca se resuelve contra
+    la carpeta actual."""
+    if not isinstance(valor, str) or not os.path.isabs(valor):
+        return None
     try:
         ruta = os.path.normcase(os.path.abspath(valor)).rstrip("\\/")
         base = os.path.normcase(os.path.abspath(publicada)).rstrip("\\/")
@@ -103,10 +107,10 @@ def redirigir_proceso() -> bool:
             continue
         if argumento.startswith("--") and "=" in argumento:
             opcion, valor = argumento.split("=", 1)
-            if valor and misma_ruta(valor, publicada):
+            if valor and os.path.isabs(valor) and misma_ruta(valor, publicada):
                 sys.argv[i] = f"{opcion}={trabajo}"
                 cambio = True
-        elif not argumento.startswith("-") and misma_ruta(argumento, publicada):
+        elif not argumento.startswith("-") and os.path.isabs(argumento) and misma_ruta(argumento, publicada):
             sys.argv[i] = trabajo
             cambio = True
     return cambio
