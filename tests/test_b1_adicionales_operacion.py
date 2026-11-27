@@ -4,6 +4,7 @@ from atlas_core.b1_operador import OperadorB1, interpretar_determinista
 from atlas_core.acciones_operacionales import CapaAccionesOperacionales
 from atlas_core.procesamiento_masivo import COLUMNAS
 from atlas_core.registro_eventos_operacionales import leer_eventos_operacionales, registrar_evento
+from tests.adicional_preview_por_guia import por_guia
 
 @pytest.fixture
 def raiz(tmp_path):
@@ -31,7 +32,7 @@ def test_parser_y_preview_por_viaje_sin_escribir(raiz):
     b=operador(raiz); antes=json.dumps(eventos(raiz),sort_keys=True)
     r=b.atender('c',ORDEN)
     assert r['estado']=='PREVIEW_PENDIENTE',r
-    t=r['tablas'][0]; filas={f[0]:f for f in t['filas']}
+    filas=por_guia(r)
     assert set(filas)=={'483082','483043'}
     assert filas['483082'][1]=='0000366043' and filas['483043'][1]=='0000365998'
     assert 'NOTA ANTERIOR' in filas['483082'][3]
@@ -52,7 +53,7 @@ def test_confirmacion_audita_y_repeticion_es_idempotente(raiz):
 def test_equivalencia_evitar_duplicado(raiz,monto):
     registrar_evento(raiz=raiz,tipo_evento='OBSERVACION_OPERACIONAL',numero_transporte='0000365998',nota='VIAJE CON ADICIONAL DE '+monto,origen='TEST')
     r=operador(raiz).atender('c',ORDEN); assert r['estado']=='PREVIEW_PENDIENTE',r
-    filas={f[0]:f for f in r['tablas'][0]['filas']}
+    filas=por_guia(r)
     assert filas['483043'][2].startswith('Ya la tiene') and filas['483082'][2]=='Se agrega'
 
 def test_referencia_sin_guias_no_inventa_destinatarios(raiz):
@@ -63,7 +64,7 @@ def test_referencia_sin_guias_no_inventa_destinatarios(raiz):
 def test_nota_ambigua_no_permite_cambio(raiz):
     registrar_evento(raiz=raiz,tipo_evento='OBSERVACION_OPERACIONAL',numero_transporte='0000365998',nota='ADICIONAL DE 15 MIL POR GUIA',origen='TEST')
     r=operador(raiz).atender('c',ORDEN); assert r['estado']=='PREVIEW_PENDIENTE',r
-    filas={f[0]:f for f in r['tablas'][0]['filas']}
+    filas=por_guia(r)
     assert 'ambiguo' in filas['483043'][2] and filas['483082'][2]=='Se agrega'
 
 

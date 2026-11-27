@@ -11,6 +11,7 @@ from atlas_core.acciones_operacionales import CapaAccionesOperacionales
 from atlas_core.b1_operador import OperadorB1, interpretar_determinista
 from atlas_core.procesamiento_masivo import COLUMNAS
 from atlas_core.registro_eventos_operacionales import leer_eventos_operacionales, registrar_evento
+from tests.adicional_preview_por_guia import por_guia
 
 TEXTO = "ESTE VIAJE TIENE ADICIONAL DE 30.000 POR RETIRO FUERA DE AZA"
 ORDEN = f"Agrega la observación {TEXTO} a las guías 500001, 500002, 500003, 599999"
@@ -60,7 +61,7 @@ def test_preview_conjunto_confirmacion_y_verificacion(raiz):
     antes = json.dumps(_eventos(raiz), sort_keys=True)
     r = b1.atender("c", ORDEN)
     assert r["estado"] == "PREVIEW_PENDIENTE", r
-    filas = {f[0]: f for f in r["tablas"][0]["filas"]}
+    filas = por_guia(r)  # P1.3: una fila por viaje y lo no encontrado aparte
     assert filas["599999"][2].startswith("No existe") and filas["500001"][2] == "Se agrega"
     assert "NOTA ESTADIA" in filas["500002"][3]
     assert json.dumps(_eventos(raiz), sort_keys=True) == antes  # el preview no escribe

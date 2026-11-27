@@ -10,6 +10,7 @@ from atlas_core.responder_consulta_atlas import responder_consulta_atlas
 from atlas_core.registro_eventos_operacionales import leer_eventos_operacionales, registrar_evento
 
 from tests.test_b1_adicionales_operacion import Escritor, raiz  # noqa: F401  (fixture sintética de Codex)
+from tests.adicional_preview_por_guia import por_guia
 
 CASO = ("Agrega un adicional de $15.000 por segunda vuelta del viernes 23/10/2026 a cada uno de estos viajes, "
         "guías 483082 y 483043")
@@ -117,7 +118,7 @@ def test_mismo_importe_con_otro_motivo_no_se_adivina(raiz, previa):
     antes = json.dumps(eventos(raiz), sort_keys=True)
     r = operador(raiz).atender("c", CASO)
     assert r["estado"] == "PREVIEW_PENDIENTE", r
-    assert {f[0]: f[2] for f in r["tablas"][0]["filas"]}["483043"].startswith("Se corrige el motivo")
+    assert por_guia(r)["483043"][2].startswith("Se corrige el motivo")
     assert json.dumps(eventos(raiz), sort_keys=True) == antes
 
 
@@ -126,7 +127,7 @@ def test_orden_sin_motivo_frente_a_adicional_previo_con_motivo_no_duplica(raiz):
                      origen="TEST")
     r = operador(raiz).atender("c", "Agrega un adicional de $15.000 a las guías 483043")
     assert r["estado"] == "PREVIEW_PENDIENTE", r
-    assert "corrige el motivo" in r["tablas"][0]["filas"][0][2]
+    assert "corrige el motivo" in por_guia(r)["483043"][2]
 
 
 def test_lote_corrige_motivo_y_agrega_sin_duplicar_con_auditoria(raiz):
@@ -138,7 +139,7 @@ def test_lote_corrige_motivo_y_agrega_sin_duplicar_con_auditoria(raiz):
     antes = json.dumps(eventos(raiz), sort_keys=True)
     r = b.atender("c", orden)
     assert r["estado"] == "PREVIEW_PENDIENTE", r
-    filas = {f[0]: f for f in r["tablas"][0]["filas"]}
+    filas = por_guia(r)
     assert filas["483082"][2] == "Se agrega"
     assert "corrige el motivo" in filas["483043"][2]
     assert "No existe" in filas["999999"][2]

@@ -22,5 +22,7 @@ def test_mixto_ambiguedad_no_bloquea_y_confirmacion_se_revalida(raiz):
 def test_todas_faltantes_se_informan(raiz):
     r = operador(raiz).atender("c", "Agrega un adicional de $15.000 a las guías 999998 y 999999")
     assert r["estado"] == "SIN_CAMBIOS"
-    assert [f[0] for f in r["tablas"][0]["filas"]] == ["999998", "999999"]
-    assert all("No existe" in f[2] for f in r["tablas"][0]["filas"])
+    # P1.3: lo no encontrado va en su propia tabla, nombrado explícitamente.
+    assert [f[0] for f in r["tablas"][0]["filas"]] == ["guía 999998", "guía 999999"]
+    assert all("No existe" in f[1] for f in r["tablas"][0]["filas"])
+    assert "No encontré: guía 999998, guía 999999" in r["mensaje"]

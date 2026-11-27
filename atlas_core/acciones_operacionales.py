@@ -3531,71 +3531,132 @@ def _evaluar_adicional(texto: str, eventos: list[dict], transporte: str, previa:
 
 
 def _plan_viaje_observacion(ctx: _Contexto, p: dict) -> Plan:
+    """Una misma observación (p. ej. un adicional) para el viaje de cada guía o
+    transporte indicado. El viaje se identifica por su transporte; un viaje
+    físico agrupado (VIAJE_FISICO_MULTITRANSPORTE) es UNO solo: se registra
+    una vez, en su transporte principal, y se evalúa con las notas de todos sus
+    transportes. Lo que no se encuentra se informa por número y no se aplica."""
+    from atlas_core.agrupacion_viajes import agrupaciones_activas
     from atlas_core.registro_eventos_operacionales import CONTEXTO_EMPRESARIAL_SIN_ASIGNAR
     texto = str(p["texto"])
-    guias = list(dict.fromkeys(str(g).strip() for g in p["guias"]))
-    if any(not re.fullmatch(r"\d{3,12}", g) for g in guias):
-        raise ErrorAccionOperacional("PARAMETRO_INVALIDO", "guias: sólo números de guía")
+    guias = list(dict.fromkeys(str(g).strip() for g in p.get("guias") or []))
+    pedidos_transporte = list(dict.fromkeys(str(t).strip() for t in p.get("transportes") or []))
+    if not guias and not pedidos_transporte:
+        raise ErrorAccionOperacional("PARAMETRO_INVALIDO", "indica al menos una guía o un transporte")
+    if any(not re.fullmatch(r"\d{3,12}", g) for g in guias + pedidos_transporte):
+        raise ErrorAccionOperacional("PARAMETRO_INVALIDO", "guias/transportes: sólo números")
+    clave = lambda t: str(t or "").lstrip("0")  # noqa: E731 -- 0000372894 == 372894
+    try:
+        grupos = agrupaciones_activas(ctx.actual)
+    except (OSError, ValueError):
+        grupos = []
+    principal_de: dict[str, str] = {}
+    transportes_de: dict[str, list[str]] = {}
+    for grupo in grupos:
+        principal = str(grupo.get("transporte_principal") or "").strip()
+        miembros = [str(t).strip() for t in grupo.get("transportes") or [] if str(t).strip()]
+        if principal and principal in miembros:
+            for t in miembros:
+                principal_de[t] = principal
+            transportes_de[principal] = miembros
     transportes_por_guia: dict[str, set[str]] = {}
+    conocidos: dict[str, str] = {}  # clave sin ceros -> transporte del dataset
     for fila in ctx.filas():
-        guia = str(fila.get("numero_guia", "")).strip()
+        guia, transporte = str(fila.get("numero_guia", "")).strip(), _transporte(fila)
+        if transporte:
+            conocidos.setdefault(clave(transporte), transporte)
         if guia in guias:
-            transportes_por_guia.setdefault(guia, set()).add(_transporte(fila))
-    todos = {t for ts in transportes_por_guia.values() for t in ts if t}
+            transportes_por_guia.setdefault(guia, set()).add(transporte)
+    detalle = []
+    viaje_de_pedido: dict[tuple[str, str], str] = {}
+    for guia in guias:
+        transportes = sorted(t for t in transportes_por_guia.get(guia, ()) if t)
+        viajes = sorted({principal_de.get(t, t) for t in transportes})
+        estado = ("NO_ENCONTRADA" if guia not in transportes_por_guia else "SIN_TRANSPORTE" if not transportes
+                  else "TRANSPORTE_AMBIGUO" if len(viajes) > 1 else "")
+        detalle.append({"numero_guia": guia, "numero_transporte": ", ".join(transportes), "estado": estado})
+        if not estado:
+            viaje_de_pedido[("guia", guia)] = viajes[0]
+    for pedido in pedidos_transporte:
+        transporte = conocidos.get(clave(pedido))
+        detalle.append({"numero_transporte_pedido": pedido, "numero_transporte": transporte or pedido,
+                        "estado": "" if transporte else "NO_ENCONTRADO"})
+        if transporte:
+            viaje_de_pedido[("transporte", pedido)] = principal_de.get(transporte, transporte)
+    viajes = sorted(set(viaje_de_pedido.values()))
+    todos = {t for v in viajes for t in transportes_de.get(v, [v])}
     eventos = _eventos_por_transporte(ctx, todos)
     observacion = {str(e.get("numero_transporte", "")).strip(): e for e in eventos
                    if e.get("tipo_evento") == TIPO_EVENTO_OBSERVACION
                    and e.get("contexto_empresarial", CONTEXTO_EMPRESARIAL_SIN_ASIGNAR) == CONTEXTO_EMPRESARIAL_SIN_ASIGNAR}
     agregar: dict[str, str] = {}
-    detalle = []
-    for guia in guias:
-        transportes = sorted(t for t in transportes_por_guia.get(guia, ()) if t)
-        transporte = transportes[0] if len(transportes) == 1 else ""
-        evento = observacion.get(transporte) or {}
+    resultado_viaje: dict[str, dict] = {}
+    for viaje in viajes:
+        miembros = transportes_de.get(viaje, [viaje])
+        # Las notas de todos los transportes del viaje cuentan como del viaje.
+        del_viaje = [{**e, "numero_transporte": viaje} for e in eventos
+                     if str(e.get("numero_transporte", "")).strip() in miembros]
+        evento = observacion.get(viaje) or {}
         previa = str(evento.get("nota", "")) if evento.get("estado") == "ACTIVO" else ""
-        vigentes = [str(e.get("nota", "")).strip() for e in eventos
-                    if transporte and str(e.get("numero_transporte", "")).strip() == transporte
-                    and e.get("estado") == "ACTIVO" and str(e.get("nota", "")).strip()]
-        if guia not in transportes_por_guia:
-            estado = "NO_ENCONTRADA"
-        elif not transportes:
-            estado = "SIN_TRANSPORTE"
-        elif len(transportes) > 1:
-            estado = "TRANSPORTE_AMBIGUO"
+        vigentes = [str(e.get("nota", "")).strip() for e in del_viaje
+                    if e.get("estado") == "ACTIVO" and str(e.get("nota", "")).strip()]
+        estado, nueva = _evaluar_adicional(texto, del_viaje, viaje, previa)
+        if estado == "AGREGAR":
+            agregar[viaje] = f"{previa.rstrip()}\n{texto}" if previa.strip() else texto
+        elif estado == "CORREGIR_MOTIVO":
+            agregar[viaje] = nueva
+        resultado_viaje[viaje] = {"estado": estado, "observaciones_vigentes": vigentes, "previa": previa,
+                                  "transportes": miembros}
+    for d in detalle:
+        pedido = ("guia", d["numero_guia"]) if "numero_guia" in d else ("transporte", d["numero_transporte_pedido"])
+        viaje = viaje_de_pedido.get(pedido)
+        if viaje:
+            d.update(estado=resultado_viaje[viaje]["estado"], viaje=viaje,
+                     observaciones_vigentes=resultado_viaje[viaje]["observaciones_vigentes"])
         else:
-            estado, nueva = _evaluar_adicional(texto, eventos, transporte, previa)
-            if estado == "AGREGAR":
-                agregar.setdefault(transporte, f"{previa.rstrip()}\n{texto}" if previa.strip() else texto)
-            elif estado == "CORREGIR_MOTIVO":
-                agregar.setdefault(transporte, nueva)
-        detalle.append({"numero_guia": guia, "numero_transporte": transporte or ", ".join(transportes),
-                        "estado": estado, "observaciones_vigentes": vigentes})
-    if not any(d["estado"] in {"AGREGAR", "YA_PRESENTE", "CORREGIR_MOTIVO"} for d in detalle):
+            d.update(viaje="", observaciones_vigentes=[])
+    resumen_viajes = [{"viaje": v, "transportes": resultado_viaje[v]["transportes"],
+                       "guias": [d["numero_guia"] for d in detalle if d.get("viaje") == v and "numero_guia" in d],
+                       "transportes_pedidos": [d["numero_transporte_pedido"] for d in detalle
+                                               if d.get("viaje") == v and "numero_transporte_pedido" in d],
+                       "estado": resultado_viaje[v]["estado"],
+                       "observacion_vigente": resultado_viaje[v]["previa"],
+                       "observaciones_vigentes": resultado_viaje[v]["observaciones_vigentes"],
+                       "observacion_resultante": agregar.get(v, resultado_viaje[v]["previa"])} for v in viajes]
+    excluidas = [d for d in detalle if not d.get("viaje")]
+    if not viajes:
+        # Un adicional canónico se responde «sin cambios» con la lista de lo
+        # no encontrado; cualquier otra observación sin viaje se rechaza.
         from atlas_core.consulta_adicionales import _MONTO, _normalizar, _sin_motivo_canonico
         if not re.fullmatch(r"ESTE VIAJE TIENE ADICIONAL DE (" + _MONTO + r")",
                             _sin_motivo_canonico(_normalizar(texto).strip())):
-            raise ErrorAccionOperacional("PRECONDICION_FALLIDA", "ninguna de las guías indicadas existe con un "
-                                         "transporte único en el dataset vigente")
-    guias_agregar = [d["numero_guia"] for d in detalle if d["estado"] in {"AGREGAR", "CORREGIR_MOTIVO"}]
-    excluidas = [d for d in detalle if d["estado"] not in {"AGREGAR", "YA_PRESENTE", "CORREGIR_MOTIVO"}]
+            nombres = "; ".join((f"guía {d['numero_guia']}" if "numero_guia" in d
+                                 else f"transporte {d['numero_transporte_pedido']}") + f" ({d['estado']})"
+                                for d in excluidas)
+            raise ErrorAccionOperacional("PRECONDICION_FALLIDA",
+                                         f"no encontré ningún viaje para lo indicado: {nombres}. No se cambió nada")
     consecuencias = [
-        "Se agrega la observación o se corrige la línea de adicional indicada; las demás observaciones, las "
-        "notas manuales de Desktop y los demás datos de la guía se conservan.",
+        "Se agrega la observación o se corrige la línea de adicional indicada, una vez por viaje; las demás "
+        "observaciones, las notas manuales de Desktop y los demás datos de la guía se conservan.",
         "Sin OCR, sin reconciliación de bandeja ni regeneración de reportes.",
     ]
     if excluidas:
         consecuencias.append("No se aplica a: " + "; ".join(
-            f"guía {d['numero_guia']} ({d['estado']})" for d in excluidas) + ".")
+            (f"guía {d['numero_guia']}" if "numero_guia" in d else f"transporte {d['numero_transporte_pedido']}")
+            + f" ({d['estado']})" for d in excluidas) + ".")
+    guias_agregar = [d["numero_guia"] for d in detalle if "numero_guia" in d and d.get("viaje") in agregar]
     return Plan(
-        entidad={"tipo": "OBSERVACION_VIAJE", "id": _huella({"guias": sorted(guias), "texto": texto})[:16],
-                 "guias": guias, "texto": texto},
-        valor_actual={"observaciones": {t: str((observacion.get(t) or {}).get("nota", ""))
-                                        for t in sorted(agregar)}},
-        valor_propuesto={"texto": texto, "observaciones": dict(sorted(agregar.items())), "guias": detalle},
-        estado_base={"transportes": {g: sorted(ts) for g, ts in sorted(transportes_por_guia.items())},
+        entidad={"tipo": "OBSERVACION_VIAJE",
+                 "id": _huella({"guias": sorted(guias), "transportes": sorted(pedidos_transporte), "texto": texto})[:16],
+                 "guias": guias, "transportes": pedidos_transporte, "texto": texto},
+        valor_actual={"observaciones": {t: str((observacion.get(t) or {}).get("nota", "")) for t in sorted(agregar)}},
+        valor_propuesto={"texto": texto, "observaciones": dict(sorted(agregar.items())), "guias": detalle,
+                         "viajes": resumen_viajes},
+        estado_base={"viajes": {v: sorted(transportes_de.get(v, [v])) for v in viajes},
+                     "transportes": {g: sorted(ts) for g, ts in sorted(transportes_por_guia.items())},
                      "eventos": eventos},
         sin_cambios=not agregar,
-        afectados={"guias": guias_agregar, "total_guias": len(guias_agregar),
+        afectados={"guias": guias_agregar, "total_guias": len(guias_agregar), "viajes": sorted(agregar),
                    "transportes": sorted(agregar), "excluidas": excluidas},
         consecuencias=consecuencias,
         revalidaciones=[],
@@ -4049,9 +4110,10 @@ ACCIONES: dict[str, DefinicionAccion] = {d.nombre: d for d in (
                      {"numero_guia": _P("guia", True), "referencia": _REF},
                      _plan_viaje_revertir_separacion, _aplicar_viaje_revertir_separacion),
     DefinicionAccion("VIAJE_AGREGAR_OBSERVACION", OPERACIONAL_REVERSIBLE,
-                     "Agrega una misma observación al viaje de 1 a 10 guías, conservando las anteriores y sin duplicar.",
-                     {"guias": _P("lista_texto", True, max_largo=12), "texto": _P("texto", True, max_largo=300),
-                      "referencia": _REF},
+                     "Agrega una misma observación al viaje de 1 a 10 guías o transportes, conservando las anteriores "
+                     "y sin duplicar (una vez por viaje).",
+                     {"guias": _P("lista_texto", max_largo=12), "transportes": _P("lista_texto", max_largo=12),
+                      "texto": _P("texto", True, max_largo=300), "referencia": _REF},
                      _plan_viaje_observacion, _aplicar_viaje_observacion),
     DefinicionAccion("TRANSPORTE_REVALIDAR", SENSIBLE, "Re-extrae con OCR los documentos de un transporte.",
                      {"numero_transporte": _P("transporte", True), "referencia": _REF},

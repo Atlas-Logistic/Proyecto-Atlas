@@ -839,18 +839,33 @@ def _intencion_observacion_lote(texto: str, original: str, plano: str) -> Intenc
 # 23/10/2026 a las guías ..."), antes o después de la lista de guías. Se
 # conserva tal cual (del original, con tildes); nunca se infiere ni completa.
 _CONECTOR_MOTIVO_ADICIONAL = r"(?:POR|DEBIDO\s+A|CORRESPONDIENTE\s+A)"
+# A quién se aplica: una o varias guías o transportes, con o sin artículo y
+# con o sin «(al) viaje de»: «a las guías N y M», «al viaje de la guía N»,
+# «al transporte T», «a los viajes de los transportes T1 y T2».
+_ARTICULO_ADICIONAL = r"(?:(?:LA|LAS|EL|LOS)\s+)?"
+_ENTIDAD_ADICIONAL = (_ARTICULO_ADICIONAL + r"(?:(?:CADA\s+UNO\s+DE\s+)?(?:ESTOS\s+|ESOS\s+)?VIAJES?\s*,?\s*(?:(?:DE|DEL)\s+)?)?"
+                      + _ARTICULO_ADICIONAL + r"(?P<tipo>GUIAS?|TRANSPORTES?)\s*(?:N[°O]?S?\.?\s*)?:?\s*"
+                      + _LISTA_GUIAS_OBS)
+_MONTO_ADICIONAL = r"(?P<monto>\$?\s*(?:\d{1,3}(?:[.]\d{3})+|\d+)(?:\s*(?:MIL|LUCAS|PESOS))?)"
 _ADICIONAL_GUIAS = re.compile(
-    rf"^{_VERBO_OBSERVACION}\s+(?:UN\s+)?ADICIONAL\s+(?:DE\s+)?"
-    r"(?P<monto>\$?\s*(?:\d{1,3}(?:[.]\d{3})+|\d+)(?:\s*(?:MIL|LUCAS|PESOS))?)"
+    rf"^{_VERBO_OBSERVACION}\s+(?:UN\s+)?ADICIONAL\s+(?:DE\s+)?{_MONTO_ADICIONAL}"
     rf"(?:\s+(?P<motivo>{_CONECTOR_MOTIVO_ADICIONAL}\s+.+?))?\s*,?\s+"
-    r"(?:A|PARA|EN)\s+(?:(?:CADA\s+UNO\s+DE\s+)?(?:ESTOS\s+)?VIAJES?\s*,?\s*(?:DE\s+)?)?(?:LA\s+)?"
-    rf"{_GUIAS_OBS}{_LISTA_GUIAS_OBS}"
+    rf"(?:A|AL|PARA|EN)\s+{_ENTIDAD_ADICIONAL}"
     rf"(?:\s*,?\s+(?P<motivo_final>{_CONECTOR_MOTIVO_ADICIONAL}\s+.+))?$")
 _ADICIONAL_GUIAS_DECLARATIVO = re.compile(
-    rf"^{_GUIAS_OBS}{_LISTA_GUIAS_OBS}\s+(?:TIENEN|TIENE)\s+(?:UN\s+)?ADICIONAL\s+(?:DE\s+)?"
-    r"(?P<monto>\$?\s*(?:\d{1,3}(?:[.]\d{3})+|\d+)(?:\s*(?:MIL|LUCAS|PESOS))?)"
-    rf"(?:\s+(?P<motivo_final>{_CONECTOR_MOTIVO_ADICIONAL}\s+.+))?$")
+    rf"^(?:EN\s+)?{_ENTIDAD_ADICIONAL}\s+(?:TIENEN|TIENE|LLEVAN|LLEVA)\s+(?:UN\s+)?ADICIONAL\s+(?:DE\s+)?"
+    rf"{_MONTO_ADICIONAL}(?:\s+(?P<motivo_final>{_CONECTOR_MOTIVO_ADICIONAL}\s+.+))?$")
 _ORDEN_ADICIONAL = re.compile(rf"^{_VERBO_OBSERVACION}\s+(?:UN\s+)?ADICIONAL\b")
+# Una frase que habla de un adicional de guías o transportes concretos es
+# siempre una orden de adicional (nunca material ni una consulta), salvo que
+# sea una pregunta.
+_MENCION_ADICIONAL = re.compile(r"\bADICIONAL(?:ES)?\b")
+_NUMERO_ENTIDAD_ADICIONAL = re.compile(r"\b(?:GUIAS?|TRANSPORTES?|VIAJES?)\b\D{0,20}\d{3,12}")
+_PREGUNTA_ADICIONAL = re.compile(
+    r"^(?:QUE|CUAL|CUALES|CUANTO|CUANTOS|CUANTAS|TIENE|TIENEN|HAY|EXISTE|EXISTEN|MUESTRA|MUESTRAME|MOSTRAR|LISTA|"
+    r"LISTAME|DAME|VER|DATOS|FICHA|DETALLE|CONSULTA|SI)\b")
+_EJEMPLO_ADICIONAL = ("Escribe, por ejemplo: «la guía 482634 tiene adicional de $30.000 por carga en Versalles» o «agrega "
+                      "un adicional de $15.000 por MOTIVO a las guías 483082 y 483043» (también con transportes)")
 _DIAS_SEMANA = ("LUNES", "MARTES", "MIERCOLES", "JUEVES", "VIERNES", "SABADO", "DOMINGO")
 
 
@@ -884,13 +899,12 @@ def _adicional_guias(original: str, plano: str) -> tuple[Intencion | None, str]:
     from atlas_core.consulta_adicionales import _monto
     m = _ADICIONAL_GUIAS.fullmatch(plano) or _ADICIONAL_GUIAS_DECLARATIVO.fullmatch(plano)
     if not m:
-        if _ORDEN_ADICIONAL.match(plano) and re.search(r"\bGUIAS?\b\D*\d{3,12}", plano):
-            return None, ("no pude separar el monto, el motivo y las guías. Escribe, por ejemplo: «agrega un adicional "
-                          "de $15.000 por MOTIVO a las guías 483082 y 483043»")
+        if es_frase_adicional(plano):
+            return None, "no pude separar el monto, el motivo y las guías o transportes. " + _EJEMPLO_ADICIONAL
         return None, ""
     importe = _monto(m.group("monto"))
     if importe is None or importe <= 0:
-        return None, ""
+        return None, "no pude leer el monto del adicional. " + _EJEMPLO_ADICIONAL
     motivo_inicial = m.groupdict().get("motivo")
     if motivo_inicial and m.group("motivo_final"):
         return None, "la orden trae dos motivos; indica uno solo"
@@ -901,8 +915,18 @@ def _adicional_guias(original: str, plano: str) -> tuple[Intencion | None, str]:
         if problema:
             return None, problema
         texto += " " + original[m.start(grupo):m.end(grupo)].strip(" ,")
-    guias = list(dict.fromkeys(re.findall(r"\d{3,12}", m.group("lista"))))
-    return Intencion("VIAJE_AGREGAR_OBSERVACION", {"guias": guias, "texto": texto}), ""
+    numeros = list(dict.fromkeys(re.findall(r"\d{3,12}", m.group("lista"))))
+    clave = "transportes" if m.group("tipo").startswith("TRANSPORTE") else "guias"
+    return Intencion("VIAJE_AGREGAR_OBSERVACION", {clave: numeros, "texto": texto}), ""
+
+
+def es_frase_adicional(plano: str) -> bool:
+    """Afirma u ordena un adicional para guías/transportes concretos."""
+    # «Agrega la observación … ADICIONAL … a las guías …» es una observación
+    # literal con su propio camino (VIAJE_AGREGAR_OBSERVACION), no una orden
+    # de adicional a separar.
+    return bool(_MENCION_ADICIONAL.search(plano) and _NUMERO_ENTIDAD_ADICIONAL.search(plano)
+                and not _PREGUNTA_ADICIONAL.match(plano) and not re.search(r"\bOBSERVACION(?:ES)?\b", plano))
 
 
 def _intencion_adicional_guias(original: str, plano: str) -> Intencion | None:
@@ -1687,6 +1711,24 @@ def _describir_preview(preview: Mapping[str, object]) -> str:
                  f"{str(entidad.get('empresa') or '').upper()}). VIAJES ACTUALES: "
                  + " ".join(f"{i}) {_viaje_legible(v)}" for i, v in enumerate(viajes, 1))
                  + f" VIAJE RESULTANTE: {_viaje_legible(propuesto.get('viaje') or {})}")
+    elif accion == "VIAJE_AGREGAR_OBSERVACION" and isinstance(propuesto.get("viajes"), list):
+        viajes = propuesto["viajes"]
+        cuenta = lambda e: sum(v.get("estado") == e for v in viajes)  # noqa: E731
+        faltan = [_indicado_observacion(d) for d in propuesto.get("guias") or [] if not d.get("viaje")]
+        partes = []
+        if cuenta("AGREGAR"):
+            partes.append(f"se agrega en {cuenta('AGREGAR')} {_plural(cuenta('AGREGAR'), 'viaje', 'viajes')}")
+        if cuenta("CORREGIR_MOTIVO"):
+            partes.append(f"se corrige el motivo en {cuenta('CORREGIR_MOTIVO')}")
+        if cuenta("YA_PRESENTE"):
+            partes.append(f"ya está en {cuenta('YA_PRESENTE')}")
+        if cuenta("CONFLICTO_ADICIONAL"):
+            partes.append(f"{cuenta('CONFLICTO_ADICIONAL')} con otro adicional a revisar (no se aplica)")
+        texto = f"«{propuesto.get('texto')}»: " + (", ".join(partes) if partes else "ningún viaje cambia") + "."
+        if faltan:
+            texto += f" No encontré: {', '.join(faltan)} (no se aplica)."
+        texto += " Una vez por viaje; las demás observaciones se conservan."
+        return texto
     elif accion == "VIAJE_AGREGAR_OBSERVACION":
         detalle = propuesto.get("guias") or []
         agregar = [d for d in detalle if d.get("estado") == "AGREGAR"]
@@ -1761,12 +1803,39 @@ _ESTADO_OBSERVACION_LEGIBLE = {
     "AGREGAR": "Se agrega", "YA_PRESENTE": "Ya la tiene (sin cambio)",
     "CORREGIR_MOTIVO": "Se corrige el motivo (requiere confirmación)",
     "CONFLICTO_ADICIONAL": "Adicional ambiguo (revisar; no se aplica)",
-    "NO_ENCONTRADA": "No existe en Atlas (no se aplica)", "SIN_TRANSPORTE": "Sin transporte (no se aplica)",
+    "NO_ENCONTRADA": "No existe en Atlas (no se aplica)", "NO_ENCONTRADO": "No existe en Atlas (no se aplica)",
+    "SIN_TRANSPORTE": "Sin transporte (no se aplica)",
     "TRANSPORTE_AMBIGUO": "Transporte ambiguo (no se aplica)",
 }
 
 
+def _indicado_observacion(d: Mapping[str, object]) -> str:
+    return (f"guía {d.get('numero_guia')}" if d.get("numero_guia")
+            else f"transporte {d.get('numero_transporte_pedido') or d.get('numero_transporte')}")
+
+
 def _tablas_observacion(preview: Mapping[str, object]) -> list[dict[str, object]]:
+    """Una fila por VIAJE afectado (una guía o varias del mismo viaje = una sola
+    observación) y, aparte, lo indicado que no se encontró o no se aplica."""
+    propuesto_todo = preview.get("valor_propuesto") or {}
+    viajes = propuesto_todo.get("viajes")
+    if isinstance(viajes, list):
+        detalle = propuesto_todo.get("guias") or []
+        filas = [[v.get("viaje", ""),
+                  ", ".join([*(v.get("guias") or []), *(f"transporte {t}" for t in v.get("transportes_pedidos") or [])]) or "-",
+                  _ESTADO_OBSERVACION_LEGIBLE.get(v.get("estado"), v.get("estado")),
+                  " | ".join(v.get("observaciones_vigentes") or []) or "-",
+                  str(v.get("observacion_resultante") or "").replace("\n", " | ")
+                  if v.get("estado") in {"AGREGAR", "CORREGIR_MOTIVO"} else "-"] for v in viajes]
+        tablas = [{"tipo": "observacion_viaje_preview", "resumen": "",
+                   "columnas": ["Viaje (transporte)", "Guías indicadas", "Resultado", "Observación vigente",
+                                "Observación resultante"], "filas": filas}] if filas else []
+        faltan = [[_indicado_observacion(d), _ESTADO_OBSERVACION_LEGIBLE.get(d.get("estado"), d.get("estado"))]
+                  for d in detalle if not d.get("viaje")]
+        if faltan:
+            tablas.append({"tipo": "observacion_viaje_no_encontradas", "resumen": "",
+                           "columnas": ["Indicado", "Motivo (no se aplica)"], "filas": faltan})
+        return tablas
     detalle = (preview.get("valor_propuesto") or {}).get("guias") or []
     propuesto = (preview.get("valor_propuesto") or {}).get("texto", "")
     filas = [[d.get("numero_guia", ""), d.get("numero_transporte", "") or "-",
@@ -2443,6 +2512,13 @@ class OperadorB1:
         except ErrorContratoInterpretacion as error:
             return {"estado": "RECHAZADA", "mensaje": str(error)}
         if intencion is None:
+            original_adicional, plano_adicional = _limpio(texto)
+            if _adicional_guias(original_adicional, plano_adicional)[1]:
+                # Orden de adicional que no se puede separar: la aclaración
+                # la da el operador; nunca se interpreta como consulta ni
+                # como corrección de otro campo (p. ej. material).
+                return ({"estado": "REQUIERE_OPERADOR"} if derivar_operacionales else
+                        {"estado": "RECHAZADA", "mensaje": "SOLO CONSULTA: las acciones operacionales están deshabilitadas."})
             return {"estado": "NO_INTERPRETADA", "mensaje": "Continúe con la consulta de viajes."}
         definicion = ACCIONES.get(intencion.accion)
         if definicion is None or definicion.riesgo != LECTURA:
@@ -3435,7 +3511,7 @@ class OperadorB1:
             tablas = _tablas_observacion(preview)
             if preview.get("estado") == "SIN_CAMBIOS":
                 return {"estado": "SIN_CAMBIOS", "accion": intencion.accion, "preview": publico, "tablas": tablas,
-                        "mensaje": "No hay cambios válidos que confirmar; revisa el resultado de cada guía."}
+                        "mensaje": "No hay cambios válidos que confirmar. " + _describir_preview(preview)}
             self._fijar_pendiente(estado, conversacion_id, {
                 "token": preview["token"], "accion": intencion.accion, "parametros": parametros,
                 "referencia": str(texto)[:500], "creado_en": self.reloj().isoformat()})
