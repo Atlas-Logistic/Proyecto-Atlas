@@ -2377,6 +2377,10 @@ class OperadorB1:
         respuesta_revision = consultar_revisiones(self.capa._ctx, texto)
         if respuesta_revision is not None:
             return respuesta_revision
+        from atlas_core.ficha_consulta_b1 import responder_ficha
+        ficha = responder_ficha(self.capa._ctx, texto)
+        if ficha is not None:
+            return ficha
         if separar_contexto_revision(texto)[0] or es_correccion_por_guia_y_transporte(texto):
             # Lo escrito en una tarjeta de Revisión siempre es una corrección.
             return ({"estado": "REQUIERE_OPERADOR"} if derivar_operacionales else
@@ -2404,6 +2408,10 @@ class OperadorB1:
         respuesta_revision = consultar_revisiones(self.capa._ctx, texto)
         if respuesta_revision is not None:
             return respuesta_revision
+        from atlas_core.ficha_consulta_b1 import responder_ficha
+        ficha = responder_ficha(self.capa._ctx, texto)
+        if ficha is not None:
+            return ficha  # solo lectura: no toca la conversación ni su preview
         try:
             with bloqueo_sesion(self._actual, "b1_operador_conversaciones"):
                 estado = self._leer()
