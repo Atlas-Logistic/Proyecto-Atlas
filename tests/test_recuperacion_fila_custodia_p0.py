@@ -17,9 +17,13 @@ def put(path, rows):
 
 @pytest.fixture(autouse=True)
 def _custodia_sin_cloud(monkeypatch):
-    # Estas pruebas usan una custodia sin Cloud ni lease real: el diario
-    # remoto (P0.1) se prueba en tests/test_diario_recuperacion_remoto.py.
-    monkeypatch.setattr(ec.CustodiaEstado, "_publicar_diario", lambda self, *args, **kwargs: None)
+    # Estas pruebas usan una custodia sin Cloud ni lease real (nunca iniciada):
+    # el diario remoto y la protección de escritura (P0.1-P0.3) se prueban en
+    # test_diario_recuperacion_remoto, test_recuperacion_turno_remoto y
+    # test_escritor_sustituido.
+    real = ec.CustodiaEstado.anotar
+    monkeypatch.setattr(ec.CustodiaEstado, "anotar",
+                        lambda self, *a, **kw: None if self._lease is None else real(self, *a, **kw))
 
 def test_recupera_una_y_conserva_seis_idempotente(tmp_path):
     raiz = tmp_path / 'raiz'; dataset = raiz / 'operacion/actual/analisis_completo_guias.csv'

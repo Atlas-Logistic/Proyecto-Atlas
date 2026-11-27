@@ -336,9 +336,13 @@ class _Nube:
 
 class _Lease:
     lease_token, escritor_id = "t", "CASA"
+    vigente = True  # como el lease real durante el turno (P0.3 lo exige)
 
     def __init__(self, nube):
         self.marca = {"version": nube.version}
+
+    def renovar(self) -> bool:
+        return True
 
 
 def _turnos(raiz, tmp_path, monkeypatch, *, monolitico, dias, por_dia):

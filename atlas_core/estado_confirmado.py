@@ -33,6 +33,12 @@ agrega la marca del último estado confirmado:
   lease, el turno caído sólo con lo que hay en Cloud: todo o nada, sin pisar
   versiones posteriores ni perder o duplicar documentos del dataset, y cierra
   ese diario en el mismo lote que confirma los datos.
+- Escritor sustituido (P0.3): el estado local del lease no autoriza nada.
+  Cada escritura se valida en Cloud (publicación del diario, o renovación
+  del lease si no hay nada nuevo que publicar) y exige que el destino tenga
+  lo que el turno espera (lo último que escribió o la marca alineada): un
+  contenido ajeno traído por Drive no se pisa ni se adopta. Al confirmar se
+  publica la huella custodiada al escribir, no la que haya en la raíz.
 
 `reportes/`, `respaldos/` y `backups/` quedan fuera: cada escritura crea una
 carpeta con marca de tiempo única, nunca reemplaza contenido previo.
@@ -86,6 +92,15 @@ class EstadoNoVerificado(RuntimeError):
 
 class DiarioNoPersistido(EstadoNoVerificado):
     """El diario del turno no quedó en Cloud: la escritura no debe ocurrir."""
+
+
+class EscritorSustituido(DiarioNoPersistido):
+    """El lease de este turno venció o lo tomó otro escritor (P0.3)."""
+
+
+class ContenidoAjeno(EstadoNoVerificado):
+    """El destino ya no contiene lo que este turno escribió o alineó: otro
+    escritor (típicamente el anterior, replicado por Drive) lo cambió."""
 
 
 def es_ruta_custodia(rel: str) -> bool:
@@ -348,6 +363,7 @@ class CustodiaEstado:
         self.modificadas: set[str] = set()
         self.borrado_sin_ruta = False
         self.resumen: dict = {}
+        self.ajenos_descartados: list[str] = []
         self._lease = None
         self._diario: str | None = None
         self._diario_abierto_en = ""
@@ -536,7 +552,10 @@ class CustodiaEstado:
                 rutas = [r for r in rutas if r not in recuperacion]
             extra = [[d, None] for d in sorted({d for d in diarios if isinstance(d, str) and es_ruta_custodia(d)})
                      if self.manifiesto.get(d)]
-            resumen["pendiente_confirmado"] = len(self._confirmar_rutas(lease, rutas, extra=extra))
+            conocidos = pendiente.get("contenido") if isinstance(pendiente.get("contenido"), dict) else {}
+            conocidos = {r: s for r, s in conocidos.items()
+                         if isinstance(r, str) and (s is None or (isinstance(s, str) and len(s) == 64))}
+            resumen["pendiente_confirmado"] = len(self._confirmar_rutas(lease, rutas, extra=extra, conocidos=conocidos))
         # Con la marca ya superada, la alineación pone esos archivos en
         # cuarentena (contenido nunca confirmado) y restaura la versión vigente.
         self._ruta_pendiente.unlink(missing_ok=True)
@@ -580,6 +599,18 @@ class CustodiaEstado:
         if not entradas:
             return
         with self._cerrojo:
+            lease = self._lease
+            # P0.3: el estado local del lease no basta (puede creerse vigente
+            # tras una suspensión o un heartbeat atrasado) y el destino, la
+            # raíz que Drive replica, no admite fencing propio. Cada escritura:
+            # 1) exige que el destino contenga lo que este turno espera, así
+            #    un contenido ajeno traído por Drive nunca se pisa ni se adopta;
+            # 2) se valida contra el servidor (publicación del diario o
+            #    renovación), que rechaza un lease vencido o sustituido.
+            if lease is None or not getattr(lease, "vigente", False):
+                raise EscritorSustituido("el turno ya no tiene lease vigente; no se escribe")
+            for rel, efecto in entradas:
+                self._exigir_contenido_esperado(rel)
             contenido, pendientes, objetos = dict(self.contenido), set(self.pendientes), {}
             for rel, efecto in entradas:
                 if efecto == BORRADO:
@@ -606,11 +637,40 @@ class CustodiaEstado:
             rutas = self.modificadas | {rel for rel, _efecto in entradas}
             if (rutas == self.modificadas and contenido == self.contenido and pendientes == self.pendientes
                     and self._diario):
+                # Nada nuevo que publicar: igual se consulta al servidor.
+                self._exigir_lease_en_servidor(lease)
                 return
-            lease = self._lease
             self._publicar_diario(lease, rutas, contenido, pendientes, objetos)
             self.modificadas, self.contenido, self.pendientes = rutas, contenido, pendientes
             self._guardar_pendiente_local(lease)
+
+    def _exigir_lease_en_servidor(self, lease) -> None:
+        """La renovación sólo prospera con el token vigente en Cloud y lo
+        extiende: tras ella nadie más puede adquirir durante el plazo del
+        lease. Vencido o sustituido, la escritura se aborta."""
+        renovar = getattr(lease, "renovar", None)
+        if renovar is None or not renovar():
+            raise EscritorSustituido("Cloud rechazó el lease de este turno (vencido o sustituido); no se escribe")
+
+    def _contenido_esperado(self, rel: str):
+        """Lo que la raíz debe contener en ``rel`` según este turno: lo último
+        que escribió, o la marca alineada si no la tocó. ``PENDIENTE`` si no
+        hay referencia: escritura directa sin contenido custodiado aún, o ruta
+        que la marca no conoce (fuera de la semilla; la alineación no la fija)."""
+        if rel in self.pendientes:
+            return PENDIENTE
+        if rel in self.contenido:
+            return self.contenido[rel]
+        manifiesto = operacionales(self.manifiesto)
+        return manifiesto[rel] if rel in manifiesto else PENDIENTE
+
+    def _exigir_contenido_esperado(self, rel: str) -> None:
+        esperado = self._contenido_esperado(rel)
+        if esperado == PENDIENTE:
+            return
+        actual = self._huellas_locales([rel])[rel]
+        if actual != esperado:
+            raise ContenidoAjeno(f"{rel} cambió fuera de este turno (posible escritor anterior vía Drive); no se escribe")
 
     def _guardar_pendiente_local(self, lease) -> None:
         # Diario local: si el equipo se apaga a mitad, el próximo turno de
@@ -618,7 +678,7 @@ class CustodiaEstado:
         _escribir_json(self._ruta_pendiente, {
             "escritor_id": getattr(lease, "escritor_id", ""), "version_base": self.version,
             "raiz": str(self.raiz), "rutas": sorted(self.modificadas), "diario": self._diario,
-            "cierra": sorted(self._cierra), "recuperacion": self._recuperacion,
+            "cierra": sorted(self._cierra), "recuperacion": self._recuperacion, "contenido": self.contenido,
         })
 
     def _publicar_diario(self, lease, rutas: set[str], contenido: dict | None = None,
@@ -671,13 +731,15 @@ class CustodiaEstado:
         # datos y el cierre del diario quedan confirmados juntos o no quedan.
         cerrar = sorted({d for d in [self._diario, *self._cierra] if d and self.manifiesto.get(d)})
         extra = [[d, None] for d in cerrar]
-        confirmadas = self._confirmar_rutas(lease, sorted(rutas), extra=extra) if rutas or extra else []
+        self.ajenos_descartados = []
+        confirmadas = (self._confirmar_rutas(lease, sorted(rutas), extra=extra, conocidos=self.contenido)
+                       if rutas or extra else [])
         self._diario = None
         self._cierra, self._recuperacion = set(), {}
         self._ruta_pendiente.unlink(missing_ok=True)
         self.modificadas = set()
         self.contenido, self.pendientes = {}, set()
-        return {"version": self.version, "confirmados": len(confirmadas)}
+        return {"version": self.version, "confirmados": len(confirmadas), "ajenos_descartados": self.ajenos_descartados}
 
     # ------------------------------------------------- recuperación (P0.2)
     def recuperar_turno(self, lease, diario_rel: str, *, aplicar: bool = False) -> dict:
@@ -808,16 +870,29 @@ class CustodiaEstado:
         temporal.write_bytes(datos)
         os.replace(temporal, destino)
 
-    def _confirmar_rutas(self, lease, rutas, *, extra: list[list] | None = None) -> list[list]:
+    def _confirmar_rutas(self, lease, rutas, *, extra: list[list] | None = None,
+                         conocidos: dict | None = None) -> list[list]:
         rutas = [r for r in rutas if rastreable(r)]
         locales = self._huellas_locales(rutas)
+        # P0.3: lo que este turno escribió (huella custodiada al escribir) es
+        # lo que se confirma, aunque la raíz muestre otra cosa: un contenido
+        # que apareció después (escritor anterior vía Drive) nunca se adopta.
+        conocidos = {r: s for r, s in (conocidos or {}).items() if r in locales}
+        ajenos = sorted(r for r, s in conocidos.items() if locales[r] != s)
+        if ajenos:
+            log.warning("Estado confirmado: %d ruta(s) con contenido ajeno en la raíz; se confirma lo escrito por el turno: %s",
+                        len(ajenos), ajenos[:5])
+        self.ajenos_descartados = ajenos
+        locales.update(conocidos)
         cambios = [[rel, sha] for rel, sha in sorted(locales.items()) if self.manifiesto.get(rel, "ausente") != sha]
         # Una ruta nueva que ya no existe (temporal efímero) no aporta estado.
         cambios = [c for c in cambios if c[1] is not None or c[0] in self.manifiesto]
         extra = [list(par) for par in (extra or []) if es_ruta_custodia(par[0])]
         if not cambios and not extra:
             return []
-        borrados = [rel for rel, sha in cambios if sha is None]
+        # Un borrado observado por el hook es intención del turno; sólo los
+        # inferidos de la raíz (unidad quizá desmontada) se recomprueban.
+        borrados = [rel for rel, sha in cambios if sha is None and rel not in conocidos]
         if borrados:
             # Google Drive se reinicia solo y desmonta la unidad unos segundos:
             # sin raíz todo parece borrado. Un borrado se confirma sólo si la
@@ -830,7 +905,10 @@ class CustodiaEstado:
         huellas = sorted({sha for _rel, sha in cambios if sha})
         for sha in self.cliente.faltantes(huellas) if huellas else []:
             rel = next(r for r, s in cambios if s == sha)
-            datos = self._abs(rel).read_bytes()
+            try:
+                datos = self._abs(rel).read_bytes()
+            except OSError:
+                datos = b""
             if hashlib.sha256(datos).hexdigest() != sha:
                 raise EstadoNoVerificado(f"{rel} cambió durante la confirmación")
             self.cliente.subir(sha, datos, lease.lease_token)

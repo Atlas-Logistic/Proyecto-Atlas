@@ -102,3 +102,32 @@ Pruebas:
   - Con una versión posterior, la recuperación se bloquea sin tocar Cloud.
 
 NO instalado. No se tocaron CASA, PULL, Drive ni Cloud productiva.
+
+
+## P0.3: protección efectiva frente a la pérdida del lease (27/11/2026)
+
+Rama fix/escritor-sustituido-20261127 sobre 78a3ca3 (Claude Code, encargo Javier). Solo cambia atlas_core/estado_confirmado.py; el Worker no cambia (b28d594).
+
+El destino compartido tiene dos caras. Cloud ya rechaza en el servidor toda confirmación sin el token vigente y la versión base. La raíz en Drive no admite fencing propio: si un escritor viejo escribe, Drive replica su archivo. La protección queda en cada escritura y en la confirmación, no en el heartbeat:
+
+1. Servidor en cada escritura. La publicación del diario exige el lease en Cloud. Si no hay nada nuevo que publicar (reescritura idéntica, escritura directa sobre una ruta pendiente), se renueva el lease en el servidor. La renovación falla si el lease venció o lo tomó otro, y la escritura se aborta (`EscritorSustituido`) aunque `lease.vigente` local diga True.
+2. Compare-and-swap en el destino. Antes de escribir, el archivo debe contener lo que el turno espera: lo último que escribió o la huella de la marca alineada. Si no, `ContenidoAjeno` y no se escribe, así que el nuevo titular nunca construye sobre lo que Drive trajo del anterior. Una ruta que la marca no conoce o una escritura directa sin punto de control no tiene referencia y no se comprueba.
+3. Confirmación. Se publica la huella custodiada al escribir, no la que haya en la raíz. Un contenido ajeno aparecido después se informa en `ajenos_descartados` y la próxima alineación lo pone en cuarentena. Lo mismo aplica al recuperar pendiente.json del mismo equipo, que ahora guarda el contenido.
+
+Residuales (no se amplió el alcance):
+- Los bytes del escritor viejo sí llegan a SU disco si la escritura ya había empezado; nunca llegan a Cloud ni se confirman.
+- Si Drive lleva a B un dataset con documentos que Cloud no tiene, la protección previa del dataset (incidente del 26/11) detiene a B sin escribir hasta una revisión humana.
+- No se detecta la contaminación cruzada: B lee un archivo ajeno que no escribe y deriva otro archivo de él.
+- Cada escritura sin publicación hace una solicitud de renovación.
+
+Pruebas:
+- tests/test_escritor_sustituido.py: 7 pruebas nuevas. Se ajustaron dobles de lease y escritores simulados en el mismo proceso: Drive es otro proceso.
+- Suite completa del Motor: 47 fallas contra 46 en 48d6096. La diferencia, test_mobile_historial_por_lote, es intermitente en ambos (2 de 4 en la rama, 1 de 6 en la base).
+- Validación aislada scripts/validacion_diario_remoto/validar_lease.py: 16/16, con el Worker real.
+  - A, sin heartbeat, escribe media fila; el lease vence y B lo adquiere.
+  - A termina creyéndose vigente: su punto de control, otra escritura y su cierre son rechazados, y nada llega a Cloud.
+  - Drive lleva el dataset de A a B a mitad del turno de B: B se niega a escribir sobre él y confirma lo suyo.
+  - El turno de A no puede recuperarse encima de B.
+- validar.py (P0.1/P0.2) sigue en 23/23.
+
+NO instalado. No se tocaron CASA, PULL, Drive ni Cloud productiva.

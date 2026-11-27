@@ -58,6 +58,66 @@ def main() -> int:
             "rutas": sorted(c.modificadas), "contenido": c.contenido, "pendientes": sorted(c.pendientes)}), flush=True)
         time.sleep(3600)  # el orquestador mata el proceso: sin confirmar ni liberar
         return 0
+    if modo == "escritura_larga":
+        # P0.3: sin heartbeat, el estado local sigue "vigente" aunque Cloud
+        # venza el lease o lo entregue a otro equipo a mitad de la escritura.
+        import csv
+        import io
+        from atlas_core import estado_confirmado as ec
+        from atlas_core.procesamiento_masivo import COLUMNAS
+        guia = sys.argv[3]
+        lease.heartbeat_segundos = 0
+        if not lease.adquirir():
+            print("ERROR " + json.dumps({"motivo": lease.motivo}), flush=True)
+            return 2
+        fila = dict.fromkeys(COLUMNAS, "")
+        fila.update(archivo=f"mobile/env-{guia}/original.jpg", numero_guia=guia, estado_procesamiento="OK")
+        texto = io.StringIO()
+        csv.DictWriter(texto, fieldnames=COLUMNAS, delimiter=";").writerow(fila)
+        linea = texto.getvalue()
+        dataset = raiz.joinpath(*DATASET.split("/"))
+        archivo = open(dataset, "a", encoding="utf-8-sig", newline="")
+        archivo.write(linea[: len(linea) // 2])
+        archivo.flush()
+        print("ABIERTO " + json.dumps({"vigente_local": lease.vigente, "escritor_id": lease.escritor_id,
+                                       "diario": lease.custodia._diario}), flush=True)
+        sys.stdin.readline()  # el orquestador vence el lease y otro equipo lo toma
+        vigente_antes = lease.vigente
+        archivo.write(linea[len(linea) // 2:])
+        archivo.close()
+        control = ec.punto_de_control_tras_escritura(dataset)
+        catalogo = raiz / "catalogos_privados" / "vehiculos.json"
+        antes = catalogo.read_bytes()
+        try:
+            escribir(raiz, "catalogos_privados/vehiculos.json", json.dumps({"vehiculos": ["VIEJO99"]}))
+            rechazo = None
+        except Exception as error:  # noqa: BLE001
+            rechazo = type(error).__name__
+        intacto = catalogo.read_bytes() == antes
+        lease.cerrar()
+        print("RESULTADO " + json.dumps({"vigente_local_antes": vigente_antes, "punto_de_control": control,
+                                         "rechazo_escritura": rechazo, "catalogo_intacto": intacto}), flush=True)
+        return 0
+    if modo == "turno_pausado":
+        from atlas_core.procesamiento_masivo import COLUMNAS  # noqa: F401 - carga previa
+        if not lease.adquirir():
+            print("ERROR " + json.dumps({"motivo": lease.motivo}), flush=True)
+            return 2
+        ingestar(raiz, sys.argv[3], f"local/g-{sys.argv[3]}.jpg")
+        contenido = dict(lease.custodia.contenido)
+        print("PAUSA " + json.dumps({"escritor_id": lease.escritor_id, "contenido": contenido}), flush=True)
+        sys.stdin.readline()  # el orquestador hace que "Drive" traiga el archivo del escritor anterior
+        try:
+            ingestar(raiz, sys.argv[4], f"local/g-{sys.argv[4]}.jpg")
+            rechazo = None
+        except Exception as error:  # noqa: BLE001
+            rechazo = type(error).__name__
+        escribir(raiz, "catalogos_privados/vehiculos.json", json.dumps({"vehiculos": ["NUEVO11"]}))
+        custodia = lease.custodia
+        lease.cerrar()
+        print("RESULTADO " + json.dumps({"rechazo_segunda_ingesta": rechazo, "contenido": contenido,
+                                         "ajenos_descartados": custodia.ajenos_descartados}), flush=True)
+        return 0
     if modo in {"turno", "turno_dataset"}:
         with lease:
             if not lease.adquirir():
