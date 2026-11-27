@@ -220,7 +220,11 @@ def publicar_version(lease, *, version: str, rama: str, commit: str, motor: Path
 # --------------------------------------------------------- actualizador
 class Actualizador:
     def __init__(self, *, motor: Path, recursos: Path | None, estado: Path, cliente, python: str | None = None,
-                 raiz: Path | None = None, proceso_desktop: str = "Atlas Viajes.exe") -> None:
+                 raiz: Path | None = None, proceso_desktop: str = "Atlas Viajes.exe",
+                 desktop_exe: Path | None = None, espera_arranque: float = 90.0) -> None:
+        # P0.6: con el ejecutable, la salud de Desktop incluye abrirlo de verdad.
+        self.desktop_exe = Path(desktop_exe) if desktop_exe else None
+        self.espera_arranque = espera_arranque
         self.motor = Path(motor)
         self.recursos = Path(recursos) if recursos else None
         self.estado = Path(estado)
@@ -404,7 +408,60 @@ class Actualizador:
         salud = {"motor_nivel": nivel}
         if descriptor["desktop"] is not None and self.recursos is not None:
             salud["desktop_entradas_asar"] = verificar_asar(self.recursos / ASAR)
+            if self.desktop_exe is not None:
+                salud["desktop_arranque"] = self._arranque_desktop()
         return salud
+
+    def _arranque_desktop(self) -> dict:
+        """Arranque REAL de Electron con el asar instalado, aislado: sin
+        datos (raíz vacía), sin credenciales, sin autorización de escritura
+        y con carpeta de usuario temporal. Exige que cargue la ventana
+        principal (protocolo de depuración local) y luego lo cierra."""
+        import re
+        import socket
+        import tempfile
+        import time
+        import urllib.request
+        with socket.socket() as s:
+            s.bind(("127.0.0.1", 0))
+            puerto = s.getsockname()[1]
+        inicio = time.monotonic()
+        with tempfile.TemporaryDirectory(prefix="atlas-arranque-", ignore_cleanup_errors=True) as tmp:
+            base = Path(tmp)
+            (base / "raiz").mkdir()
+            (base / "config.json").write_text("{}", encoding="utf-8")
+            entorno = {k: v for k, v in os.environ.items() if not re.match(r"(?i)(ATLAS_|OPENROUTER|CLOUD_)", k)}
+            entorno.pop("ELECTRON_RUN_AS_NODE", None)
+            entorno.update(ATLAS_USER_DATA_PATH=str(base / "userdata"), ATLAS_DATA_DIR=str(base / "raiz"),
+                           ATLAS_CONFIG_PATH=str(base / "config.json"),
+                           ATLAS_OPERACION_CONFIG=str(base / "sin_operacion.json"))
+            proceso = subprocess.Popen([str(self.desktop_exe), f"--remote-debugging-port={puerto}"], env=entorno,
+                                       stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            try:
+                while time.monotonic() - inicio < self.espera_arranque:
+                    if proceso.poll() is not None:
+                        raise ErrorActualizacion(f"Desktop nuevo terminó al arrancar (código {proceso.returncode})")
+                    try:
+                        with urllib.request.urlopen(f"http://127.0.0.1:{puerto}/json/list", timeout=2) as r:
+                            objetivos = json.loads(r.read())
+                    except (OSError, ValueError):
+                        objetivos = []
+                    paginas = [o for o in objetivos if o.get("type") == "page" and ".html" in o.get("url", "")
+                               and not o.get("url", "").startswith("devtools")]
+                    if paginas:
+                        time.sleep(2)  # no basta con abrir: debe seguir vivo
+                        if proceso.poll() is not None:
+                            raise ErrorActualizacion("Desktop nuevo se cerró tras abrir la ventana")
+                        return {"pagina": paginas[0]["url"].rsplit("/", 1)[-1], "titulo": paginas[0].get("title", ""),
+                                "segundos": round(time.monotonic() - inicio, 1)}
+                    time.sleep(0.5)
+                raise ErrorActualizacion(f"Desktop nuevo no abrió su ventana en {self.espera_arranque:.0f} s")
+            finally:
+                subprocess.run(["taskkill", "/T", "/F", "/PID", str(proceso.pid)], capture_output=True)
+                try:
+                    proceso.wait(timeout=30)
+                except subprocess.TimeoutExpired:
+                    pass
 
     def _revertir(self, diario: dict) -> dict:
         antes = diario["antes"]

@@ -104,7 +104,12 @@ sys.addaudithook(_auditar)
 
 def compartida(raiz):
     texto = str(raiz).replace('/', '\\').lower()
-    return texto.startswith('\\\\') or (len(texto) > 1 and texto[1] == ':' and texto[0] != 'c') or 'onedrive' in texto or 'google drive' in texto
+    if texto.startswith('\\\\') or (len(texto) > 1 and texto[1] == ':' and texto[0] != 'c') or 'onedrive' in texto or 'google drive' in texto:
+        return True
+    # P0.3.1/P0.6: la raíz de trabajo local está en C:, pero su contenido es
+    # el compartido de la empresa: se escribe sólo bajo lease y custodia.
+    from atlas_core.raiz_publicada import es_raiz_de_trabajo
+    return es_raiz_de_trabajo(raiz)
 
 # Cada ciclo PULL retiene el lease ~35 s cada 2 min (incluye el margen de
 # relevo). Un turno manual que coincide no falla: espera, acotado, SÓLO
@@ -294,6 +299,30 @@ def ingresar(raiz, archivos, comprobar):
     return {'ok':True,'cantidad':len(originales),'resumen':resumen+existentes,'existentes':existentes,'carpetaReportes':str(vigente),'lote':marca}
 
 def ejecutar(solicitud):
+    # P0.6: Desktop entrega la raíz que muestra (la publicada, sólo datos
+    # confirmados); el Motor opera bajo lease en la raíz de trabajo y la
+    # respuesta vuelve a nombrar la publicada.
+    from atlas_core.raiz_publicada import operativa
+    vista = Path(solicitud['raiz']).resolve(strict=True)
+    raiz = Path(operativa(vista)).resolve(strict=True)
+    if raiz != vista:
+        solicitud = {**solicitud, 'raiz': str(raiz),
+                     'argumentos': [operativa(a) if isinstance(a, str) else a for a in solicitud.get('argumentos') or []]}
+        return _hacia_vista(_ejecutar(solicitud), raiz, vista)
+    return _ejecutar(solicitud)
+
+
+def _hacia_vista(resultado, raiz, vista):
+    if isinstance(resultado, dict) and isinstance(resultado.get('carpetaReportes'), str):
+        ruta = Path(resultado['carpetaReportes'])
+        try:
+            resultado = {**resultado, 'carpetaReportes': str(vista / ruta.resolve().relative_to(raiz))}
+        except ValueError:
+            pass
+    return resultado
+
+
+def _ejecutar(solicitud):
     raiz = Path(solicitud['raiz']).resolve(strict=True)
     from atlas_core.aislamiento_empresas import exigir_raiz_de_proceso
     exigir_raiz_de_proceso(raiz)

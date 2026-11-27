@@ -237,3 +237,46 @@ Antes de instalar (pasos manuales, no hechos):
 - La salud de Desktop verifica el asar, no abre Electron.
 
 NO instalado. No se tocaron Atlas Viajes instalado, CASA, PULL, Drive ni Cloud productiva.
+
+
+## P0.6: validación integral del P0 estructural (27/11/2026)
+
+Rama fix/p0-integral-20261127 sobre fcbea6b (Claude Code, encargo Javier). Valida P0.1 a P0.5 juntos y corrige solo regresiones del P0. NO instalado ni activado.
+
+Regresiones corregidas, cada una con su prueba en tests/test_p0_integral_regresiones.py:
+- R1 (P0.3.1):
+  - Con la raíz de trabajo en C:, `compartida()` la trataba como privada, y las escrituras de Desktop (ingreso, acciones) iban sin lease ni custodia, así que nunca se publicaban.
+  - Además Desktop muestra la raíz publicada y la entrega al Motor.
+  - Corrección: atlas_core/raiz_publicada.py (nuevo, solo biblioteca estándar). Al importar atlas_core redirige `--raiz-atlas`/`ATLAS_DATA_DIR` de la raíz publicada a la de trabajo. desktop_operacion redirige su solicitud y responde con rutas de la publicada. `compartida()` (desktop_operacion y exclusion_local) incluye la raíz de trabajo.
+  - actualizar_atlas.py importa atlas_core antes de leer argumentos y redirige la raíz de la configuración.
+- R2 (P0.3.1): la raíz publicada real (G:) está protegida por la guardia del turno local, así que publicar sin su turno fallaba siempre. Corrección: la publicación toma el turno de la raíz publicada.
+- R3 (P0.5): la salud de una versión de Desktop solo miraba la cabecera del asar. Ahora arranca Electron de verdad, aislado (sin datos, sin credenciales, sin autorización de escritura, carpeta de usuario temporal y puerto de depuración local), y exige que cargue atlas_viajes.html. Parámetro `--desktop-exe`, que por omisión es el exe junto a resources.
+
+Validación integral (scripts/validacion_diario_remoto/validar_integral.py): **36/36**.
+- Entorno: dos instalaciones aisladas, cada una con Motor clonado de un origin local, copia del Atlas Viajes instalado (Electron real inspeccionado por CDP), Drive protegida como G:, raíz de trabajo y LOCALAPPDATA propio. Worker b28d594 real con métricas, PULL real, OCR RapidOCR real, B1 desde la ventana real y datos sintéticos MBTMARCA.
+- Ingesta Mobile completa: OCR, dataset, reporte, publicación en Drive y visualización en Desktop.
+- Pérdida y recuperación:
+  - Desktop no ve el turno sin confirmar de X.
+  - X se elimina por completo.
+  - El PULL de Y lo recupera solo, procesa un envío nuevo, no duplica y Desktop lo muestra.
+- Corrección B1 desde la ventana real (preview y «sí»), publicada en Drive.
+- Informes y exportaciones: reporte vigente, Excel real del renderer y HTML del PDF MBT con los 5 viajes confirmados.
+- Actualización: versión Motor C2 + Desktop v2 aplicada al iniciar, con arranque real de Electron. Una versión con Desktop roto se revierte sola y Desktop vuelve a abrir.
+- Drive siempre igual al estado confirmado, y un proceso del Motor no puede escribir directo en Drive (guardia).
+
+Costo Cloud (medir_costo_cloud.py), con la carga real de MBT medida en solo lectura: 12 guías/día (máximo 21), dataset de 5,7 MB, foto de 2,6 MB, 43 % Mobile.
+- Por guía: ~157 solicitudes, ~44 filas D1 y 7 contenidos del dataset custodiados. Un ciclo ocioso: 6 solicitudes y 0 escrituras.
+- Proyección: ~6.100 solicitudes/día, ~530 filas D1/día (~193.000/año) y ~490 MB/día de R2 y de subida (~175 GB/año).
+- Sin compactación ni recolección de basura: conviene compactar en el Worker antes de un año.
+
+Migración coordinada (scripts/migracion_p0, ver PLAN_MIGRACION_P0.md): preflight.ps1, migrar_equipo.ps1, revertir_equipo.ps1 y protocolo_d1.ps1. Todos simulan si no reciben `-Aplicar`.
+- Ensayo validar_migracion.py: **20/20**, sobre un equipo sintético con el Motor 48d6096 instalado y el Worker real:
+  - comprobación previa;
+  - migración con respaldos (rama remota, configuración local, asar, acceso directo);
+  - PULL con OCR;
+  - protocolo 3 que excluye al Motor anterior;
+  - reversión con el Motor anterior trabajando y 0 diferencias.
+
+Pruebas: tests/test_p0_integral_regresiones.py con 6 pruebas; la de R2 falla sin la corrección. Suite completa: 46 fallas contra 46 en 48d6096. Las diferencias son intermitentes de reloj: test_falso_ok_obra_destino_p1, y test_trazabilidad_ocr::test_traza_no_cambia_campos_finales_extraidos, que falla 2 de 10 veces tanto en la base como en la rama. Las validaciones P0.1 a P0.5 aprueban.
+
+No se tocaron Atlas Viajes instalado (solo se copió), CASA, PULL, Drive ni Cloud productiva.

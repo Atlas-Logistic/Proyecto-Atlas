@@ -11,3 +11,12 @@ _instalar_guardia()
 from atlas_core.aislamiento_empresas import entrar_proceso as _entrar_proceso  # noqa: E402
 
 _entrar_proceso()
+
+# Raíz publicada (Drive) -> raíz de trabajo local (P0.3.1/P0.6): Desktop
+# entrega la ruta que muestra; el Motor opera bajo lease en la de trabajo.
+try:
+    from atlas_core.raiz_publicada import redirigir_proceso as _redirigir_proceso  # noqa: E402
+
+    _redirigir_proceso()
+except Exception:  # noqa: BLE001 - sin configuración legible no se redirige nada
+    pass

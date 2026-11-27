@@ -32,7 +32,8 @@ def escribir(raiz: Path, rel: str, texto: str) -> None:
 def ingestar(raiz: Path, guia: str, archivo: str) -> None:
     from atlas_core.procesamiento_masivo import COLUMNAS, _escribir_filas
     fila = dict.fromkeys(COLUMNAS, "")
-    fila.update(archivo=archivo, numero_guia=guia, estado_procesamiento="OK")
+    fila.update(archivo=archivo, numero_guia=guia, estado_procesamiento="OK", numero_transporte="0000" + guia,
+                fecha="26-11-2026", cliente="CONSTRUCTORA MBTMARCA SA", peso_kg="26000")
     _escribir_filas(raiz.joinpath(*DATASET.split("/")), [fila])
 
 

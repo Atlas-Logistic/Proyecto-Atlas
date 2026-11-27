@@ -109,8 +109,15 @@ def normalizar_raiz(raiz) -> str:
 def compartida(raiz) -> bool:
     """Mismo criterio que ``desktop_operacion.compartida`` (sin importarlo)."""
     texto = str(raiz).replace("/", "\\").lower()
-    return (texto.startswith("\\\\") or (len(texto) > 1 and texto[1] == ":" and texto[0] != "c")
-            or "onedrive" in texto or "google drive" in texto)
+    if (texto.startswith("\\\\") or (len(texto) > 1 and texto[1] == ":" and texto[0] != "c")
+            or "onedrive" in texto or "google drive" in texto):
+        return True
+    # P0.6: la raíz de trabajo local (P0.3.1) guarda el estado compartido.
+    try:
+        from atlas_core.raiz_publicada import es_raiz_de_trabajo
+        return es_raiz_de_trabajo(raiz)
+    except Exception:  # noqa: BLE001 - sin configuración legible: criterio anterior
+        return False
 
 
 def _dentro(ruta_norm: str, raiz_norm: str) -> bool:

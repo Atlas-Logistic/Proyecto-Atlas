@@ -24,6 +24,9 @@ import sys
 from pathlib import Path
 
 MOTOR = Path(__file__).resolve().parent
+# Antes de leer argumentos: al importar atlas_core, una --raiz-atlas que es
+# la raíz publicada (Drive) pasa a la de trabajo (P0.6).
+import atlas_core  # noqa: E402,F401
 
 
 def _config() -> dict:
@@ -39,11 +42,23 @@ def _recursos_por_defecto() -> Path | None:
     return ruta if (ruta / "app.asar").is_file() else None
 
 
+def _ejecutable(args, recursos: Path | None) -> Path | None:
+    """Atlas Viajes.exe junto a resources (instalación de electron-builder)."""
+    if args.desktop_exe:
+        return Path(args.desktop_exe)
+    if recursos is None:
+        return None
+    candidato = Path(recursos).parent / args.proceso_desktop
+    return candidato if candidato.is_file() else None
+
+
 def main(argv=None) -> int:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--motor", default=str(MOTOR), help="Motor instalado (repositorio git)")
     parser.add_argument("--desktop-recursos", default=None, help="Carpeta resources de Atlas Viajes")
     parser.add_argument("--sin-desktop", action="store_true", help="No gestionar Desktop")
+    parser.add_argument("--desktop-exe", default=None,
+                        help="Ejecutable de Atlas Viajes para la prueba de arranque real (por defecto, junto a resources)")
     parser.add_argument("--raiz-atlas", default=None, help="Raíz operacional (turno local y lease)")
     parser.add_argument("--proceso-desktop", default="Atlas Viajes.exe")
     parser.add_argument("--estado", default=None, help="Carpeta de estado (por defecto LOCALAPPDATA\\Atlas\\actualizacion)")
@@ -59,7 +74,8 @@ def main(argv=None) -> int:
     from atlas_core.escritor_operativo import URL_CLOUD_POR_DEFECTO, lease_desde_entorno
 
     config = _config()
-    raiz = args.raiz_atlas or config.get("raiz")
+    from atlas_core.raiz_publicada import operativa
+    raiz = args.raiz_atlas or (operativa(config["raiz"]) if config.get("raiz") else None)
     recursos = None if args.sin_desktop else (Path(args.desktop_recursos) if args.desktop_recursos else _recursos_por_defecto())
 
     if args.publicar:
@@ -88,7 +104,7 @@ def main(argv=None) -> int:
     actualizador = aa.Actualizador(motor=Path(args.motor), recursos=recursos, cliente=cliente,
                                    estado=Path(args.estado) if args.estado else base_local() / "actualizacion",
                                    python=config.get("python") or sys.executable, raiz=Path(raiz) if raiz else None,
-                                   proceso_desktop=args.proceso_desktop)
+                                   proceso_desktop=args.proceso_desktop, desktop_exe=_ejecutable(args, recursos))
     try:
         resultado = actualizador.actualizar()
     except Exception as error:  # noqa: BLE001 - Atlas arranca igual con lo instalado

@@ -51,6 +51,7 @@ carpeta con marca de tiempo única, nunca reemplaza contenido previo.
 """
 from __future__ import annotations
 
+import contextlib
 import csv
 import hashlib
 import io
@@ -198,24 +199,20 @@ PUBLICABLES_NO_CUSTODIADOS = ("reportes", "respaldos", "backups")
 
 
 def ruta_configuracion_publicacion() -> Path:
-    from atlas_core.aislamiento_empresas import base_local
-    return base_local() / ARCHIVO_PUBLICACION
+    from atlas_core.raiz_publicada import ruta_configuracion
+    return ruta_configuracion()
 
 
 def configuracion_publicacion() -> dict | None:
     """P0.3.1. ``{"raiz_trabajo", "raiz_publicada"}`` de la empresa del
     proceso, o None (modo anterior: se escribe en la raíz que se reciba)."""
-    datos = _leer_json(ruta_configuracion_publicacion(), None)
-    if not isinstance(datos, dict):
-        return None
-    trabajo, publicada = datos.get("raiz_trabajo"), datos.get("raiz_publicada")
-    if not (isinstance(trabajo, str) and isinstance(publicada, str) and trabajo and publicada):
-        return None
-    return {"raiz_trabajo": trabajo, "raiz_publicada": publicada}
+    from atlas_core.raiz_publicada import configuracion
+    return configuracion(ruta_configuracion_publicacion())
 
 
 def _misma_ruta(a, b) -> bool:
-    return os.path.normcase(os.path.abspath(os.fspath(a))).rstrip("\\/") == os.path.normcase(os.path.abspath(os.fspath(b))).rstrip("\\/")
+    from atlas_core.raiz_publicada import misma_ruta
+    return misma_ruta(a, b)
 
 
 def _publicable_no_custodiado(rel: str) -> bool:
@@ -625,6 +622,19 @@ class CustodiaEstado:
         temporal.write_bytes(datos)
         os.replace(temporal, destino)
 
+    @contextlib.contextmanager
+    def _turno_publicada(self):
+        """La raíz publicada (Drive) es una raíz protegida por la guardia del
+        turno local: publicar exige poseer también su turno (P0.6)."""
+        from atlas_core.exclusion_local import TurnoEscritura
+        turno = TurnoEscritura(self.publicada, espera_segundos=30)
+        if not turno.adquirir():
+            raise EstadoNoVerificado(f"turno de la raíz publicada no disponible: {turno.error}")
+        try:
+            yield
+        finally:
+            turno.soltar()
+
     def _publicar(self, pares: list[list]) -> list[str]:
         """Copia a la raíz publicada lo que Cloud YA confirmó: la huella
         confirmada, desde la raíz de trabajo o, si allí hay otra cosa, desde
@@ -632,10 +642,24 @@ class CustodiaEstado:
         y se reintenta al alinear el próximo turno."""
         if self.publicada is None:
             return []
+        pares = [par for par in pares if not es_ruta_custodia(par[0])]
+        if not pares:
+            return []
+        try:
+            with self._turno_publicada():
+                fallidas = self._publicar_bajo_turno(pares)
+        except Exception as error:  # noqa: BLE001
+            log.warning("Publicación pendiente (%d ruta(s)): %s", len(pares), error)
+            fallidas = {rel: sha for rel, sha in pares}
+        if fallidas:
+            pendiente = _leer_json(self._ruta_publicacion_pendiente, {})
+            pendiente = pendiente if isinstance(pendiente, dict) else {}
+            _escribir_json(self._ruta_publicacion_pendiente, {**pendiente, **fallidas})
+        return sorted(fallidas)
+
+    def _publicar_bajo_turno(self, pares: list[list]) -> dict:
         fallidas = {}
         for rel, sha in pares:
-            if es_ruta_custodia(rel):
-                continue
             try:
                 datos = None
                 if sha is not None:
@@ -649,20 +673,22 @@ class CustodiaEstado:
             except Exception as error:  # noqa: BLE001
                 log.warning("Publicación de %s pendiente: %s", rel, error)
                 fallidas[rel] = sha
-        if fallidas:
-            pendiente = _leer_json(self._ruta_publicacion_pendiente, {})
-            pendiente = pendiente if isinstance(pendiente, dict) else {}
-            _escribir_json(self._ruta_publicacion_pendiente, {**pendiente, **fallidas})
-        return sorted(fallidas)
+        return fallidas
 
     def _publicar_no_custodiados(self, rels) -> None:
-        for rel in sorted(rels):
-            origen = self._abs(rel)
-            try:
-                if origen.is_file():
-                    self._escribir_publicada(rel, origen.read_bytes())
-            except OSError as error:
-                log.warning("Publicación de %s no realizada: %s", rel, error)
+        if self.publicada is None or not rels:
+            return
+        try:
+            with self._turno_publicada():
+                for rel in sorted(rels):
+                    origen = self._abs(rel)
+                    try:
+                        if origen.is_file():
+                            self._escribir_publicada(rel, origen.read_bytes())
+                    except Exception as error:  # noqa: BLE001
+                        log.warning("Publicación de %s no realizada: %s", rel, error)
+        except Exception as error:  # noqa: BLE001
+            log.warning("Reportes/respaldos del turno no publicados: %s", error)
 
     def _reintentar_publicacion(self) -> int:
         pendiente = _leer_json(self._ruta_publicacion_pendiente, None)
