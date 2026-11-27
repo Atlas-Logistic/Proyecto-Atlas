@@ -15,6 +15,12 @@ def put(path, rows):
     with path.open('w', encoding='utf-8-sig', newline='') as f:
         w=csv.DictWriter(f, fieldnames=COLUMNAS, delimiter=';'); w.writeheader(); w.writerows(rows)
 
+@pytest.fixture(autouse=True)
+def _custodia_sin_cloud(monkeypatch):
+    # Estas pruebas usan una custodia sin Cloud ni lease real: el diario
+    # remoto (P0.1) se prueba en tests/test_diario_recuperacion_remoto.py.
+    monkeypatch.setattr(ec.CustodiaEstado, "_publicar_diario", lambda self, lease, rutas: None)
+
 def test_recupera_una_y_conserva_seis_idempotente(tmp_path):
     raiz = tmp_path / 'raiz'; dataset = raiz / 'operacion/actual/analisis_completo_guias.csv'
     envio = 'abc'; archivo = 'mobile/abc/original.jpg'

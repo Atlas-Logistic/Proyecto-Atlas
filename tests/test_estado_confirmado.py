@@ -169,7 +169,9 @@ class RelevoEstadoConfirmado(unittest.TestCase):
     def test_relevo_restaura_la_copia_atrasada_antes_de_escribir(self):
         self.oficina.escribir(DATASET, "v0")  # Drive de OFICINA aún no recibe v1
         self.turno(self.casa, {DATASET: "v1", CATALOGO: "cat-1"})
-        self.assertEqual(self.cloud.marca["version"], 1)
+        # Dos actualizaciones del diario remoto (una por ruta nueva) y el cierre.
+        self.assertEqual(self.cloud.marca["version"], 3)
+        self.assertEqual(self.cloud._vigentes()[ec.ruta_diario("pc-casa", 1)][0], None)
         self.cloud.avanzar(11)
         with self.oficina.lease() as lease:
             self.assertTrue(lease.adquirir(), lease.motivo)
@@ -289,10 +291,12 @@ class RelevoEstadoConfirmado(unittest.TestCase):
         oculta = self.casa.raiz.with_name("Atlas-desmontada")
         os.rename(self.casa.raiz, oculta)
         lease.cerrar()
-        self.assertEqual(self.cloud.marca["version"], version)
+        # Sólo el diario remoto avanzó la marca; ningún dato se confirmó.
+        self.assertEqual(self.cloud.marca["version"], version + 1)
         self.assertEqual(self.cloud._vigentes()[DATASET][0], sha(b"v1"))
         self.assertEqual(self.cloud._vigentes()[CATALOGO][0], sha(b"cat-1"))
         self.assertTrue((self.casa.local / "pendiente.json").is_file())
+        self.assertIsNotNone(self.cloud._vigentes()[ec.ruta_diario("pc-casa", 2)][0])
         os.rename(oculta, self.casa.raiz)  # la unidad vuelve
         self.cloud.avanzar(3)
         with self.casa.lease() as vuelta:
@@ -303,6 +307,7 @@ class RelevoEstadoConfirmado(unittest.TestCase):
         self.assertEqual(self.casa.leer(CATALOGO), "cat-1")
         self.assertEqual(self.cloud._vigentes()[DATASET][0], sha(b"v2"))
         self.assertEqual(self.cloud._vigentes()[CATALOGO][0], sha(b"cat-1"))
+        self.assertIsNone(self.cloud._vigentes()[ec.ruta_diario("pc-casa", 2)][0])
 
     def test_borrado_que_reaparece_al_recomprobar_no_se_confirma(self):
         self.turno(self.casa, {DATASET: "v1", CATALOGO: "cat-1"})
@@ -332,7 +337,8 @@ class RelevoEstadoConfirmado(unittest.TestCase):
             self.casa.escribir(DATASET, "v1")
             registradas = set(lease.custodia.modificadas)
         self.assertEqual(registradas, {DATASET})
-        self.assertEqual(set(self.cloud._vigentes()), {DATASET})
+        self.assertEqual(set(ec.operacionales(self.cloud._vigentes())), {DATASET})
+        self.assertEqual(self.cloud._vigentes()[ec.ruta_diario("pc-casa", 1)][0], None)
 
     def test_cliente_antiguo_no_obtiene_lease_tras_activar(self):
         self.cloud.marca["protocolo_minimo"] = 2

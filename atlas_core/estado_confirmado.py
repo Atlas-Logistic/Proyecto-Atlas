@@ -16,6 +16,15 @@ agrega la marca del último estado confirmado:
 - Las escrituras se registran con un audit hook de Python (todas las
   escrituras del Motor ocurren en proceso) y en un diario local, para que un
   apagado inesperado se confirme al volver si nadie confirmó entre medio.
+- Diario de recuperación remoto (P0.1): antes de la primera escritura de cada
+  ruta, el diario del turno se sube a Cloud (objeto direccionado por huella) y
+  su puntero se confirma en la misma marca, bajo la ruta reservada
+  ``.atlas_custodia/diarios/<escritor_id>/<epoca>.json``. Queda ligado a la
+  empresa (token Cloud y campo empresa_id), a la versión base y al turno
+  (época del lease). Si no se logra persistir, la escritura se aborta. Al
+  confirmar el turno, el puntero se anula en el mismo lote final; si el equipo
+  desaparece, el diario sigue íntegro en Cloud y cualquier otro equipo de la
+  empresa lo lee (``--diarios``). Ningún turno anula el diario de otro turno.
 
 `reportes/`, `respaldos/` y `backups/` quedan fuera: cada escritura crea una
 carpeta con marca de tiempo única, nunca reemplaza contenido previo.
@@ -39,7 +48,14 @@ from pathlib import Path
 PROTOCOLO = 2
 EXCLUIDOS_PRIMER_NIVEL = frozenset({
     "reportes", "respaldos", "backups", "_respaldos_desarrollo", "historico_pre_infra_s2", "investigacion",
+    ".atlas_custodia",
 })
+# Rutas de la marca que no son archivos operacionales: nunca se restauran a la
+# raíz ni se comparan con ella (diarios de recuperación de los turnos).
+PREFIJO_CUSTODIA = ".atlas_custodia/"
+CARPETA_DIARIOS = ".atlas_custodia/diarios"
+TIPO_DIARIO = "ATLAS_DIARIO_RECUPERACION"
+FORMATO_DIARIO = 1
 # Línea base de la activación: archivos mutables que la operación reescribe.
 SEMILLA_CARPETAS = ("operacion/actual", "operacion/procesamiento", "catalogos_privados", "fichas_digitales")
 SEMILLA_ENVIOS = "operacion/mobile/envios"
@@ -53,6 +69,50 @@ log = logging.getLogger(__name__)
 
 class EstadoNoVerificado(RuntimeError):
     """La copia local no coincide con la marca de Cloud: no se escribe."""
+
+
+class DiarioNoPersistido(EstadoNoVerificado):
+    """El diario del turno no quedó en Cloud: la escritura no debe ocurrir."""
+
+
+def es_ruta_custodia(rel: str) -> bool:
+    return rel.startswith(PREFIJO_CUSTODIA)
+
+
+def operacionales(manifiesto: dict) -> dict:
+    return {rel: sha for rel, sha in manifiesto.items() if not es_ruta_custodia(rel)}
+
+
+def ruta_diario(escritor_id: str, epoca: int) -> str:
+    return f"{CARPETA_DIARIOS}/{escritor_id}/{int(epoca)}.json"
+
+
+def serializar_diario(diario: dict) -> bytes:
+    return json.dumps(diario, ensure_ascii=True, sort_keys=True, separators=(",", ":")).encode("ascii")
+
+
+def interpretar_diario(rel: str, datos: bytes, sha: str) -> dict:
+    """Diario remoto íntegro y coherente con su ruta, o EstadoNoVerificado."""
+    if hashlib.sha256(datos).hexdigest() != sha:
+        raise EstadoNoVerificado(f"diario {rel}: contenido no coincide con su huella")
+    try:
+        diario = json.loads(datos.decode("ascii"))
+    except (UnicodeError, ValueError) as error:
+        raise EstadoNoVerificado(f"diario {rel} ilegible: {error}") from error
+    campos = {"tipo": str, "formato": int, "empresa_id": str, "escritor_id": str, "epoca": int,
+              "lease_sha256": str, "version_base": int, "raiz": str, "abierto_en": str,
+              "actualizado_en": str, "rutas": list, "huellas_base": dict}
+    if not isinstance(diario, dict) or any(not isinstance(diario.get(c), t) for c, t in campos.items()):
+        raise EstadoNoVerificado(f"diario {rel}: estructura inválida")
+    if diario["tipo"] != TIPO_DIARIO or diario["formato"] != FORMATO_DIARIO:
+        raise EstadoNoVerificado(f"diario {rel}: tipo o formato desconocido")
+    if ruta_diario(diario["escritor_id"], diario["epoca"]) != rel:
+        raise EstadoNoVerificado(f"diario {rel}: no corresponde a su turno")
+    rutas = diario["rutas"]
+    if (not all(isinstance(r, str) and rastreable(r) for r in rutas)
+            or sorted(set(rutas)) != rutas or set(diario["huellas_base"]) != set(rutas)):
+        raise EstadoNoVerificado(f"diario {rel}: rutas inválidas")
+    return diario
 
 
 def ruta_local() -> Path:
@@ -209,6 +269,9 @@ class CustodiaEstado:
         self.borrado_sin_ruta = False
         self.resumen: dict = {}
         self._lease = None
+        self._diario: str | None = None
+        self._diario_abierto_en = ""
+        self._version_turno = 0
         self._cerrojo = threading.Lock()
 
     # --------------------------------------------------------------- rutas
@@ -292,12 +355,12 @@ class CustodiaEstado:
         """Antes de restaurar nada: un token ajeno volcaría datos de otra empresa."""
         from atlas_core.aislamiento_empresas import ErrorAislamiento, multiempresa_activa, verificar_manifiesto_empresa
         try:
-            manifiesto = self.manifiesto
+            manifiesto = operacionales(self.manifiesto)
             if multiempresa_activa(self.raiz):
                 # La caché local va por versión: con varias empresas, un token
                 # ajeno de igual versión pasaría por el manifiesto propio.
                 datos = self.cliente.manifiesto()
-                manifiesto = {fila[0]: fila[1] for fila in datos.get("archivos", [])}
+                manifiesto = operacionales({fila[0]: fila[1] for fila in datos.get("archivos", [])})
             verificar_manifiesto_empresa(self.raiz, manifiesto, self.cliente.descargar)
         except ErrorAislamiento as error:
             raise EstadoNoVerificado(str(error)) from error
@@ -307,10 +370,19 @@ class CustodiaEstado:
         self.version = int(lease.marca.get("version") or 0)
         self.manifiesto = dict(self._cargar_manifiesto(self.version))
         self._exigir_custodia_propia()
-        resumen = {"version": self.version, "restaurados": [], "borrados": [], "cuarentena": [], "pendiente_confirmado": 0}
+        resumen = {"version": self.version, "restaurados": [], "borrados": [], "cuarentena": [], "pendiente_confirmado": 0,
+                   "diarios_abiertos": []}
         self._recuperar_pendiente(lease, resumen)
-        locales = self._huellas_locales(self.manifiesto)
-        distintos = {rel: sha for rel, sha in locales.items() if sha != self.manifiesto[rel]}
+        # Diarios de turnos que nunca confirmaron (equipo apagado o perdido):
+        # quedan intactos en Cloud; este turno no los anula ni los adopta.
+        resumen["diarios_abiertos"] = sorted(rel for rel, sha in self.manifiesto.items()
+                                             if sha and rel.startswith(CARPETA_DIARIOS + "/"))
+        if resumen["diarios_abiertos"]:
+            log.warning("Estado confirmado: %d diario(s) de recuperación abiertos en Cloud: %s",
+                        len(resumen["diarios_abiertos"]), resumen["diarios_abiertos"][:5])
+        operacional = operacionales(self.manifiesto)
+        locales = self._huellas_locales(operacional)
+        distintos = {rel: sha for rel, sha in locales.items() if sha != operacional[rel]}
         if distintos:
             self._proteger_dataset_local(distintos)
             consultas = [[rel, sha] for rel, sha in distintos.items() if sha]
@@ -333,8 +405,8 @@ class CustodiaEstado:
                     resumen["restaurados"].append(rel)
             if resumen["cuarentena"]:
                 log.warning("Estado confirmado: %d archivo(s) local(es) nunca confirmados en cuarentena %s", len(resumen["cuarentena"]), destino_cuarentena)
-            locales = self._huellas_locales(self.manifiesto)
-            residuo = [rel for rel, sha in locales.items() if sha != self.manifiesto[rel]]
+            locales = self._huellas_locales(operacional)
+            residuo = [rel for rel, sha in locales.items() if sha != operacional[rel]]
             if residuo:
                 raise EstadoNoVerificado(f"copia local no coincide con la marca Cloud v{self.version}: {residuo[:5]}")
         self.resumen = resumen
@@ -359,7 +431,10 @@ class CustodiaEstado:
                 and pendiente.get("raiz") == str(self.raiz) and rutas):
             # Turno anterior de este mismo equipo caído antes de confirmar y
             # nadie confirmó después: esas escrituras son el estado más nuevo.
-            resumen["pendiente_confirmado"] = len(self._confirmar_rutas(lease, rutas))
+            # Su diario remoto se anula en el mismo lote que las confirma.
+            diario = pendiente.get("diario")
+            extra = [[diario, None]] if isinstance(diario, str) and self.manifiesto.get(diario) else []
+            resumen["pendiente_confirmado"] = len(self._confirmar_rutas(lease, rutas, extra=extra))
         # Con la marca ya superada, la alineación pone esos archivos en
         # cuarentena (contenido nunca confirmado) y restaura la versión vigente.
         self._ruta_pendiente.unlink(missing_ok=True)
@@ -369,6 +444,9 @@ class CustodiaEstado:
         self._lease = lease
         self.modificadas = set()
         self.borrado_sin_ruta = False
+        self._diario = None
+        self._diario_abierto_en = ""
+        self._version_turno = self.version
         _activas.append(self)
 
     def detener(self) -> None:
@@ -381,32 +459,76 @@ class CustodiaEstado:
         if rel is None or rel in self.modificadas or not rastreable(rel):
             return
         with self._cerrojo:
-            self.modificadas.add(rel)
+            if rel in self.modificadas:
+                return
             lease = self._lease
-            # Diario local antes de que la escritura ocurra: si el equipo se
-            # apaga a mitad, el próximo turno sabe qué confirmar o aislar.
+            rutas = self.modificadas | {rel}
+            # Diario remoto antes de que la escritura ocurra: si falla, la
+            # excepción sale del audit hook y aborta la escritura. Ningún dato
+            # operacional cambia sin que su turno quede registrado fuera de
+            # este equipo.
+            self._publicar_diario(lease, rutas)
+            self.modificadas = rutas
+            # Diario local: si el equipo se apaga a mitad, el próximo turno
+            # de este mismo equipo sabe qué confirmar o aislar.
             _escribir_json(self._ruta_pendiente, {
                 "escritor_id": getattr(lease, "escritor_id", ""), "version_base": self.version,
-                "raiz": str(self.raiz), "rutas": sorted(self.modificadas),
+                "raiz": str(self.raiz), "rutas": sorted(self.modificadas), "diario": self._diario,
             })
+
+    def _publicar_diario(self, lease, rutas: set[str]) -> None:
+        from atlas_core.aislamiento_empresas import empresa_de_raiz
+        try:
+            ahora = datetime.now(timezone.utc).isoformat(timespec="microseconds")
+            self._diario_abierto_en = self._diario_abierto_en or ahora
+            ordenadas = sorted(rutas)
+            base = operacionales(self.manifiesto)
+            epoca = int(getattr(lease, "epoca", 0) or 0)
+            diario = {
+                "tipo": TIPO_DIARIO, "formato": FORMATO_DIARIO,
+                "empresa_id": empresa_de_raiz(self.raiz),
+                "escritor_id": lease.escritor_id, "epoca": epoca,
+                "lease_sha256": hashlib.sha256(lease.lease_token.encode("utf-8")).hexdigest(),
+                "version_base": self._version_turno, "raiz": str(self.raiz),
+                "abierto_en": self._diario_abierto_en, "actualizado_en": ahora,
+                "rutas": ordenadas, "huellas_base": {r: base.get(r) for r in ordenadas},
+            }
+            rel = ruta_diario(lease.escritor_id, epoca)
+            datos = serializar_diario(diario)
+            sha = hashlib.sha256(datos).hexdigest()
+            self.cliente.subir(sha, datos, lease.lease_token)
+            # Igual que una confirmación de datos: exige lease vigente y la
+            # versión que este turno conoce. Sin éxito no hay escritura.
+            self.version = self.cliente.confirmar(lease.lease_token, self.version, [[rel, sha]])
+        except Exception as error:  # noqa: BLE001 - cualquier duda: no escribir
+            raise DiarioNoPersistido(f"diario de recuperación no persistido en Cloud; no se escribe: {error}") from error
+        self._diario = rel
+        self.manifiesto[rel] = sha
+        _escribir_json(self._ruta_manifiesto, {"version": self.version, "archivos": self.manifiesto})
 
     # --------------------------------------------------------- confirmación
     def confirmar(self, lease) -> dict:
         rutas = set(self.modificadas)
         if self.borrado_sin_ruta:
-            rutas |= {rel for rel, sha in self.manifiesto.items() if sha is not None and not self._abs(rel).exists()}
-        confirmadas = self._confirmar_rutas(lease, sorted(rutas)) if rutas else []
+            rutas |= {rel for rel, sha in operacionales(self.manifiesto).items() if sha is not None and not self._abs(rel).exists()}
+        # El puntero al diario del turno se anula en el mismo lote final: los
+        # datos y el cierre del diario quedan confirmados juntos o no quedan.
+        diario = self._diario
+        extra = [[diario, None]] if diario and self.manifiesto.get(diario) else []
+        confirmadas = self._confirmar_rutas(lease, sorted(rutas), extra=extra) if rutas or extra else []
+        self._diario = None
         self._ruta_pendiente.unlink(missing_ok=True)
         self.modificadas = set()
         return {"version": self.version, "confirmados": len(confirmadas)}
 
-    def _confirmar_rutas(self, lease, rutas) -> list[list]:
+    def _confirmar_rutas(self, lease, rutas, *, extra: list[list] | None = None) -> list[list]:
         rutas = [r for r in rutas if rastreable(r)]
         locales = self._huellas_locales(rutas)
         cambios = [[rel, sha] for rel, sha in sorted(locales.items()) if self.manifiesto.get(rel, "ausente") != sha]
         # Una ruta nueva que ya no existe (temporal efímero) no aporta estado.
         cambios = [c for c in cambios if c[1] is not None or c[0] in self.manifiesto]
-        if not cambios:
+        extra = [list(par) for par in (extra or []) if es_ruta_custodia(par[0])]
+        if not cambios and not extra:
             return []
         borrados = [rel for rel, sha in cambios if sha is None]
         if borrados:
@@ -425,8 +547,9 @@ class CustodiaEstado:
             if hashlib.sha256(datos).hexdigest() != sha:
                 raise EstadoNoVerificado(f"{rel} cambió durante la confirmación")
             self.cliente.subir(sha, datos, lease.lease_token)
-        for i in range(0, len(cambios), LOTE_CONFIRMACION):
-            lote = cambios[i:i + LOTE_CONFIRMACION]
+        lotes = [cambios[i:i + LOTE_CONFIRMACION] for i in range(0, len(cambios), LOTE_CONFIRMACION)] or [[]]
+        lotes[-1] = lotes[-1] + extra
+        for lote in lotes:
             self.version = self.cliente.confirmar(lease.lease_token, self.version, lote)
             for rel, sha in lote:
                 self.manifiesto[rel] = sha
@@ -462,11 +585,33 @@ def verificar_sin_escribir(raiz, cliente: ClienteEstado, *, carpeta_local: Path 
     """Sólo lectura: cuántos archivos locales difieren de la marca vigente."""
     custodia = CustodiaEstado(raiz, cliente, carpeta_local=carpeta_local)
     datos = cliente.manifiesto()
-    manifiesto = {ruta: sha for ruta, sha, _v in datos.get("archivos", [])}
+    completo = {ruta: sha for ruta, sha, _v in datos.get("archivos", [])}
+    manifiesto = operacionales(completo)
     locales = custodia._huellas_locales(manifiesto)
     distintos = sorted(rel for rel, sha in locales.items() if sha != manifiesto[rel])
     return {"version": datos.get("version"), "protocolo_minimo": datos.get("protocolo_minimo"),
-            "archivos": len(manifiesto), "distintos": len(distintos), "ejemplos": distintos[:10]}
+            "archivos": len(manifiesto), "distintos": len(distintos), "ejemplos": distintos[:10],
+            "diarios_abiertos": sorted(r for r, s in completo.items() if s and r.startswith(CARPETA_DIARIOS + "/"))}
+
+
+def leer_diarios_remotos(cliente: ClienteEstado, *, empresa_id: str | None = None) -> dict:
+    """Sólo lectura, desde cualquier equipo de la empresa: los diarios de
+    recuperación abiertos en Cloud, descargados y verificados por huella.
+
+    ``vigente`` indica que nadie confirmó después de la última actualización
+    del diario: las escrituras de ese turno serían el estado más nuevo."""
+    datos = cliente.manifiesto()
+    version = int(datos.get("version", -1))
+    diarios = []
+    for rel, sha, version_publicacion in datos.get("archivos", []):
+        if not sha or not rel.startswith(CARPETA_DIARIOS + "/"):
+            continue
+        diario = interpretar_diario(rel, cliente.descargar(sha), sha)
+        if empresa_id is not None and diario["empresa_id"] != empresa_id:
+            raise EstadoNoVerificado(f"diario {rel} pertenece a otra empresa: {diario['empresa_id']}")
+        diarios.append({"ruta": rel, "sha256": sha, "version_publicacion": int(version_publicacion),
+                        "vigente": int(version_publicacion) == version, "diario": diario})
+    return {"version": version, "diarios": diarios}
 
 
 def main(argv=None) -> int:
@@ -477,12 +622,18 @@ def main(argv=None) -> int:
     accion = parser.add_mutually_exclusive_group(required=True)
     accion.add_argument("--sembrar", action="store_true", help="Activación: publica la línea base bajo lease (sólo el equipo con el estado vigente)")
     accion.add_argument("--verificar", action="store_true", help="Sólo lectura: compara la copia local con la marca vigente")
+    accion.add_argument("--diarios", action="store_true", help="Sólo lectura: diarios de recuperación abiertos en Cloud, verificados")
     args = parser.parse_args(argv)
     lease = lease_desde_entorno(raiz=args.raiz_atlas)
     if lease is None:
         parser.error("Falta ATLAS_CLOUD_MOTOR_TOKEN")
     if args.verificar:
         print(json.dumps(verificar_sin_escribir(args.raiz_atlas, lease.custodia.cliente), ensure_ascii=False))
+        return 0
+    if args.diarios:
+        from atlas_core.aislamiento_empresas import empresa_de_raiz
+        cliente = lease.custodia.cliente
+        print(json.dumps(leer_diarios_remotos(cliente, empresa_id=empresa_de_raiz(args.raiz_atlas)), ensure_ascii=False))
         return 0
     with lease:
         if not lease.adquirir():

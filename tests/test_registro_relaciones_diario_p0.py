@@ -388,7 +388,7 @@ def test_custodia_sube_solo_el_segmento_no_el_registro_completo(tmp_path, monkey
     assert abs(base_mono - base_diario) < base_mono * 0.02  # mismo registro migrado (sólo cambian marcas de tiempo)
     assert mono.bytes_subidos >= 15 * base_mono                 # el archivo completo en cada turno
     assert diario.bytes_subidos * 50 < mono.bytes_subidos        # sólo el segmento del día
-    assert set(diario.archivos) == {
+    assert {r for r in diario.archivos if not r.startswith(".atlas_custodia/")} == {
         "catalogos_privados/registro_relaciones_operacionales.json",
         *(f"catalogos_privados/registro_relaciones_diario/202612{d:02d}.json" for d in (1, 2, 3)),
     }

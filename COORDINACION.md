@@ -49,3 +49,19 @@ El estado del reporte ya publicado **sigue bloqueado** para folio, obra y destin
 ## B1: error documental de patente (23/11/2026)
 
 Sobre 96c9351, integrada la interfaz f9074bc. B1 exige declaracion explicita de error documental u OCR, guia, tipo y patente; contrasta la propuesta con la unica discrepancia de la accion oficial y exige confirmacion humana. Se conservan asignaciones, documento y OCR; respaldo, auditoria y proyeccion siguen el canal oficial. Si hay otras discrepancias, B1 se abstiene. Pruebas sinteticas: 70 focales aprobadas; regresion B1 y acciones 1035 aprobadas y una falla preexistente reproducida en la base (test_bandeja_se_reconcilia_una_sola_vez). No instalado ni se modificaron datos reales, Cloud, Mobile o PULL.
+
+
+## P0.1: diario de recuperación persistido en Cloud (27/11/2026)
+
+Rama feat/diario-recuperacion-remoto-20261127 sobre 48d6096 (Claude Code, encargo Javier). Solo cambia atlas_core/estado_confirmado.py. Reutiliza los endpoints de custodia del Worker desplegado (b28d594), sin cambios Cloud ni migraciones.
+
+- Antes de la primera escritura de cada ruta del turno, la custodia sube el diario a R2 (PUT /estado/objetos/<sha>, exige lease) y confirma su puntero en la marca: `.atlas_custodia/diarios/<escritor_id>/<epoca>.json`. El diario es JSON canónico con tipo, formato, empresa_id, escritor_id, época del lease, sha256 del lease_token, version_base, raíz, rutas y huellas base. Queda en el espacio Cloud de la empresa del token.
+- Si no se persiste (Cloud caído, lease vencido, versión superada), `DiarioNoPersistido` sale del audit hook y la escritura se aborta.
+- Al confirmar el turno, el puntero se anula en el mismo lote final que los datos. Si el corte ocurre entre lotes, el diario sigue abierto. La recuperación del mismo equipo (pendiente.json) también lo cierra.
+- Ningún turno anula ni adopta el diario de otro turno. `alinear` lo informa en `resumen["diarios_abiertos"]` y nunca restaura rutas `.atlas_custodia/` a la raíz. La verificación tampoco las compara ni las cuenta como datos.
+- Lectura desde cualquier equipo: `python -m atlas_core.estado_confirmado --raiz-atlas X --diarios`. Es de solo lectura, verifica la huella, la estructura y la ruta frente al turno y la empresa. El campo `vigente` indica que nadie confirmó después.
+- Costo: cada ruta nueva de un turno suma una versión y un objeto de alrededor de 1 KB, y el cierre suma una versión más. Reescribir un contenido idéntico ya no deja la marca intacta: se abre y se cierra el diario, pero no se publican datos.
+- Compatibilidad: un Motor anterior que alinee mientras haya un diario abierto restauraría ese archivo dentro de su raíz, en la carpeta oculta `.atlas_custodia/`, que es inocua. Conviene instalar en CASA y OFICINA juntos.
+- No incluido (siguiente etapa): adoptar o resolver desde otro equipo el turno perdido, avisar en Desktop, y el contrato v2.
+
+Pruebas: tests/test_diario_recuperacion_remoto.py, 8 pruebas nuevas. Suite de custodia: 275 de 276; la falla test_lease_multiequipo::test_manual_y_pull_nunca_escriben_a_la_vez ya existía en 48d6096. Validación aislada scripts/validacion_diario_remoto/validar.py: Worker b28d594 real sobre D1/R2 en memoria, equipo A muerto con taskkill y borrado por completo, equipo B lee el diario íntegro y trabaja. Resultado 18/18. NO instalado. No se tocaron CASA, PULL, Drive ni Cloud productiva.

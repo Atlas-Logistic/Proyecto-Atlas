@@ -87,8 +87,13 @@ class Deteccion(unittest.TestCase):
     def test_reescribir_igual_contenido_no_publica(self):
         self.base_confirmada()
         version, objetos = self.version(), len(self.cloud.objetos)
+        datos = ec.operacionales(self.cloud._vigentes())
         self.turno(self.casa, lambda: self.casa.escribir(CATALOGO, V1))
-        self.assertEqual((self.version(), len(self.cloud.objetos)), (version, objetos))
+        # Ningún dato se publica. Sólo el diario remoto (P0.1): se abre antes
+        # de la escritura, sin saber aún que el contenido no cambia, y se cierra.
+        self.assertEqual(ec.operacionales(self.cloud._vigentes()), datos)
+        self.assertEqual((self.version(), len(self.cloud.objetos)), (version + 2, objetos + 1))
+        self.assertTrue(all(s is None for r, (s, _v) in self.cloud._vigentes().items() if ec.es_ruta_custodia(r)))
 
     def test_turnos_sin_cambios_no_publican(self):
         self.base_confirmada()
@@ -189,8 +194,10 @@ class Deteccion(unittest.TestCase):
         self.assertTrue(set(llamadas) <= {"/api/motor/escritor/estado", "/api/motor/escritor/adquirir", "/api/motor/escritor/renovar",
                                           "/api/motor/escritor/liberar", "/api/motor/estado/manifiesto", "/api/motor/estado/conocidos",
                                           "/api/motor/estado/faltantes", "/api/motor/estado/confirmar"}, llamadas)
-        fila = self.cloud.archivos[-1]
+        # El último lote confirma el dato y cierra el diario del turno (P0.1).
+        fila, cierre = self.cloud.archivos[-2:]
         self.assertEqual((fila[0], len(fila[2])), (CATALOGO, 64))
+        self.assertEqual((ec.es_ruta_custodia(cierre[0]), cierre[1], cierre[2]), (True, fila[1], None))
 
 
 if __name__ == "__main__":
