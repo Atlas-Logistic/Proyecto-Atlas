@@ -1,4 +1,4 @@
-# Coordinación — B1 correcciones, 2026-11-09
+﻿# Coordinación — B1 correcciones, 2026-11-09
 
 Trabajo aislado en `C:/Atlas/pruebas/b1-correcciones-generales-20261109/motor`, rama `feat/b1-correcciones-generales-20261109`, desde `4204163`. No modificar los worktrees de otros agentes ni datos operacionales.
 
@@ -45,7 +45,58 @@ Folio y obra con ledger escrito, y folio con bandeja trasladada, se recuperan al
 
 El estado del reporte ya publicado **sigue bloqueado** para folio, obra y destino. Una prueba con generación real sintética interrumpe justo después de publicar ese estado y comprueba que el reintento no lo sobrescribe. No existe aún evidencia durable suficiente para atribuir ese estado al token sin confundirlo con una publicación concurrente. Los lectores directos de reportes siguen sin protección; no declarar completa la publicación coherente ni instalar.
 
+## Reserva P0 patentes por asignación vigente — 2026-11-17
+Codex trabaja aisladamente en C:/Atlas/pruebas/patentes-asignacion-20261117/motor, rama p0/patentes-asignacion-vigente-20261117, base 8c97a5d. Sin modificar datos operacionales ni instalar; verificación en copia. Integración a cargo de Claude Code.
 
-## B1: error documental de patente (23/11/2026)
+### Estado P0 patentes: investigación incompleta
+La rama aislada sigue en 8c97a5d, sin cambios de código ni commit. La regla actual excluye patentes conocidas y ausentes; el reporte no resuelve valores vacíos; el procesamiento puede sustituir OCR antes de persistirlo; la vista de incidencias filtra detecciones no confirmadas. Una prueba exploratoria de proyección produjo 28 aprobadas y 2 fallidas; se descartó el cambio experimental por no cumplir auditoría y visibilidad. La copia coherencia-comuna-casa-20261117/foto contiene 811 filas y cero decisiones en la bandeja, por lo que no permite identificar tarjetas actuales innecesarias. Falta implementación integral, pruebas, verificación sobre copia apropiada y push. No integrar ni instalar.
 
-Sobre 96c9351, integrada la interfaz f9074bc. B1 exige declaracion explicita de error documental u OCR, guia, tipo y patente; contrasta la propuesta con la unica discrepancia de la accion oficial y exige confirmacion humana. Se conservan asignaciones, documento y OCR; respaldo, auditoria y proyeccion siguen el canal oficial. Si hay otras discrepancias, B1 se abstiene. Pruebas sinteticas: 70 focales aprobadas; regresion B1 y acciones 1035 aprobadas y una falla preexistente reproducida en la base (test_bandeja_se_reconcilia_una_sola_vez). No instalado ni se modificaron datos reales, Cloud, Mobile o PULL.
+## Reserva diagnóstico destino 485018 — 2026-11-18
+Codex: únicamente lectura y pruebas aisladas de diagnóstico sobre Motor 95f14d6, documento y datos existentes. Sin edición de código ni datos, OCR, reconciliaciones o decisiones. Reserva limitada a este diagnóstico.
+
+2026-11-18 Codex: reserva diagnóstico destino 485018 liberada. Lectura y pruebas puras aisladas; sin OCR, reconciliaciones, cambios de código ni datos operacionales.
+
+## P0 proyección de MATERIAL — 2026-11-23
+Codex creó el worktree C:/Atlas/pruebas/material-confirmado-20261123/motor, rama fix/material-confirmado-20261123 desde c08bc38. Se detuvo sin editar código ni reservar archivos: en 437fbaf la generación del reporte precede a la auditoría APLICADA de la acción, por lo que una proyección que exija ese estado durante el reporte no puede reconocer la corrección en curso. Coordinar el contrato de publicación con Code antes de implementar; no se modificaron datos operacionales ni se instalaron reportes. No hay reservas pendientes de Codex.
+
+## Reserva P0 proyección de MATERIAL — 2026-11-23
+Codex: rama fix/proyeccion-material-humano-20261123, worktree C:/Atlas/pruebas/proyeccion-material-humano-20261123/motor, base c3fda7f. Reserva atlas_core/gestor_viajes.py, atlas_core/reporte_viajes.py y tests de proyección de MATERIAL. Sin cambios a B1, canal, interfaz ni datos operacionales.
+
+### Cierre P0 proyección de MATERIAL — 2026-11-23
+Codex: commit d7c44634217f8c2e0a27b2df9fb980559d7edf42 publicado y SHA remoto verificado en fix/proyeccion-material-humano-20261123, base c3fda7f (incluye 437fbaf). Proyección del material humano vigente mediante la interfaz oficial; OCR conserva credibilidad previa. 219 pruebas focales y regresiones aprobadas, incluido reporte sintético antes de auditoría APLICADA. Sin datos reales ni instalación; pendiente comprobar el reporte real de la guía 485242 después de instalar. Reserva de gestor_viajes.py, reporte_viajes.py y pruebas liberada.
+
+## Reserva P0 capacidades operacionales B1 — 2026-11-23
+Codex: worktree C:/Atlas/pruebas/b1-operaciones-viaje-20261123/motor, rama feat/b1-operaciones-viaje-20261123, base 71bddbf. Reserva limitada a atlas_core/intenciones_equipo_operacional.py y tests/test_intenciones_equipo_operacional.py; no editar B1 ni canal/documentales reservados. Sin instalación ni datos reales.
+
+### Cierre parcial P0 capacidades operacionales B1 — 2026-11-23
+Commit f9074bc10d19df1717d5165296b0bf81af0f8316 publicado en feat/b1-operaciones-viaje-20261123, SHA remoto verificado. Nueva interfaz de interpretación para error documental de equipo, sin ejecución ni conexión B1. B1 ya conecta chofer y agrupación explícita. Bloqueante observado en base 71bddbf: DOCUMENTO_CONFIRMAR_ERROR_DOCUMENTAL_AZA acepta confirmado_por=ATLAS_AUTOMATICO; requiere corregir canal oficial reservado antes de conectar esta intención. Patente distinta a asignación confirmada y separación de guías no cuentan con conexión segura dentro de archivos permitidos; no se habilitaron. Pruebas: 94 aprobadas en suite focal y regresión y 12 en ejecución focal final (una prueba adicional de aislamiento entre raíces). No se modificaron datos reales ni se instaló. Reserva de intenciones_equipo_operacional.py y test_intenciones_equipo_operacional.py liberada.
+
+## Reserva B1 simplificación visual — 2026-11-25
+Codex: worktree C:/Atlas/pruebas/b1-simplificacion-visual-20261125/desktop, base fa2a002; Motor de referencia 7e861b6. Reserva presentación de listados B1 en Desktop y pruebas focales. Sin cambios al Motor ni datos.
+
+### Cierre parcial B1 simplificación visual — 2026-11-25
+Commit Desktop 8388baf publicado en fix/b1-simplificacion-visual-20261125. Agrupa por chofer y fecha, simplifica listados y presenta pendiente; prueba sintética del renderer en Electron para listado general y adicionales aprobada. Bloqueante: Motor 7e861b6 recorta _observaciones_texto a 300 caracteres en soporte_consultas.py y cli_consulta_atlas.py excluye el campo completo; no se puede preservar la observación completa desde Desktop. No se modificó Motor ni datos; no se validaron consultas reales ni se instaló en CASA ni actualizó kit de OFICINA. Reserva liberada.
+
+## Reserva B1 observaciones completas — 2026-11-25
+Codex: continuación Desktop 8388baf, Motor base 7e861b6. Para coordinación con Code se reserva exclusivamente atlas_core/soporte_consultas.py (eliminar recorte de observación) y prueba focal del contrato; Desktop presentación B1. No tocar multiempresa, intérprete, filtros, cálculos ni datos operacionales. Trabajo aislado; avisar aquí cualquier conflicto antes de integrar o instalar.
+
+### Cierre B1 observaciones completas — 2026-11-25
+Reserva de soporte_consultas.py y presentación Desktop liberada. Motor a9a6c825aade7f0a0db3a1ae1462860d8dccde25 y Desktop ab8a92e43048dd4916c780ecd877482edcba6cd8 publicados y SHAs remotos verificados. Motor solo elimina recorte de 300; prueba focal con texto mayor aprobada. Salidas de consultas reales, renderizadas en Electron: adicional 33, Versalles 10, noviembre 144; agrupación, fechas, columnas y texto recibido comprobados. La consulta real más larga tenía 185 caracteres; el caso mayor se comprobó con prueba focal. CASA: Motor fast-forward desde 7e861b6, COORDINACION.md local conservado, PULL reactivado en su estado anterior; app.asar SHA256 25D5B01D433614031F5E561DADA2F7797047000CC39E5AF9748B650CFDEFD3B4, respaldo app.asar.antes-b1-visual-20261125; proceso Desktop iniciado. Kit ACTUALIZAR_OFICINA actualizado con respaldo anterior-b1-visual-20261125; no ejecutado en OFICINA. Sin cambios de intérprete, filtros, cálculos, multiempresa ni datos operacionales.
+
+## Reserva B1 exportación PDF — 2026-11-25
+Codex: Desktop base ab8a92e, worktree C:/Atlas/pruebas/b1-pdf-20261125/desktop. Reserva presentación de resultados B1, canal PDF/vista previa y pruebas focales; sin cambios Motor, datos ni multiempresa. Distribución CASA y kit al validar.
+
+### Cierre B1 exportación PDF — 2026-11-25
+Desktop 2914483cc80633ee39e188b66e6fa42e585ea8aa publicado en feat/b1-exportar-pdf-20261125, SHA remoto verificado. Botón PDF para tablas visibles de viajes, usa printToPDF y vista previa/guardado existentes, empresa activa de Desktop. Validación con respuestas reales del Motor a9a6c82 renderizadas en Electron: Lazcano adicional 10 filas, todos adicional 33 y noviembre 144; PDFs revisados visualmente, 1, 2 y 7 páginas; cabeceras repetidas, fechas, transportes y observaciones comparados sin ausencias. Pruebas focales de vista previa 9 aprobadas. CASA app.asar SHA256 E2C7E61B106A8E244E7649DB9DD6DE636871A60909DE5F534F8B3C2728030C05, respaldo app.asar.antes-b1-pdf-20261125; Desktop iniciado. Kit ACTUALIZAR_OFICINA actualizado con respaldo anterior-b1-pdf-20261125; no ejecutado en OFICINA. Motor sin modificar, datos operacionales y multiempresa intactos. Reserva liberada.
+
+## Coordinación consumo mensual multiempresa — 2026-11-25
+Codex investiga contrato de consumo desde Motor 59c3f33 en worktree aislado. Code trabaja identidad y permisos en C:/Atlas/pruebas/multiempresa-identidad-20261125/motor; Codex no reserva ni modifica sus archivos. Se solicita coordinar identidad documental estable y configuración de zona horaria de empresa; sin datos reales ni instalación.
+
+### Consumo mensual — investigación parcial y coordinación — 2026-11-25
+Codex: commit documental 28697d3283990f3edc1399c1417fe53e45f45c10 publicado en investigacion/consumo-mensual-20261125, base 59c3f33. Sin contador ni reservas de archivos de producto. Se solicita a Code coordinar identidad documental estable ante correcciones/ambigüedad y zona IANA por empresa; también falta publicación recuperable del hecho de procesamiento finalizado junto a la medición. La identidad de reingesta actual usa guía/transporte completos y el resumen incluye relecturas y errores, por lo que no sostienen el requisito de consumo exacto. No se ejecutaron las validaciones MBT/Andes ni se instaló. Sin datos reales, G: ni Cloudflare. Reserva de investigación liberada.
+
+## Reserva plantas configurables — 2026-11-25
+Codex: investigación y cambios aislados de catálogo y selección de plantas, Mobile, recepción y rutas; no editar identidad ni permisos de Code. Base Motor 59c3f33, Cloud 2031e50, Mobile 8f10a61. Solicita coordinación con Code para la distribución aislada de catálogos por empresa autenticada. Sin G:, producción, CASA o Cloudflare real.
+
+### Plantas configurables — avance parcial — 2026-11-25
+Motor dc292876eeb6f72706465ff929aa3048727b78a5 publicado y SHA remoto verificado en feat/plantas-configurables-20261125, base 59c3f33. Resolución de origen por planta_id confirmada y activa en catálogo de la empresa; conserva códigos legados; 47 pruebas focales aprobadas, con MBT/Andes sintéticas y rechazo de ID ajeno/inactivo. No existe todavía distribución del catálogo al Worker y Mobile ni recepción de IDs en Motor; tampoco se validó preservación histórica de rutas o procesamiento completo. No integrar ni instalar el cambio parcial. Pendiente coordinar con Code identidad/permisos y contrato de sincronización por empresa, incluidos envíos offline capturados antes de desactivación. Sin cambios a Mobile, Cloud, autenticación, OCR ni datos reales; sin G:, CASA ni Cloudflare real. Reservas liberadas.
