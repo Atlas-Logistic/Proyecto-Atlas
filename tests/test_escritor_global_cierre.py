@@ -303,7 +303,15 @@ def test_accion_con_lease_perdido_no_restaura_encima_del_pull(tmp_path, cloud, r
         assert not fabrica.instancias[-1].renovar()
         filas = _leer_filas(_dataset(raiz))
         nueva = dict(filas[0], archivo="PULL.jpg", numero_guia="999999", numero_transporte="0000999999")
-        _escribir_filas_completas(_dataset(raiz), [*filas, nueva])
+        # El otro escritor es otro proceso: la custodia de esta acción (que
+        # ya perdió el lease y no puede persistir su diario) no lo observa.
+        from atlas_core import estado_confirmado as ec
+        activas = list(ec._activas)
+        ec._activas.clear()
+        try:
+            _escribir_filas_completas(_dataset(raiz), [*filas, nueva])
+        finally:
+            ec._activas.extend(activas)
         return {"peso_kg": "9307"}
 
     monkeypatch.setattr(m, "procesar_archivo", con_lectura(ocr_y_relevo))

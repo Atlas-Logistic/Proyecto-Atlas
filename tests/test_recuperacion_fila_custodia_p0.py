@@ -19,7 +19,7 @@ def put(path, rows):
 def _custodia_sin_cloud(monkeypatch):
     # Estas pruebas usan una custodia sin Cloud ni lease real: el diario
     # remoto (P0.1) se prueba en tests/test_diario_recuperacion_remoto.py.
-    monkeypatch.setattr(ec.CustodiaEstado, "_publicar_diario", lambda self, lease, rutas: None)
+    monkeypatch.setattr(ec.CustodiaEstado, "_publicar_diario", lambda self, *args, **kwargs: None)
 
 def test_recupera_una_y_conserva_seis_idempotente(tmp_path):
     raiz = tmp_path / 'raiz'; dataset = raiz / 'operacion/actual/analisis_completo_guias.csv'

@@ -92,6 +92,9 @@ def guardar_viaje_csv(datos):
             escritor.writeheader()
 
         escritor.writerow(fila)
+    # Escritura directa ya cerrada: custodiar su contenido completo (P0.2).
+    from atlas_core.estado_confirmado import punto_de_control_tras_escritura
+    punto_de_control_tras_escritura(ruta_csv)
 
     return ruta_csv
 

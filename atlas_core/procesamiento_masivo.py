@@ -5604,6 +5604,9 @@ def _escribir_filas(ruta_csv: Path, filas: list[dict[str, str]]) -> None:
         if not existe_con_contenido:
             escritor.writeheader()
         escritor.writerows(filas)
+    # Escritura directa ya cerrada: custodiar su contenido completo (P0.2).
+    from atlas_core.estado_confirmado import punto_de_control_tras_escritura
+    punto_de_control_tras_escritura(ruta_csv)
 
 
 def _crear_orquestador_ia_configurado(
@@ -6468,6 +6471,8 @@ def _persistir_observabilidad_b1(ruta_csv: Path, registro: Mapping[str, object])
         with bloqueo_sesion(ruta_csv.parent, "revalidacion_dataset"):
             with destino.open("a", encoding="utf-8") as archivo:
                 archivo.write(json.dumps(linea, ensure_ascii=False, sort_keys=True) + "\n")
+            from atlas_core.estado_confirmado import punto_de_control_tras_escritura
+            punto_de_control_tras_escritura(destino)
     except OSError as exc:
         logger.warning("No se pudo anexar b1_observabilidad.jsonl: %s", exc)
 

@@ -25,6 +25,14 @@ agrega la marca del último estado confirmado:
   confirmar el turno, el puntero se anula en el mismo lote final; si el equipo
   desaparece, el diario sigue íntegro en Cloud y cualquier otro equipo de la
   empresa lo lee (``--diarios``). Ningún turno anula el diario de otro turno.
+- Contenido recuperable (P0.2, diario formato 2): en el patrón temporal +
+  os.replace el audit hook lee el temporal ya completo, lo sube a Cloud y lo
+  anota en el diario ANTES del reemplazo; los borrados también. Una escritura
+  directa (``open("a")``) queda pendiente hasta ``punto_de_control`` tras
+  cerrar el archivo. ``--recuperar-turno`` aplica, desde otro escritor y bajo
+  lease, el turno caído sólo con lo que hay en Cloud: todo o nada, sin pisar
+  versiones posteriores ni perder o duplicar documentos del dataset, y cierra
+  ese diario en el mismo lote que confirma los datos.
 
 `reportes/`, `respaldos/` y `backups/` quedan fuera: cada escritura crea una
 carpeta con marca de tiempo única, nunca reemplaza contenido previo.
@@ -55,7 +63,12 @@ EXCLUIDOS_PRIMER_NIVEL = frozenset({
 PREFIJO_CUSTODIA = ".atlas_custodia/"
 CARPETA_DIARIOS = ".atlas_custodia/diarios"
 TIPO_DIARIO = "ATLAS_DIARIO_RECUPERACION"
-FORMATO_DIARIO = 1
+# Formato 2 (P0.2): además de las rutas, la huella del contenido escrito, ya
+# subido a Cloud antes de hacerse visible en la raíz. El 1 (acbe227) sólo se lee.
+FORMATO_DIARIO = 2
+FORMATOS_LEGIBLES = (1, 2)
+RUTA_DATASET = "operacion/actual/analisis_completo_guias.csv"
+CARPETA_RECUPERACIONES = "operacion/actual/recuperaciones_turno"
 # Línea base de la activación: archivos mutables que la operación reescribe.
 SEMILLA_CARPETAS = ("operacion/actual", "operacion/procesamiento", "catalogos_privados", "fichas_digitales")
 SEMILLA_ENVIOS = "operacion/mobile/envios"
@@ -102,9 +115,11 @@ def interpretar_diario(rel: str, datos: bytes, sha: str) -> dict:
     campos = {"tipo": str, "formato": int, "empresa_id": str, "escritor_id": str, "epoca": int,
               "lease_sha256": str, "version_base": int, "raiz": str, "abierto_en": str,
               "actualizado_en": str, "rutas": list, "huellas_base": dict}
+    if isinstance(diario, dict) and diario.get("formato") == FORMATO_DIARIO:
+        campos.update(contenido=dict, pendientes=list, cierra=list, recuperacion=dict)
     if not isinstance(diario, dict) or any(not isinstance(diario.get(c), t) for c, t in campos.items()):
         raise EstadoNoVerificado(f"diario {rel}: estructura inválida")
-    if diario["tipo"] != TIPO_DIARIO or diario["formato"] != FORMATO_DIARIO:
+    if diario["tipo"] != TIPO_DIARIO or diario["formato"] not in FORMATOS_LEGIBLES:
         raise EstadoNoVerificado(f"diario {rel}: tipo o formato desconocido")
     if ruta_diario(diario["escritor_id"], diario["epoca"]) != rel:
         raise EstadoNoVerificado(f"diario {rel}: no corresponde a su turno")
@@ -112,7 +127,36 @@ def interpretar_diario(rel: str, datos: bytes, sha: str) -> dict:
     if (not all(isinstance(r, str) and rastreable(r) for r in rutas)
             or sorted(set(rutas)) != rutas or set(diario["huellas_base"]) != set(rutas)):
         raise EstadoNoVerificado(f"diario {rel}: rutas inválidas")
+    if diario["formato"] == FORMATO_DIARIO:
+        contenido, pendientes = diario["contenido"], diario["pendientes"]
+        if (set(contenido) | set(pendientes) != set(rutas) or set(contenido) & set(pendientes)
+                or sorted(set(pendientes)) != pendientes
+                or not all(s is None or (isinstance(s, str) and len(s) == 64) for s in contenido.values())
+                or not all(isinstance(c, str) and c.startswith(CARPETA_DIARIOS + "/") and c != rel for c in diario["cierra"])
+                or not all(isinstance(r, str) and rastreable(r) and (s is None or (isinstance(s, str) and len(s) == 64))
+                           for r, s in diario["recuperacion"].items())):
+            raise EstadoNoVerificado(f"diario {rel}: contenido inválido")
     return diario
+
+
+def identidades_dataset(datos: bytes) -> set[str]:
+    """Columna ``archivo`` del dataset: única y completa, o EstadoNoVerificado."""
+    csv.field_size_limit(max(csv.field_size_limit(), 100_000_000))
+    try:
+        lector = csv.DictReader(io.StringIO(datos.decode("utf-8-sig"), newline=""), delimiter=";", strict=True)
+        if not lector.fieldnames or "archivo" not in lector.fieldnames:
+            raise ValueError("falta columna archivo")
+        resultado = set()
+        for fila in lector:
+            if None in fila or any(v is None for v in fila.values()):
+                raise ValueError("fila incompleta")
+            archivo = (fila.get("archivo") or "").strip()
+            if not archivo or archivo in resultado:
+                raise ValueError("identidad ausente o duplicada")
+            resultado.add(archivo)
+        return resultado
+    except (UnicodeError, csv.Error, ValueError) as error:
+        raise EstadoNoVerificado(f"dataset no verificable: {error}") from error
 
 
 def ruta_local() -> Path:
@@ -209,6 +253,8 @@ class ClienteEstado:
 
 
 _activas: list["CustodiaEstado"] = []
+PENDIENTE = "pendiente"
+BORRADO = "borrado"
 _local = threading.local()
 
 
@@ -226,11 +272,16 @@ def _auditar(evento, args):
         if not ((modo and any(c in modo for c in "wax+")) or
                 (flags and flags & (os.O_WRONLY | os.O_RDWR | os.O_CREAT | os.O_TRUNC | os.O_APPEND))):
             return
-        destinos, dir_fd = [ruta], None
+        # Escritura directa: el contenido final aún no existe (pendiente).
+        destinos, dir_fd = [(ruta, PENDIENTE)], None
     elif evento == "os.rename":
-        destinos, dir_fd = list(args[:2]), _dir_fd(args[2]) if _dir_fd(args[2]) is not None else _dir_fd(args[3])
+        # El origen ya tiene el contenido completo: se custodia antes de que
+        # aparezca en el destino (patrón temporal + os.replace del Motor).
+        destinos = [(args[1], ("origen", args[0])), (args[0], BORRADO)]
+        dir_fd = _dir_fd(args[2]) if _dir_fd(args[2]) is not None else _dir_fd(args[3])
     elif evento in {"os.remove", "os.truncate"}:
-        destinos, dir_fd = [args[0]], _dir_fd(args[1]) if len(args) > 1 and evento == "os.remove" else None
+        destinos = [(args[0], BORRADO if evento == "os.remove" else PENDIENTE)]
+        dir_fd = _dir_fd(args[1]) if len(args) > 1 and evento == "os.remove" else None
     elif evento == "os.rmdir":
         destinos, dir_fd = [], _dir_fd(args[1]) if len(args) > 1 else None
         for custodia in tuple(_activas):
@@ -245,9 +296,38 @@ def _auditar(evento, args):
             if dir_fd is not None:
                 custodia.borrado_sin_ruta = True
                 continue
-            for destino in destinos:
-                if destino is not None and not isinstance(destino, int):
-                    custodia.registrar(destino)
+            cambios = [(d, efecto) for d, efecto in destinos if d is not None and not isinstance(d, int)]
+            if cambios:
+                custodia.anotar(cambios)
+    finally:
+        _local.dentro = False
+
+
+def punto_de_control_tras_escritura(ruta) -> bool:
+    """Para escritores directos ya cerrados: nunca lanza (la escritura ya
+    ocurrió; relanzar invitaría a reintentar y duplicar). Si falla, la ruta
+    queda pendiente: el turno confirma igual al cerrar, pero otro equipo no
+    podrá recuperarlo automáticamente si este equipo se pierde antes."""
+    try:
+        punto_de_control(ruta)
+        return True
+    except Exception as error:  # noqa: BLE001
+        log.warning("Contenido de %s no custodiado tras escribir; recuperación remota bloqueada: %s", ruta, error)
+        return False
+
+
+def punto_de_control(ruta) -> None:
+    """Tras CERRAR una escritura directa (``open("a")``/``open("w")`` sobre la
+    ruta final), custodia su contenido ya completo. Sin custodia activa no
+    hace nada. Si falla, la excepción se propaga: el llamador no debe dar la
+    operación por persistida."""
+    if not _activas or getattr(_local, "dentro", False):
+        return
+    _local.dentro = True
+    try:
+        for custodia in tuple(_activas):
+            if custodia.contiene(ruta):
+                custodia.anotar([(ruta, ("origen", ruta))])
     finally:
         _local.dentro = False
 
@@ -272,6 +352,15 @@ class CustodiaEstado:
         self._diario: str | None = None
         self._diario_abierto_en = ""
         self._version_turno = 0
+        # Contenido custodiado de cada ruta escrita en el turno (huella ya en
+        # Cloud, o None si se borró) y rutas cuyo contenido final aún no lo está.
+        self.contenido: dict[str, str | None] = {}
+        self.pendientes: set[str] = set()
+        # Diarios de otros turnos que este turno recupera: se cierran en el
+        # mismo lote final que confirma sus datos.
+        self._cierra: set[str] = set()
+        # Resultado esperado de una recuperación en curso (ruta -> huella).
+        self._recuperacion: dict[str, str | None] = {}
         self._cerrojo = threading.Lock()
 
     # --------------------------------------------------------------- rutas
@@ -322,8 +411,14 @@ class CustodiaEstado:
     # ---------------------------------------------------------- alineación
     def _proteger_dataset_local(self, distintos: dict[str, str | None]) -> None:
         """Fail closed before a Cloud alignment can discard local documents."""
-        rel = "operacion/actual/analisis_completo_guias.csv"
+        rel = RUTA_DATASET
         if rel not in distintos or not distintos[rel]:
+            return
+        if distintos[rel] in self._contenidos_custodiados(rel):
+            # El dataset local es exactamente el que escribió un turno caído
+            # (Drive lo trajo) y su contenido ya está en Cloud, nombrado por
+            # un diario abierto: alinear no pierde nada, la recuperación del
+            # turno lo vuelve a aplicar desde Cloud.
             return
         esperado = self.manifiesto[rel]
         if not esperado:
@@ -331,25 +426,22 @@ class CustodiaEstado:
         remoto = self.cliente.descargar(esperado)
         if hashlib.sha256(remoto).hexdigest() != esperado:
             raise EstadoNoVerificado("dataset Cloud no coincide con su huella")
-        def identidades(datos: bytes) -> set[str]:
-            csv.field_size_limit(max(csv.field_size_limit(), 100_000_000))
-            try:
-                lector = csv.DictReader(io.StringIO(datos.decode("utf-8-sig"), newline=""), delimiter=";", strict=True)
-                if not lector.fieldnames or "archivo" not in lector.fieldnames:
-                    raise ValueError("falta columna archivo")
-                resultado = set()
-                for fila in lector:
-                    if None in fila or any(v is None for v in fila.values()):
-                        raise ValueError("fila incompleta")
-                    archivo = (fila.get("archivo") or "").strip()
-                    if not archivo or archivo in resultado:
-                        raise ValueError("identidad ausente o duplicada")
-                    resultado.add(archivo)
-                return resultado
-            except (UnicodeError, csv.Error, ValueError) as error:
-                raise EstadoNoVerificado(f"dataset no verificable: {error}") from error
-        if identidades(self._abs(rel).read_bytes()) - identidades(remoto):
+        if identidades_dataset(self._abs(rel).read_bytes()) - identidades_dataset(remoto):
             raise EstadoNoVerificado("alineacion eliminaria documentos locales; requiere recuperacion")
+
+    def _contenidos_custodiados(self, rel: str) -> set[str]:
+        """Huellas que los diarios abiertos (formato 2) custodian para ``rel``."""
+        huellas = set()
+        for diario_rel, sha in self.manifiesto.items():
+            if not sha or not diario_rel.startswith(CARPETA_DIARIOS + "/"):
+                continue
+            try:
+                diario = interpretar_diario(diario_rel, self.cliente.descargar(sha), sha)
+            except Exception:  # noqa: BLE001 - un diario ilegible no habilita nada
+                continue
+            if diario["formato"] == FORMATO_DIARIO and diario["contenido"].get(rel):
+                huellas.add(diario["contenido"][rel])
+        return huellas
 
     def _exigir_custodia_propia(self) -> None:
         """Antes de restaurar nada: un token ajeno volcaría datos de otra empresa."""
@@ -432,8 +524,18 @@ class CustodiaEstado:
             # Turno anterior de este mismo equipo caído antes de confirmar y
             # nadie confirmó después: esas escrituras son el estado más nuevo.
             # Su diario remoto se anula en el mismo lote que las confirma.
-            diario = pendiente.get("diario")
-            extra = [[diario, None]] if isinstance(diario, str) and self.manifiesto.get(diario) else []
+            # Si ese turno recuperaba diarios ajenos, se cierran sólo si la
+            # recuperación quedó completa en la raíz; si no, sus rutas no se
+            # confirman y el diario ajeno sigue abierto (se recupera de nuevo).
+            diarios = [pendiente.get("diario")]
+            recuperacion = pendiente.get("recuperacion") if isinstance(pendiente.get("recuperacion"), dict) else {}
+            locales_rec = self._huellas_locales([r for r in recuperacion if rastreable(r)])
+            if all(locales_rec.get(r) == s for r, s in recuperacion.items()):
+                diarios += list(pendiente.get("cierra") or [])
+            else:
+                rutas = [r for r in rutas if r not in recuperacion]
+            extra = [[d, None] for d in sorted({d for d in diarios if isinstance(d, str) and es_ruta_custodia(d)})
+                     if self.manifiesto.get(d)]
             resumen["pendiente_confirmado"] = len(self._confirmar_rutas(lease, rutas, extra=extra))
         # Con la marca ya superada, la alineación pone esos archivos en
         # cuarentena (contenido nunca confirmado) y restaura la versión vigente.
@@ -447,6 +549,10 @@ class CustodiaEstado:
         self._diario = None
         self._diario_abierto_en = ""
         self._version_turno = self.version
+        self.contenido = {}
+        self.pendientes = set()
+        self._cierra = set()
+        self._recuperacion = {}
         _activas.append(self)
 
     def detener(self) -> None:
@@ -455,29 +561,71 @@ class CustodiaEstado:
         self._lease = None
 
     def registrar(self, ruta) -> None:
-        rel = self._rel(ruta)
-        if rel is None or rel in self.modificadas or not rastreable(rel):
+        """Compatibilidad: una escritura de contenido aún desconocido."""
+        self.anotar([(ruta, PENDIENTE)])
+
+    def anotar(self, cambios) -> None:
+        """Registra en el diario remoto, ANTES de que ocurra, cada cambio de
+        ruta rastreable: ``PENDIENTE`` (escritura directa, contenido final aún
+        desconocido), ``BORRADO`` o ``("origen", ruta)``: el archivo cuyo
+        contenido completo pasará a la ruta (temporal + os.replace, o el mismo
+        archivo en un punto de control). Ese contenido se sube a Cloud antes
+        del diario que lo nombra. Si algo falla, la excepción sale del audit
+        hook y la escritura no ocurre."""
+        entradas = []
+        for ruta, efecto in cambios:
+            rel = self._rel(ruta)
+            if rel is not None and rastreable(rel):
+                entradas.append((rel, efecto))
+        if not entradas:
             return
         with self._cerrojo:
-            if rel in self.modificadas:
+            contenido, pendientes, objetos = dict(self.contenido), set(self.pendientes), {}
+            for rel, efecto in entradas:
+                if efecto == BORRADO:
+                    contenido[rel] = None
+                    pendientes.discard(rel)
+                    continue
+                datos = None
+                if efecto != PENDIENTE:
+                    origen = Path(os.fsdecode(efecto[1]))
+                    try:
+                        datos = origen.read_bytes() if origen.is_file() else None
+                    except OSError:
+                        datos = None
+                    if datos is None and origen.is_dir():
+                        self.borrado_sin_ruta = True
+                if datos is None:
+                    contenido.pop(rel, None)
+                    pendientes.add(rel)
+                else:
+                    huella = hashlib.sha256(datos).hexdigest()
+                    objetos[huella] = datos
+                    contenido[rel] = huella
+                    pendientes.discard(rel)
+            rutas = self.modificadas | {rel for rel, _efecto in entradas}
+            if (rutas == self.modificadas and contenido == self.contenido and pendientes == self.pendientes
+                    and self._diario):
                 return
             lease = self._lease
-            rutas = self.modificadas | {rel}
-            # Diario remoto antes de que la escritura ocurra: si falla, la
-            # excepción sale del audit hook y aborta la escritura. Ningún dato
-            # operacional cambia sin que su turno quede registrado fuera de
-            # este equipo.
-            self._publicar_diario(lease, rutas)
-            self.modificadas = rutas
-            # Diario local: si el equipo se apaga a mitad, el próximo turno
-            # de este mismo equipo sabe qué confirmar o aislar.
-            _escribir_json(self._ruta_pendiente, {
-                "escritor_id": getattr(lease, "escritor_id", ""), "version_base": self.version,
-                "raiz": str(self.raiz), "rutas": sorted(self.modificadas), "diario": self._diario,
-            })
+            self._publicar_diario(lease, rutas, contenido, pendientes, objetos)
+            self.modificadas, self.contenido, self.pendientes = rutas, contenido, pendientes
+            self._guardar_pendiente_local(lease)
 
-    def _publicar_diario(self, lease, rutas: set[str]) -> None:
+    def _guardar_pendiente_local(self, lease) -> None:
+        # Diario local: si el equipo se apaga a mitad, el próximo turno de
+        # este mismo equipo sabe qué confirmar o aislar.
+        _escribir_json(self._ruta_pendiente, {
+            "escritor_id": getattr(lease, "escritor_id", ""), "version_base": self.version,
+            "raiz": str(self.raiz), "rutas": sorted(self.modificadas), "diario": self._diario,
+            "cierra": sorted(self._cierra), "recuperacion": self._recuperacion,
+        })
+
+    def _publicar_diario(self, lease, rutas: set[str], contenido: dict | None = None,
+                         pendientes: set[str] | None = None, objetos: dict | None = None) -> None:
         from atlas_core.aislamiento_empresas import empresa_de_raiz
+        contenido = self.contenido if contenido is None else contenido
+        pendientes = self.pendientes if pendientes is None else pendientes
         try:
             ahora = datetime.now(timezone.utc).isoformat(timespec="microseconds")
             self._diario_abierto_en = self._diario_abierto_en or ahora
@@ -492,11 +640,19 @@ class CustodiaEstado:
                 "version_base": self._version_turno, "raiz": str(self.raiz),
                 "abierto_en": self._diario_abierto_en, "actualizado_en": ahora,
                 "rutas": ordenadas, "huellas_base": {r: base.get(r) for r in ordenadas},
+                "contenido": {r: contenido[r] for r in ordenadas if r in contenido},
+                "pendientes": sorted(pendientes), "cierra": sorted(self._cierra),
+                "recuperacion": dict(sorted(self._recuperacion.items())),
             }
             rel = ruta_diario(lease.escritor_id, epoca)
             datos = serializar_diario(diario)
             sha = hashlib.sha256(datos).hexdigest()
-            self.cliente.subir(sha, datos, lease.lease_token)
+            # Primero el contenido y después el diario: un diario nunca nombra
+            # lo que Cloud no tiene. Sólo se sube lo que falta (una consulta).
+            subir = {**(objetos or {}), sha: datos}
+            ausentes = set(self.cliente.faltantes(sorted(subir)))
+            for huella in sorted(ausentes - {sha}) + sorted(ausentes & {sha}):
+                self.cliente.subir(huella, subir[huella], lease.lease_token)
             # Igual que una confirmación de datos: exige lease vigente y la
             # versión que este turno conoce. Sin éxito no hay escritura.
             self.version = self.cliente.confirmar(lease.lease_token, self.version, [[rel, sha]])
@@ -513,13 +669,144 @@ class CustodiaEstado:
             rutas |= {rel for rel, sha in operacionales(self.manifiesto).items() if sha is not None and not self._abs(rel).exists()}
         # El puntero al diario del turno se anula en el mismo lote final: los
         # datos y el cierre del diario quedan confirmados juntos o no quedan.
-        diario = self._diario
-        extra = [[diario, None]] if diario and self.manifiesto.get(diario) else []
+        cerrar = sorted({d for d in [self._diario, *self._cierra] if d and self.manifiesto.get(d)})
+        extra = [[d, None] for d in cerrar]
         confirmadas = self._confirmar_rutas(lease, sorted(rutas), extra=extra) if rutas or extra else []
         self._diario = None
+        self._cierra, self._recuperacion = set(), {}
         self._ruta_pendiente.unlink(missing_ok=True)
         self.modificadas = set()
+        self.contenido, self.pendientes = {}, set()
         return {"version": self.version, "confirmados": len(confirmadas)}
+
+    # ------------------------------------------------- recuperación (P0.2)
+    def recuperar_turno(self, lease, diario_rel: str, *, aplicar: bool = False) -> dict:
+        """Recupera, desde este equipo, un turno de otro escritor que nunca
+        confirmó, usando sólo lo que está en Cloud: su diario y el contenido
+        custodiado de cada ruta. Sin ``aplicar`` sólo informa.
+
+        Todo o nada. Se bloquea si: el diario no trae contenido (formato 1) o
+        tiene rutas sin contenido custodiado; alguna ruta cambió en Cloud
+        después de la base del turno (no se pisa una versión posterior); la
+        copia local no coincide con Cloud; el dataset resultante perdería o
+        duplicaría documentos. Al aplicar, los datos y el cierre del diario
+        se confirman en el mismo lote final: un segundo intento ve el diario
+        cerrado y no aplica nada (sin duplicados)."""
+        from atlas_core.aislamiento_empresas import empresa_de_raiz
+        if self not in _activas or self._lease is not lease or not getattr(lease, "vigente", False):
+            raise EstadoNoVerificado("recuperar un turno exige lease vigente y custodia alineada")
+        datos_marca = self.cliente.manifiesto()
+        if int(datos_marca.get("version", -1)) != self.version:
+            raise EstadoNoVerificado("la marca Cloud cambió desde la alineación; no se recupera")
+        remoto = {r: s for r, s, _v in datos_marca.get("archivos", [])}
+        resultado: dict = {"diario": diario_rel, "version": self.version}
+        if not diario_rel.startswith(CARPETA_DIARIOS + "/") or diario_rel not in remoto:
+            return {**resultado, "estado": "DIARIO_INEXISTENTE"}
+        sha_diario = remoto[diario_rel]
+        if not sha_diario:
+            return {**resultado, "estado": "YA_CERRADO"}
+        if diario_rel == self._diario:
+            return {**resultado, "estado": "TURNO_PROPIO"}
+        diario = interpretar_diario(diario_rel, self.cliente.descargar(sha_diario), sha_diario)
+        if diario["empresa_id"] != empresa_de_raiz(self.raiz):
+            raise EstadoNoVerificado(f"diario {diario_rel} pertenece a otra empresa: {diario['empresa_id']}")
+        resultado.update(escritor_id=diario["escritor_id"], epoca=diario["epoca"], version_base=diario["version_base"],
+                         sha256_diario=sha_diario)
+        if diario["formato"] != FORMATO_DIARIO:
+            return {**resultado, "estado": "BLOQUEADO", "bloqueos": [{"codigo": "DIARIO_SIN_CONTENIDO", "formato": diario["formato"]}]}
+        bloqueos: list[dict] = []
+        if diario["version_base"] > self.version:
+            bloqueos.append({"codigo": "VERSION_INCOMPATIBLE", "version_base": diario["version_base"]})
+        if diario["pendientes"]:
+            bloqueos.append({"codigo": "CONTENIDO_NO_CUSTODIADO", "rutas": diario["pendientes"]})
+        contenido, base = diario["contenido"], diario["huellas_base"]
+        actuales = operacionales(remoto)
+        interrumpida = sorted(r for r, s in diario["recuperacion"].items()
+                              if contenido.get(r, "ausente") != s and actuales.get(r) != s)
+        if interrumpida:
+            # Ese turno recuperaba a otro y se cortó a mitad: primero se
+            # recuperan los diarios que nombra en "cierra".
+            bloqueos.append({"codigo": "RECUPERACION_INTERRUMPIDA", "rutas": interrumpida, "diarios": diario["cierra"]})
+        rutas, aplicar_rutas, posteriores = [], [], []
+        for rel in diario["rutas"]:
+            actual = actuales.get(rel)
+            if rel in contenido and actual == contenido[rel]:
+                accion = "YA_APLICADO"
+            elif actual == base[rel]:
+                accion = "APLICAR"
+                aplicar_rutas.append(rel)
+            else:
+                accion = "VERSION_POSTERIOR"
+                posteriores.append(rel)
+            rutas.append({"ruta": rel, "base": base[rel], "actual": actual, "recuperado": contenido.get(rel), "accion": accion})
+        resultado["rutas"] = rutas
+        if posteriores:
+            bloqueos.append({"codigo": "VERSION_POSTERIOR", "rutas": posteriores})
+        distintas = [r for r, s in self._huellas_locales(aplicar_rutas).items() if s != actuales.get(r)]
+        if distintas:
+            bloqueos.append({"codigo": "COPIA_LOCAL_DISTINTA", "rutas": distintas})
+        if bloqueos:
+            return {**resultado, "estado": "BLOQUEADO", "bloqueos": bloqueos}
+        recuperados: dict[str, bytes] = {}
+        for rel in aplicar_rutas:
+            if contenido[rel]:
+                datos = self.cliente.descargar(contenido[rel])
+                if hashlib.sha256(datos).hexdigest() != contenido[rel]:
+                    raise EstadoNoVerificado(f"contenido Cloud de {rel} no coincide con su huella")
+                recuperados[rel] = datos
+        if RUTA_DATASET in aplicar_rutas:
+            previo = identidades_dataset(self.cliente.descargar(actuales[RUTA_DATASET])) if actuales.get(RUTA_DATASET) else set()
+            nuevo = identidades_dataset(recuperados[RUTA_DATASET]) if RUTA_DATASET in recuperados else set()
+            if previo - nuevo:
+                return {**resultado, "estado": "BLOQUEADO",
+                        "bloqueos": [{"codigo": "PERDERIA_DOCUMENTOS", "documentos": sorted(previo - nuevo)[:20]}]}
+            resultado["documentos_recuperados"] = sorted(nuevo - previo)
+        if not aplicar:
+            return {**resultado, "estado": "RECUPERABLE"}
+
+        # Cierre del diario ajeno (y de los que ése recuperaba) junto con los
+        # datos, y el resultado completo esperado: ambos quedan en el diario
+        # propio antes de la primera escritura. Un corte a mitad nunca cierra
+        # el diario ajeno con una recuperación parcial.
+        self._cierra |= {diario_rel, *(d for d in diario["cierra"] if remoto.get(d))}
+        self._recuperacion = {rel: contenido[rel] for rel in aplicar_rutas}
+        escritas = []
+        try:
+            for rel in aplicar_rutas:
+                escritas.append(rel)
+                self._escribir_desde_nube(rel, recuperados.get(rel))
+        except BaseException:
+            # Deshacer: la raíz vuelve a la base confirmada y el turno no
+            # cierra el diario ajeno.
+            self._cierra, self._recuperacion = set(), {}
+            for rel in escritas:
+                previo = actuales.get(rel)
+                self._escribir_desde_nube(rel, self.cliente.descargar(previo) if previo else None)
+            raise
+        registro = {"diario": diario_rel, "sha256_diario": sha_diario, "escritor_id": diario["escritor_id"],
+                    "epoca": diario["epoca"], "version_base": diario["version_base"], "version_recuperacion": self.version,
+                    "recuperado_por": lease.escritor_id, "epoca_recuperacion": int(getattr(lease, "epoca", 0) or 0),
+                    "recuperado_en": datetime.now(timezone.utc).isoformat(timespec="seconds"), "rutas": rutas}
+        auditoria = self._abs(f"{CARPETA_RECUPERACIONES}/{diario['escritor_id']}__{diario['epoca']}.json")
+        auditoria.parent.mkdir(parents=True, exist_ok=True)
+        temporal = auditoria.with_name(f".{auditoria.name}.{os.getpid()}.tmp")
+        temporal.write_text(json.dumps(registro, ensure_ascii=False, indent=2), encoding="utf-8")
+        os.replace(temporal, auditoria)
+        self.confirmar(lease)
+        despues = {r: s for r, s, _v in self.cliente.manifiesto().get("archivos", [])}
+        if despues.get(diario_rel) is not None or any(despues.get(r) != contenido[r] for r in aplicar_rutas):
+            raise EstadoNoVerificado("la recuperación no quedó confirmada en Cloud")
+        return {**resultado, "estado": "RECUPERADO", "version_final": self.version}
+
+    def _escribir_desde_nube(self, rel: str, datos: bytes | None) -> None:
+        destino = self._abs(rel)
+        if datos is None:
+            destino.unlink(missing_ok=True)
+            return
+        destino.parent.mkdir(parents=True, exist_ok=True)
+        temporal = destino.with_name(f".{destino.name}.recuperar.{os.getpid()}.tmp")
+        temporal.write_bytes(datos)
+        os.replace(temporal, destino)
 
     def _confirmar_rutas(self, lease, rutas, *, extra: list[list] | None = None) -> list[list]:
         rutas = [r for r in rutas if rastreable(r)]
@@ -623,7 +910,12 @@ def main(argv=None) -> int:
     accion.add_argument("--sembrar", action="store_true", help="Activación: publica la línea base bajo lease (sólo el equipo con el estado vigente)")
     accion.add_argument("--verificar", action="store_true", help="Sólo lectura: compara la copia local con la marca vigente")
     accion.add_argument("--diarios", action="store_true", help="Sólo lectura: diarios de recuperación abiertos en Cloud, verificados")
+    accion.add_argument("--recuperar-turno", metavar="DIARIO",
+                        help="Bajo lease: recupera el turno caído de otro escritor desde Cloud (vista previa salvo --aplicar)")
+    parser.add_argument("--aplicar", action="store_true", help="Con --recuperar-turno: aplica y confirma la recuperación")
     args = parser.parse_args(argv)
+    if args.aplicar and not args.recuperar_turno:
+        parser.error("--aplicar sólo acompaña a --recuperar-turno")
     lease = lease_desde_entorno(raiz=args.raiz_atlas)
     if lease is None:
         parser.error("Falta ATLAS_CLOUD_MOTOR_TOKEN")
@@ -635,6 +927,14 @@ def main(argv=None) -> int:
         cliente = lease.custodia.cliente
         print(json.dumps(leer_diarios_remotos(cliente, empresa_id=empresa_de_raiz(args.raiz_atlas)), ensure_ascii=False))
         return 0
+    if args.recuperar_turno:
+        with lease:
+            if not lease.adquirir():
+                print(json.dumps({"estado": "SIN_LEASE", "motivo": lease.motivo or "ESCRITOR_OCUPADO"}))
+                return 1
+            resultado = lease.custodia.recuperar_turno(lease, args.recuperar_turno, aplicar=args.aplicar)
+        print(json.dumps(resultado, ensure_ascii=False))
+        return 0 if resultado["estado"] in {"RECUPERABLE", "RECUPERADO", "YA_CERRADO"} else 3
     with lease:
         if not lease.adquirir():
             print(json.dumps({"sembrado": False, "motivo": lease.motivo or "ESCRITOR_OCUPADO"}))

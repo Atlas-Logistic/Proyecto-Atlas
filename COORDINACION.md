@@ -65,3 +65,40 @@ Rama feat/diario-recuperacion-remoto-20261127 sobre 48d6096 (Claude Code, encarg
 - No incluido (siguiente etapa): adoptar o resolver desde otro equipo el turno perdido, avisar en Desktop, y el contrato v2.
 
 Pruebas: tests/test_diario_recuperacion_remoto.py, 8 pruebas nuevas. Suite de custodia: 275 de 276; la falla test_lease_multiequipo::test_manual_y_pull_nunca_escriben_a_la_vez ya existía en 48d6096. Validación aislada scripts/validacion_diario_remoto/validar.py: Worker b28d594 real sobre D1/R2 en memoria, equipo A muerto con taskkill y borrado por completo, equipo B lee el diario íntegro y trabaja. Resultado 18/18. NO instalado. No se tocaron CASA, PULL, Drive ni Cloud productiva.
+
+
+## P0.2: recuperación de turnos desde otro escritor (27/11/2026)
+
+Rama feat/recuperacion-turno-remoto-20261127 sobre acbe227 (Claude Code, encargo Javier). Worker sin cambios (b28d594).
+
+- Diario formato 2. Además de las rutas, guarda el contenido custodiado de cada una: la huella, ya subida a R2 ANTES de que el archivo cambie en la raíz.
+  - En el patrón temporal + os.replace, el audit hook lee el temporal completo antes del reemplazo. Los borrados también se anotan.
+  - Las escrituras directas quedan pendientes hasta `estado_confirmado.punto_de_control(ruta)`, tras cerrar el archivo. Se agregó el punto de control en procesamiento_masivo._escribir_filas (ingesta), en b1_observabilidad.jsonl y en storage.py. Si el punto de control falla, solo se registra la advertencia: la fila ya está escrita y relanzar invitaría a duplicarla.
+  - Solo se sube lo que falta: una consulta `faltantes` por anotación.
+- Recuperación: `python -m atlas_core.estado_confirmado --raiz-atlas X --recuperar-turno <diario> [--aplicar]`. Exige lease vigente y custodia alineada. Sin `--aplicar` es una vista previa. Funciona todo o nada y se bloquea (código 3, nada escrito) ante:
+  - DIARIO_SIN_CONTENIDO: diario formato 1.
+  - CONTENIDO_NO_CUSTODIADO: rutas pendientes.
+  - VERSION_POSTERIOR: una ruta cambió en Cloud después de la base; nunca se pisa.
+  - COPIA_LOCAL_DISTINTA.
+  - VERSION_INCOMPATIBLE.
+  - PERDERIA_DOCUMENTOS: el dataset resultante pierde identidades.
+  - RECUPERACION_INTERRUMPIDA.
+  - Además, un dataset con identidades duplicadas o un contenido cuya huella no coincide hacen fallar la recuperación sin escribir.
+- Al aplicar: el diario ajeno se cierra en el mismo lote final que confirma los datos, y queda un registro en operacion/actual/recuperaciones_turno/<escritor>__<epoca>.json. Un segundo intento da YA_CERRADO sin cambios.
+- Cortes durante la recuperación:
+  - Falla en proceso: se deshace lo escrito y no se cierra el diario ajeno.
+  - Muerte del recuperador: su diario declara antes la recuperación esperada. Ni él al volver (pendiente.json) ni otro equipo cierran el diario ajeno con una recuperación parcial.
+- Alineación: un dataset local que coincide con el contenido custodiado de un diario abierto ya no bloquea (caso de Drive que trajo el trabajo del equipo caído, incidente del 26/11). Se pone en cuarentena, se restaura y luego se recupera desde Cloud.
+- acciones_operacionales: si se pierde el escritor global y la auditoría de la falla no puede persistirse (la custodia bloquea escribir sin lease), la acción devuelve igual FALLIDA con el código real y `auditoria_persistida: false`. Esto corrige la regresión de acbe227 en test_escritor_global_cierre (4 pruebas).
+- Costo: cada reescritura atómica de una ruta suma una versión y su objeto en R2, que crecen sin compactación. Conviene medirlo antes de instalar.
+
+Pruebas:
+- tests/test_recuperacion_turno_remoto.py: 14 pruebas nuevas.
+- Suite completa del Motor (sin los disparadores de pip): 46 fallas en la rama contra 46 en 48d6096. La diferencia era test_accion_con_lease_perdido, hoy corregida. test_falso_ok_obra_destino_p1 es intermitente.
+- Validación aislada scripts/validacion_diario_remoto/validar.py: 23/23, con el Worker b28d594 real sobre D1/R2 en memoria.
+  - A ingesta con el escritor real, muere con taskkill y se borra por completo.
+  - C, que tenía el dataset parcial de A, recupera exactamente lo que A escribió.
+  - El reintento no cambia nada y B ve la guía una sola vez.
+  - Con una versión posterior, la recuperación se bloquea sin tocar Cloud.
+
+NO instalado. No se tocaron CASA, PULL, Drive ni Cloud productiva.

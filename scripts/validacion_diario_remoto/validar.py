@@ -1,22 +1,28 @@
-"""Validación aislada P0.1: el diario de recuperación sobrevive a la pérdida
-definitiva del equipo que inició el turno. SOLO PRUEBA.
+"""Validación aislada P0.1 + P0.2: el turno de un equipo eliminado por
+completo se recupera desde otro equipo usando sólo Cloud. SOLO PRUEBA.
 
 Worker real (src/worker.js del commit desplegado) sobre D1/R2 en memoria
 (test/servidor_local.js, envuelto por test/servidor_reloj.mjs para desplazar
-el reloj). Dos equipos = dos procesos con LOCALAPPDATA y raíz propios.
+el reloj). Cada equipo = un proceso con LOCALAPPDATA y raíz propios.
 
   python scripts/validacion_diario_remoto/validar.py <cloud_dir> <salida_dir>
 
-1. A siembra la custodia (CLI real --sembrar); B recibe esa copia por "Drive".
-2. A abre turno, escribe dataset y envío, y muere (taskkill /F): sin confirmar.
-3. Se borra todo A (raíz y LOCALAPPDATA): pérdida definitiva.
-4. B lee el diario (CLI real --diarios): íntegro, mismo contenido, vigente.
-5. B verifica (--verificar), espera vencimientos y trabaja un turno normal:
-   el diario de A sigue intacto en Cloud, no se restaura a la raíz de B.
+1. A siembra la custodia; B y C reciben esa copia por "Drive".
+2. A ingesta una guía con el escritor real (append directo + punto de
+   control) y un envío, y muere (taskkill /F) sin confirmar. Drive alcanzó a
+   llevar su dataset a C. Se borra todo A.
+3. B lee el diario (--diarios): íntegro, ligado a empresa/versión/turno.
+4. C recupera el turno (--recuperar-turno, previa y --aplicar): queda en
+   Cloud exactamente lo que A escribió; un segundo intento no duplica.
+5. B alinea y ve la guía una sola vez.
+6. E escribe y muere; B confirma después otra guía: recuperar E se bloquea
+   (VERSION_POSTERIOR) sin tocar Cloud.
 """
 from __future__ import annotations
 
+import csv
 import hashlib
+import io
 import json
 import os
 import shutil
@@ -32,9 +38,11 @@ SALIDA = Path(sys.argv[2]).resolve()
 MUNDO = SALIDA / "mundo"
 TOKEN = "token-motor-prueba-diario-remoto"
 EMPRESA_CLOUD = "empresa-prueba-diario"
+DATASET = "operacion/actual/analisis_completo_guias.csv"
 OPENSSL = next((p for p in (shutil.which("openssl"), r"C:\Program Files\Git\usr\bin\openssl.exe",
                              r"C:\Program Files\Git\ucrt64\bin\openssl.exe") if p and Path(p).is_file()), None)
 CHECKS: list[dict] = []
+sys.path.insert(0, str(MOTOR))
 
 
 def registrar(nombre: str, ok: bool, detalle=None) -> None:
@@ -73,6 +81,23 @@ class Worker:
         with urllib.request.urlopen(f"{self.url}/__prueba/tabla/{nombre}", timeout=30, context=self.ssl) as r:
             return json.loads(r.read())
 
+    def vigentes(self) -> dict:
+        salida: dict = {}
+        for f in self.tabla("estado_operativo_archivos"):
+            if f["ruta"] not in salida or f["version"] > salida[f["ruta"]][1]:
+                salida[f["ruta"]] = (f["sha256"], f["version"])
+        return {r: s for r, (s, _v) in salida.items()}
+
+    def version(self) -> int:
+        return self.tabla("estado_operativo_marca")[0]["version"]
+
+    def faltantes(self, huellas: list[str]) -> list[str]:
+        req = urllib.request.Request(f"{self.url}/api/motor/estado/faltantes", method="POST",
+                                     data=json.dumps({"sha256": huellas}).encode(),
+                                     headers={"authorization": f"Bearer {TOKEN}", "content-type": "application/json"})
+        with urllib.request.urlopen(req, timeout=30, context=self.ssl) as r:
+            return json.loads(r.read())["faltantes"]
+
     def cerrar(self) -> None:
         self.p.kill()
 
@@ -93,11 +118,41 @@ def cli(env: dict, *args: str) -> tuple[int, dict | None, str]:
         return r.returncode, None, r.stdout + r.stderr
 
 
+def equipo(env: dict, *args: str, esperar: bool = True):
+    comando = [sys.executable, str(Path(__file__).with_name("equipo.py")), *args]
+    if not esperar:
+        return subprocess.Popen(comando, cwd=MOTOR, env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                                text=True, encoding="utf-8")
+    r = subprocess.run(comando, cwd=MOTOR, env=env, capture_output=True, text=True, encoding="utf-8", timeout=600)
+    linea = (r.stdout.strip().splitlines() or [""])[-1]
+    return (json.loads(linea.split(" ", 1)[1]) if linea.startswith("TURNO ") else None), (linea or r.stderr[-1500:])
+
+
+def matar(proceso) -> None:
+    subprocess.run(["taskkill", "/F", "/T", "/PID", str(proceso.pid)], capture_output=True)
+    proceso.wait(timeout=30)
+
+
+def sha_archivo(ruta: Path) -> str | None:
+    return hashlib.sha256(ruta.read_bytes()).hexdigest() if ruta.is_file() else None
+
+
+def guias(ruta: Path) -> list[str]:
+    lector = csv.DictReader(io.StringIO(ruta.read_text(encoding="utf-8-sig"), newline=""), delimiter=";")
+    return [f["numero_guia"] for f in lector]
+
+
 def raiz_inicial(raiz: Path) -> None:
+    from atlas_core.procesamiento_masivo import COLUMNAS
     (raiz / "operacion" / "actual").mkdir(parents=True)
     (raiz / "catalogos_privados").mkdir(parents=True)
-    (raiz / "operacion" / "actual" / "analisis_completo_guias.csv").write_text(
-        "archivo;numero_guia;estado_procesamiento\nlocal/g1.jpg;100001;OK\nlocal/g2.jpg;100002;OK\n", encoding="utf-8")
+    with (raiz / "operacion" / "actual" / "analisis_completo_guias.csv").open("w", encoding="utf-8-sig", newline="") as f:
+        escritor = csv.DictWriter(f, fieldnames=COLUMNAS, delimiter=";")
+        escritor.writeheader()
+        for g in ("100001", "100002"):
+            fila = dict.fromkeys(COLUMNAS, "")
+            fila.update(archivo=f"local/g{g}.jpg", numero_guia=g, estado_procesamiento="OK")
+            escritor.writerow(fila)
     (raiz / "catalogos_privados" / "vehiculos.json").write_text(json.dumps({"vehiculos": ["AAAA11"]}), encoding="utf-8")
 
 
@@ -108,86 +163,107 @@ def main() -> int:
     worker = Worker()
     try:
         assert worker.url.startswith("https://127.0.0.1:")
-        a_dir, b_dir = MUNDO / "equipo-a", MUNDO / "equipo-b"
-        raiz_a, raiz_b = a_dir / "Atlas", b_dir / "Atlas"
-        env_a, env_b = entorno(worker, a_dir / "local"), entorno(worker, b_dir / "local")
-        raiz_inicial(raiz_a)
+        dirs = {n: MUNDO / f"equipo-{n}" for n in "abce"}
+        raiz = {n: d / "Atlas" for n, d in dirs.items()}
+        env = {n: entorno(worker, d / "local") for n, d in dirs.items()}
+        raiz_inicial(raiz["a"])
 
-        # 1. Siembra en A y copia "Drive" en B.
-        codigo, sembrado, err = cli(env_a, "--raiz-atlas", str(raiz_a), "--sembrar")
+        # 1. Siembra en A; B y C reciben la copia por "Drive".
+        codigo, sembrado, err = cli(env["a"], "--raiz-atlas", str(raiz["a"]), "--sembrar")
         registrar("A siembra la custodia (CLI real)", codigo == 0 and sembrado and sembrado.get("sembrado"), sembrado or err[-800:])
-        shutil.copytree(raiz_a, raiz_b)
-        version_sembrada = worker.tabla("estado_operativo_marca")[0]["version"]
+        for n in "bc":
+            shutil.copytree(raiz["a"], raiz[n])
+        version_sembrada = worker.version()
+        base_dataset = worker.vigentes()[DATASET]
 
-        # 2. A trabaja y muere sin confirmar.
-        proceso = subprocess.Popen([sys.executable, str(Path(__file__).with_name("equipo.py")), "trabajar", str(raiz_a)],
-                                   cwd=MOTOR, env=env_a, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, encoding="utf-8")
+        # 2. A ingesta y muere sin confirmar; Drive alcanzó a llevar el dataset a C.
+        proceso = equipo(env["a"], "trabajar", str(raiz["a"]), "900001", esperar=False)
         linea = proceso.stdout.readline().strip()
-        registrar("A escribe datos operacionales bajo lease", linea.startswith("ESCRITO "), linea or proceso.stderr.read()[-1500:])
+        registrar("A ingesta una guía con el escritor real bajo lease", linea.startswith("ESCRITO "), linea or proceso.stderr.read()[-1500:])
         if not linea.startswith("ESCRITO "):
             return 1
-        a = json.loads(linea[len("ESCRITO "):])
-        subprocess.run(["taskkill", "/F", "/T", "/PID", str(proceso.pid)], capture_output=True)
-        proceso.wait(timeout=30)
+        a = json.loads(linea.split(" ", 1)[1])
+        envio_a = "operacion/mobile/envios/env-900001/envio.json"
+        dataset_a = sha_archivo(raiz["a"] / DATASET)
+        envio_sha = sha_archivo(raiz["a"].joinpath(*envio_a.split("/")))
+        registrar("el contenido escrito por A quedó custodiado antes de morir (sin pendientes)",
+                  a["pendientes"] == [] and a["contenido"].get(DATASET) == dataset_a and a["contenido"].get(envio_a) == envio_sha,
+                  {"pendientes": a["pendientes"], "contenido": a["contenido"]})
+        registrar("R2 tiene el contenido de A", worker.faltantes([dataset_a, envio_sha]) == [])
+        shutil.copy2(raiz["a"] / DATASET, raiz["c"] / DATASET)
+        matar(proceso)
         registrar("A muere sin confirmar ni liberar (taskkill /F)", proceso.returncode != 0, proceso.returncode)
-        marca = worker.tabla("estado_operativo_marca")[0]
-        registrar("la marca Cloud sólo avanzó por el diario (ningún dato confirmado)",
-                  marca["version"] == a["version"] and a["version_base"] == version_sembrada,
-                  {"marca": marca["version"], "base": a["version_base"]})
+        registrar("ningún dato de A confirmado en la marca", worker.vigentes()[DATASET] == base_dataset)
+        shutil.rmtree(dirs["a"])
+        registrar("equipo A eliminado (raíz y LOCALAPPDATA)", not dirs["a"].exists())
 
-        # 3. Pérdida definitiva de A.
-        shutil.rmtree(a_dir)
-        registrar("equipo A eliminado (raíz y LOCALAPPDATA)", not a_dir.exists())
-
-        # 4. B lee el diario desde Cloud.
-        codigo, leidos, err = cli(env_b, "--raiz-atlas", str(raiz_b), "--diarios")
+        # 3. B lee el diario desde Cloud.
+        codigo, leidos, err = cli(env["b"], "--raiz-atlas", str(raiz["b"]), "--diarios")
         diarios = (leidos or {}).get("diarios", [])
         registrar("B lee exactamente un diario abierto (CLI real --diarios)", codigo == 0 and len(diarios) == 1, leidos or err[-800:])
         if len(diarios) != 1:
             return 1
-        d = diarios[0]
-        contenido = d["diario"]
-        bytes_canonicos = json.dumps(contenido, ensure_ascii=True, sort_keys=True, separators=(",", ":")).encode("ascii")
-        registrar("diario íntegro: misma huella que publicó A y contenido que la reproduce",
-                  d["sha256"] == a["sha256"] and hashlib.sha256(bytes_canonicos).hexdigest() == a["sha256"], d["sha256"])
-        registrar("diario ligado al turno de A (escritor, época, ruta)",
-                  contenido["escritor_id"] == a["escritor_id"] and contenido["epoca"] == a["epoca"] and d["ruta"] == a["diario"],
-                  {k: contenido[k] for k in ("escritor_id", "epoca")})
-        registrar("diario ligado a la empresa y a la versión base", contenido["empresa_id"] == "mbt"
-                  and contenido["version_base"] == version_sembrada, {k: contenido[k] for k in ("empresa_id", "version_base")})
-        registrar("diario lista las rutas escritas y sus huellas base", contenido["rutas"] == a["rutas"] and
-                  contenido["huellas_base"]["operacion/mobile/envios/env-perdido/envio.json"] is None and
-                  contenido["huellas_base"]["operacion/actual/analisis_completo_guias.csv"] is not None, contenido["rutas"])
-        registrar("diario vigente: nadie confirmó después", d["vigente"] is True)
-        objetos = worker.tabla("estado_operativo_archivos")
-        filas = [f for f in objetos if f["ruta"] == a["diario"]]
-        registrar("D1 guarda el puntero del diario para la empresa Cloud",
-                  filas and all(f["empresa_id"] == EMPRESA_CLOUD for f in filas) and filas[-1]["sha256"] == a["sha256"], filas)
+        d = diarios[0]["diario"]
+        registrar("diario íntegro y ligado a empresa, versión base y turno de A",
+                  diarios[0]["sha256"] == a["sha256"] and d["escritor_id"] == a["escritor_id"] and d["epoca"] == a["epoca"]
+                  and d["empresa_id"] == "mbt" and d["version_base"] == version_sembrada and diarios[0]["vigente"],
+                  {k: d[k] for k in ("escritor_id", "epoca", "empresa_id", "version_base")})
 
-        codigo, verificacion, err = cli(env_b, "--raiz-atlas", str(raiz_b), "--verificar")
-        registrar("B verifica su copia sin escribir: 0 distintos y el diario abierto informado",
-                  codigo == 0 and verificacion and verificacion["distintos"] == 0 and verificacion["diarios_abiertos"] == [a["diario"]],
-                  verificacion or err[-800:])
-
-        # 5. B trabaja un turno normal tras los vencimientos.
+        # 4. C (con el dataset parcial de A traído por Drive) recupera desde Cloud.
         worker.avanzar(11 * 60)
-        r = subprocess.run([sys.executable, str(Path(__file__).with_name("equipo.py")), "turno", str(raiz_b)], cwd=MOTOR,
-                           env=env_b, capture_output=True, text=True, encoding="utf-8", timeout=300)
-        linea = (r.stdout.strip().splitlines() or [""])[-1]
-        turno = json.loads(linea[len("TURNO "):]) if linea.startswith("TURNO ") else None
-        registrar("B obtiene el lease y trabaja un turno normal", r.returncode == 0 and turno is not None, linea or r.stderr[-1500:])
-        if turno:
-            registrar("B es otro escritor y ve el diario abierto de A sin adoptarlo",
-                      turno["escritor_id"] != a["escritor_id"] and turno["resumen"]["diarios_abiertos"] == [a["diario"]]
-                      and turno["resumen"]["restaurados"] == [] and turno["resumen"]["pendiente_confirmado"] == 0, turno)
-        registrar("el diario no se restaura a la raíz de B", not (raiz_b / ".atlas_custodia").exists())
-        codigo, leidos2, err = cli(env_b, "--raiz-atlas", str(raiz_b), "--diarios")
-        d2 = (leidos2 or {}).get("diarios", [])
-        registrar("tras el turno de B el diario de A sigue íntegro en Cloud (ya no vigente)",
-                  codigo == 0 and len(d2) == 1 and d2[0]["sha256"] == a["sha256"] and d2[0]["vigente"] is False, leidos2 or err[-800:])
-        diarios_b = [f for f in worker.tabla("estado_operativo_archivos")
-                     if turno and f["ruta"].startswith(f".atlas_custodia/diarios/{turno['escritor_id']}/")]
-        registrar("el diario propio de B quedó cerrado al confirmar", bool(diarios_b) and diarios_b[-1]["sha256"] is None, diarios_b)
+        codigo, previa, err = cli(env["c"], "--raiz-atlas", str(raiz["c"]), "--recuperar-turno", a["diario"])
+        registrar("C obtiene el lease pese al dataset de A en su Drive y la previa es RECUPERABLE",
+                  codigo == 0 and previa and previa["estado"] == "RECUPERABLE"
+                  and previa.get("documentos_recuperados") == ["mobile/env-900001/original.jpg"], previa or err[-1500:])
+        registrar("la previa no confirma datos", worker.vigentes()[DATASET] == base_dataset)
+        worker.avanzar(60)
+        codigo, hecho, err = cli(env["c"], "--raiz-atlas", str(raiz["c"]), "--recuperar-turno", a["diario"], "--aplicar")
+        registrar("C aplica la recuperación (CLI real --aplicar)", codigo == 0 and hecho and hecho["estado"] == "RECUPERADO",
+                  hecho or err[-1500:])
+        vig = worker.vigentes()
+        registrar("Cloud contiene exactamente lo que A escribió", vig[DATASET] == dataset_a and vig[envio_a] == envio_sha,
+                  {DATASET: vig.get(DATASET), envio_a: vig.get(envio_a)})
+        registrar("la raíz de C coincide con lo que A escribió",
+                  sha_archivo(raiz["c"] / DATASET) == dataset_a and sha_archivo(raiz["c"].joinpath(*envio_a.split("/"))) == envio_sha)
+        auditoria = f"operacion/actual/recuperaciones_turno/{a['escritor_id']}__{a['epoca']}.json"
+        registrar("diario de A cerrado junto con los datos y registro de auditoría confirmado",
+                  vig.get(a["diario"]) is None and vig.get(auditoria) is not None, {"auditoria": vig.get(auditoria)})
+        version = worker.version()
+        worker.avanzar(60)
+        codigo, otra, err = cli(env["c"], "--raiz-atlas", str(raiz["c"]), "--recuperar-turno", a["diario"], "--aplicar")
+        registrar("segundo intento: YA_CERRADO, sin cambios en Cloud",
+                  codigo == 0 and otra and otra["estado"] == "YA_CERRADO" and worker.version() == version and worker.vigentes() == vig,
+                  otra or err[-800:])
+
+        # 5. B alinea y ve la guía una sola vez.
+        worker.avanzar(11 * 60)
+        turno_b, linea = equipo(env["b"], "turno", str(raiz["b"]))
+        registrar("B trabaja tras la recuperación: alinea lo recuperado", turno_b is not None
+                  and sorted(turno_b["resumen"]["restaurados"]) == sorted([DATASET, envio_a, auditoria])
+                  and turno_b["resumen"]["diarios_abiertos"] == [], turno_b or linea)
+        registrar("la guía de A está una sola vez en el dataset de B", guias(raiz["b"] / DATASET).count("900001") == 1,
+                  guias(raiz["b"] / DATASET))
+
+        # 6. Versión posterior: E escribe y muere; B confirma otra guía; recuperar E se bloquea.
+        shutil.copytree(raiz["b"], raiz["e"])
+        worker.avanzar(11 * 60)
+        proceso = equipo(env["e"], "trabajar", str(raiz["e"]), "900003", esperar=False)
+        linea = proceso.stdout.readline().strip()
+        registrar("E escribe bajo lease", linea.startswith("ESCRITO "), linea or proceso.stderr.read()[-1500:])
+        e = json.loads(linea.split(" ", 1)[1]) if linea.startswith("ESCRITO ") else {}
+        matar(proceso)
+        shutil.rmtree(dirs["e"])
+        worker.avanzar(11 * 60)
+        turno_b, linea = equipo(env["b"], "turno_dataset", str(raiz["b"]), "900004")
+        registrar("B confirma después otra guía (versión posterior del dataset)", turno_b is not None, linea)
+        posterior, version = worker.vigentes()[DATASET], worker.version()
+        worker.avanzar(60)
+        codigo, bloqueo, err = cli(env["b"], "--raiz-atlas", str(raiz["b"]), "--recuperar-turno", e.get("diario", ""), "--aplicar")
+        registrar("recuperar E se bloquea por VERSION_POSTERIOR (código 3)", codigo == 3 and bloqueo and bloqueo["estado"] == "BLOQUEADO"
+                  and {"codigo": "VERSION_POSTERIOR", "rutas": [DATASET]} in bloqueo["bloqueos"], bloqueo or err[-1500:])
+        registrar("Cloud intacta tras el bloqueo y el diario de E sigue disponible",
+                  worker.vigentes()[DATASET] == posterior and worker.version() == version and worker.vigentes()[e["diario"]] == e["sha256"])
+        registrar("la guía de E no entró al dataset de B", "900003" not in guias(raiz["b"] / DATASET))
     finally:
         worker.cerrar()
         (SALIDA / "validacion.json").write_text(json.dumps(CHECKS, ensure_ascii=False, indent=2), encoding="utf-8")

@@ -5055,9 +5055,18 @@ class CapaAccionesOperacionales:
             codigo = error.codigo if isinstance(error, ErrorAccionOperacional) else "ERROR_SERVICIO"
             publico = {"estado": "FALLIDA", "token": token, "accion": definicion.nombre, "codigo": codigo,
                        "mensaje": f"{type(error).__name__}: {error}", "respaldo_restaurado": restaurar}
-            self._auditar(registro, preview, actor=actor, confirmado_por=confirmado, origen=origen,
-                          instante=instante, despues=None, resultado="FALLIDA", publico=publico,
-                          respaldo=respaldo)
+            try:
+                self._auditar(registro, preview, actor=actor, confirmado_por=confirmado, origen=origen,
+                              instante=instante, despues=None, resultado="FALLIDA", publico=publico,
+                              respaldo=respaldo)
+            except Exception as error_auditoria:  # noqa: BLE001
+                from atlas_core.estado_confirmado import EstadoNoVerificado
+                # Sin escritor global la custodia no deja escribir en la raíz
+                # (diario remoto no persistible): el registro no se guarda,
+                # pero el resultado sigue informando la falla real.
+                if restaurar or not isinstance(error_auditoria, EstadoNoVerificado):
+                    raise
+                publico["auditoria_persistida"] = False
             return publico
         ids_antes = self._ids_decisiones_documento(plan)
         # La red de seguridad retira ANTES de reconciliar: así la
