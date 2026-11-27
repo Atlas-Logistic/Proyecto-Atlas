@@ -20,7 +20,7 @@ La tarea programada del PULL no cambia: sigue recibiendo G:, y el Motor la redir
 `instalar_equipo.ps1 -Equipo CASA|OFICINA -Commit <P0> -Rama fix/p0-integral-20261127 [-EscritorEsperado <id>] [-Aplicar]` ejecuta los pasos 1 y 2 de la secuencia en un solo comando. En orden:
 
 1. Identifica el equipo (host, MachineGuid, `escritor_id`). Con `-EscritorEsperado` exige la coincidencia.
-2. Respalda y guarda en stash los cambios locales sin commit del Motor, por ejemplo notas, con una copia en `LOCALAPPDATA\Atlasespaldo-p0-cambios-locales-<fecha>`.
+2. Respalda y guarda en stash los cambios locales sin commit del Motor, por ejemplo notas, con una copia en `LOCALAPPDATA\Atlas\respaldo-p0-cambios-locales-<fecha>`.
 3. Cierra solo el Atlas Viajes instalado.
 4. Repite el preflight hasta que no haya un ciclo en curso.
 5. Migra con `migrar_equipo.ps1`.
