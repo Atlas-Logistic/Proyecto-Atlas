@@ -103,7 +103,7 @@ if (-not $Aplicar) { Anotar 'Instalacion simulada.'; exit 0 }
 if (-not $SinTareas -and -not $SinEsperarPull) {
     $log = Join-Path $LocalAppData 'Atlas\logs\mobile_pull_cloud.log'
     $limite = (Get-Date).AddMinutes(8)
-    do { Start-Sleep -Seconds 15 } while (((-not (Test-Path $log)) -or (Get-Item $log).LastWriteTime -lt $inicio -or (Procesos-Motor).Count) -and (Get-Date) -lt $limite)
+    do { Start-Sleep -Seconds 15 } while (((-not (Test-Path $log)) -or (Get-Item $log).LastWriteTime -lt $inicio -or @(Procesos-Motor).Count) -and (Get-Date) -lt $limite)
     $texto = if (Test-Path $log) { Get-Content -LiteralPath $log -Raw } else { '' }
     Anotar "Primer ciclo PULL tras migrar: $(if ($texto -match '"escritor_operativo"\s*:\s*"NO_ADQUIRIDO"') {'NO_ADQUIRIDO'} elseif ($texto -match '"recuperacion_turnos"') {'OK (Motor P0)'} else {'revisar ' + $log})"
 }

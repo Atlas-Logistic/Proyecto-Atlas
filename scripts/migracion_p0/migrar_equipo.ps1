@@ -58,14 +58,14 @@ for ($j = 0; $j -lt $accesos.Count; $j++) {
 if ($Aplicar) { Escribir-Json $rutaEstado $nuevoEstado; Anotar "Estado de migracion: $rutaEstado" }
 
 # ------------------------------------------------- Motor + RaizTrabajo
-$tareas = Tareas-Pull -SinTareas:$SinTareas
+$tareas = @(Tareas-Pull -SinTareas:$SinTareas)
 Ejecutar $Aplicar "pausar $($tareas.Count) tarea(s) PULL/mantenimiento hasta preparar la raiz de trabajo" {
     foreach ($t in $tareas) { Disable-ScheduledTask -TaskPath $t.TaskPath -TaskName $t.TaskName | Out-Null; Anotar "Pausada: $($t.TaskName)" }
 }
 try {
     if ($Aplicar) {
         $limite = (Get-Date).AddMinutes(20)
-        while ((Procesos-Motor).Count) {
+        while (@(Procesos-Motor).Count) {
             if ((Get-Date) -gt $limite) { throw 'Un proceso del Motor sigue en curso tras 20 minutos.' }
             Start-Sleep -Seconds 5
         }

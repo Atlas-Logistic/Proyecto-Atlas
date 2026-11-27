@@ -24,14 +24,14 @@ if ((Test-Path -LiteralPath $pendiente) -and -not $Forzar) {
     throw "Hay publicacion pendiente ($pendiente): Drive no tiene todo lo confirmado. Ejecutar un PULL y reintentar, o -Forzar."
 }
 
-$tareas = Tareas-Pull -SinTareas:$SinTareas
+$tareas = @(Tareas-Pull -SinTareas:$SinTareas)
 Ejecutar $Aplicar "pausar $($tareas.Count) tarea(s) PULL/mantenimiento" {
     foreach ($t in $tareas) { Disable-ScheduledTask -TaskPath $t.TaskPath -TaskName $t.TaskName | Out-Null }
 }
 try {
     if ($Aplicar) {
         $limite = (Get-Date).AddMinutes(20)
-        while ((Procesos-Motor).Count) {
+        while (@(Procesos-Motor).Count) {
             if ((Get-Date) -gt $limite) { throw 'Un proceso del Motor sigue en curso tras 20 minutos.' }
             Start-Sleep -Seconds 5
         }

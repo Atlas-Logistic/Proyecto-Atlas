@@ -20,7 +20,7 @@ $head = Git $Motor rev-parse HEAD
 Anotar "Motor $Motor en $head"
 if ($CommitEsperado -and $head -ne $CommitEsperado) { $fallas += "Motor en $head, se esperaba $CommitEsperado" }
 if (Git $Motor status --porcelain --untracked-files=no) { $fallas += 'Motor con cambios sin commit' }
-$procesos = Procesos-Motor
+$procesos = @(Procesos-Motor)
 if ($procesos.Count) { $fallas += "Procesos del Motor en curso: $($procesos.Count)" }
 if (-not (Test-Path -LiteralPath $Raiz)) { $fallas += "Raiz $Raiz no disponible" }
 if (Test-Path -LiteralPath $RaizTrabajo) {
