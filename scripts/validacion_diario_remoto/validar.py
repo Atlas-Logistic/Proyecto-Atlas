@@ -51,7 +51,7 @@ def registrar(nombre: str, ok: bool, detalle=None) -> None:
 
 
 class Worker:
-    def __init__(self) -> None:
+    def __init__(self, usuarios: list | None = None) -> None:
         tls = MUNDO / "tls"
         tls.mkdir(parents=True)
         subprocess.run([OPENSSL, "req", "-x509", "-newkey", "rsa:2048", "-nodes", "-days", "1", "-subj", "/CN=127.0.0.1",
@@ -63,7 +63,7 @@ class Worker:
         config.write_text(json.dumps({
             "env": {"CLOUD_MOTOR_AUTH_SECRET": TOKEN, "CLOUD_MOTOR_EMPRESA_ID": EMPRESA_CLOUD,
                     "CLOUD_MOBILE_AUTH_SECRET": "secreto-mobile-prueba"},
-            "usuarios": [], "tls": {"cert": str(self.cert), "key": str(tls / "key.pem")}}), encoding="utf-8")
+            "usuarios": usuarios or [], "tls": {"cert": str(self.cert), "key": str(tls / "key.pem")}}), encoding="utf-8")
         self.p = subprocess.Popen(["node", str(CLOUD / "test" / "servidor_reloj.mjs"), str(config)], cwd=CLOUD,
                                   stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
         linea = self.p.stdout.readline().strip()

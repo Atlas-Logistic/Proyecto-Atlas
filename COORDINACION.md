@@ -164,3 +164,31 @@ Antes de instalar:
 - Revisar escritores externos al Motor que escriban en Drive.
 
 NO instalado. No se tocaron CASA, PULL, Drive ni Cloud productiva.
+
+
+## P0.4: recuperación automática de turnos interrumpidos en el PULL (27/11/2026)
+
+Rama feat/recuperacion-automatica-pull-20261127 sobre 015047a (Claude Code, encargo Javier). Cambia atlas_core/estado_confirmado.py y sincronizar_mobile_cloud.py (ejecutar_pull_con_escritor); el Worker no cambia (b28d594).
+
+- `CustodiaEstado.recuperar_automaticamente(lease)` corre en cada pasada del PULL, después de adquirir el lease y alinear y ANTES de tomar envíos: las escrituras de la pasada dejarían sin base a los diarios pendientes. Nunca corta el PULL; su resultado sale en `resultado["recuperacion_turnos"]`.
+- Recorre los diarios abiertos, del más antiguo al más nuevo y de cualquier equipo, incluido el propio con su LOCALAPPDATA perdido. Aplica cada uno con `recuperar_turno` de P0.2: todo o nada, sin pisar versiones posteriores, sin perder ni duplicar documentos, y con el diario cerrado en el mismo lote. Es idempotente: un diario cerrado ya no se ve.
+- Los incompatibles se conservan abiertos en Cloud para revisión, con su motivo, en `en_revision` y en `diarios_en_revision.json` de la carpeta local.
+  - Los bloqueos que no cambian con el tiempo (DIARIO_SIN_CONTENIDO, CONTENIDO_NO_CUSTODIADO, VERSION_POSTERIOR, PERDERIA_DOCUMENTOS, INTEGRIDAD) se recuerdan por huella del diario y no se reevalúan en cada ciclo (`omitidos`).
+  - Los transitorios se reintentan.
+  - Un diario bloqueado no detiene la pasada ni las operaciones independientes.
+- Si el lease se pierde durante la recuperación, se detiene sin error. Lo ya confirmado queda; lo demás se reintenta en el próximo ciclo.
+
+Pruebas:
+- tests/test_recuperacion_automatica_pull.py: 5 pruebas nuevas, sobre el ejecutar_pull_con_escritor real.
+- Suite completa del Motor: 45 fallas contra 46 en 48d6096. La única diferencia es la intermitente test_falso_ok_obra_destino_p1, que esta vez pasó.
+- Validación aislada scripts/validacion_diario_remoto/validar_pull.py: 16/16, con el PULL real (sincronizar_mobile_cloud.py --sin-procesar), el Worker b28d594 real y envíos Mobile reales.
+  - A ingesta una guía, muere y se elimina por completo.
+  - El PULL de B recupera el turno y recibe E1 en el mismo ciclo; el segundo ciclo no repite ni duplica.
+  - El turno de C, sin contenido custodiado, queda en revisión mientras E2 y E3 entran.
+- validar.py 23/23, validar_lease.py 16/16 y validar_aislada.py 14/14 siguen aprobando.
+
+Antes de instalar:
+- Lo mismo que P0.1 a P0.3.1.
+- Mostrar `diarios_en_revision` en Desktop, que hoy solo está en el log y el resultado del PULL.
+
+NO instalado. No se tocaron CASA, PULL, Drive ni Cloud productiva.

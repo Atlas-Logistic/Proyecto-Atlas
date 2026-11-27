@@ -80,6 +80,9 @@ TIPO_DIARIO = "ATLAS_DIARIO_RECUPERACION"
 FORMATO_DIARIO = 2
 FORMATOS_LEGIBLES = (1, 2)
 RUTA_DATASET = "operacion/actual/analisis_completo_guias.csv"
+# Bloqueos de recuperación que no cambian con el tiempo para el mismo diario.
+BLOQUEOS_PERMANENTES = frozenset({"DIARIO_SIN_CONTENIDO", "CONTENIDO_NO_CUSTODIADO", "VERSION_POSTERIOR",
+                                  "PERDERIA_DOCUMENTOS", "INTEGRIDAD"})
 CARPETA_RECUPERACIONES = "operacion/actual/recuperaciones_turno"
 # Línea base de la activación: archivos mutables que la operación reescribe.
 SEMILLA_CARPETAS = ("operacion/actual", "operacion/procesamiento", "catalogos_privados", "fichas_digitales")
@@ -1033,6 +1036,76 @@ class CustodiaEstado:
         if despues.get(diario_rel) is not None or any(despues.get(r) != contenido[r] for r in aplicar_rutas):
             raise EstadoNoVerificado("la recuperación no quedó confirmada en Cloud")
         return {**resultado, "estado": "RECUPERADO", "version_final": self.version}
+
+    # --------------------------------------- recuperación automática (P0.4)
+    @property
+    def _ruta_revision(self): return self.local / "diarios_en_revision.json"
+
+    def recuperar_automaticamente(self, lease) -> dict:
+        """Al inicio del turno del PULL, antes de sus propias escrituras:
+        recupera todo diario abierto compatible (los más antiguos primero) y
+        deja los demás en revisión, sin cortar el turno.
+
+        Usa ``recuperar_turno`` (todo o nada, idempotente, sin pisar versiones
+        posteriores ni perder o duplicar documentos). Un bloqueo que no puede
+        cambiar con el tiempo (diario sin contenido, rutas sin custodiar,
+        versión posterior, pérdida de documentos, contenido corrupto) se
+        recuerda por huella del diario y no se reevalúa en cada ciclo."""
+        resultado: dict = {"recuperados": [], "en_revision": [], "omitidos": 0}
+        if self not in _activas or self._lease is not lease or not getattr(lease, "vigente", False):
+            return resultado
+        revision = _leer_json(self._ruta_revision, {})
+        revision = revision if isinstance(revision, dict) else {}
+
+        def orden(rel: str):
+            partes = rel.split("/")
+            try:
+                return int(partes[-1].removesuffix(".json")), rel
+            except ValueError:
+                return 0, rel
+
+        abiertos = sorted((rel for rel, sha in self.manifiesto.items()
+                           if sha and rel.startswith(CARPETA_DIARIOS + "/") and rel != self._diario), key=orden)
+        for rel in abiertos:
+            sha = self.manifiesto.get(rel)
+            if not sha:
+                continue  # lo cerró una recuperación anterior de este ciclo (cadena "cierra")
+            previo = revision.get(rel)
+            if isinstance(previo, dict) and previo.get("sha256") == sha and previo.get("permanente"):
+                resultado["omitidos"] += 1
+                resultado["en_revision"].append(previo)
+                continue
+            if not getattr(lease, "vigente", False):
+                break
+            try:
+                r = self.recuperar_turno(lease, rel, aplicar=True)
+            except DiarioNoPersistido:
+                break  # el lease se perdió: el turno se detiene solo
+            except EstadoNoVerificado as error:
+                entrada = {"diario": rel, "sha256": sha, "permanente": True,
+                           "bloqueos": [{"codigo": "INTEGRIDAD", "detalle": str(error)}]}
+            except Exception as error:  # noqa: BLE001 - transitorio: se reintenta el próximo ciclo
+                entrada = {"diario": rel, "sha256": sha, "permanente": False,
+                           "bloqueos": [{"codigo": "ERROR_TRANSITORIO", "detalle": f"{type(error).__name__}: {error}"}]}
+            else:
+                if r["estado"] == "RECUPERADO":
+                    resultado["recuperados"].append({k: r.get(k) for k in ("diario", "escritor_id", "epoca", "version_final")}
+                                                    | {"rutas": [x["ruta"] for x in r.get("rutas", []) if x["accion"] == "APLICAR"],
+                                                       "documentos_recuperados": r.get("documentos_recuperados", [])})
+                    revision.pop(rel, None)
+                    continue
+                if r["estado"] != "BLOQUEADO":
+                    revision.pop(rel, None)
+                    continue
+                codigos = {b["codigo"] for b in r["bloqueos"]}
+                entrada = {"diario": rel, "sha256": sha, "escritor_id": r.get("escritor_id"), "epoca": r.get("epoca"),
+                           "bloqueos": r["bloqueos"], "permanente": codigos <= BLOQUEOS_PERMANENTES}
+            log.warning("Turno interrumpido %s queda en revisión: %s", rel, [b["codigo"] for b in entrada["bloqueos"]])
+            revision[rel] = entrada
+            resultado["en_revision"].append(entrada)
+        revision = {rel: v for rel, v in revision.items() if self.manifiesto.get(rel)}
+        _escribir_json(self._ruta_revision, revision)
+        return resultado
 
     def _escribir_desde_nube(self, rel: str, datos: bytes | None) -> None:
         destino = self._abs(rel)

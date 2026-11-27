@@ -78,6 +78,17 @@ def ejecutar_pull_con_escritor(
         with guardia:
             if raiz is not None:
                 recuperar_bloqueos_huerfanos(raiz, escritor=escritor)
+            # P0.4: turnos interrumpidos de cualquier equipo, recuperados desde
+            # Cloud antes de las escrituras de esta pasada (que los dejarían
+            # sin base). Los incompatibles quedan en revisión; nunca corta.
+            recuperacion_turnos = None
+            custodia = getattr(escritor, "custodia", None)
+            if raiz is not None and custodia is not None and hasattr(custodia, "recuperar_automaticamente") and vigente():
+                try:
+                    recuperacion_turnos = custodia.recuperar_automaticamente(escritor)
+                except Exception as error:  # noqa: BLE001 -- nunca corta el PULL
+                    logging.getLogger(__name__).warning("Recuperación automática de turnos no realizada: %s", error)
+                    recuperacion_turnos = {"error": str(error)}
             resultado = sincronizar_envios_cloud(
                 base_url=base_url, token_motor=token_motor, consumidor=consumidor,
                 repositorio=repositorio, timeout=timeout, procesar=procesar,
@@ -85,6 +96,8 @@ def ejecutar_pull_con_escritor(
                 puede_continuar=vigente,
                 proveedor_ocr_preferido=proveedor_ocr_preferido,
             )
+            if recuperacion_turnos is not None:
+                resultado["recuperacion_turnos"] = recuperacion_turnos
             # Licencias enviadas desde Mobile: después de las guías y bajo el
             # mismo lease. Un fallo aquí no altera el resultado de las guías.
             if raiz is not None and vigente():
