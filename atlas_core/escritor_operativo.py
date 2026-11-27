@@ -266,7 +266,8 @@ class LeaseEscritorOperativo:
                 self.custodia.alinear(self)
             except Exception as error:  # noqa: BLE001 - cualquier duda: no escribir
                 logging.getLogger(__name__).warning("Estado local no verificado; lease liberado sin escribir: %s", error)
-                self.motivo = "ESTADO_NO_VERIFICADO"
+                from atlas_core.estado_confirmado import MotorIncompatible
+                self.motivo = "MOTOR_INCOMPATIBLE" if isinstance(error, MotorIncompatible) else "ESTADO_NO_VERIFICADO"
                 self.cerrar()
                 return False
             if not self.vigente:

@@ -65,7 +65,10 @@ import urllib.request
 from datetime import datetime, timezone
 from pathlib import Path
 
-PROTOCOLO = 2
+# 3 (P0.5): Motor con diario remoto, custodia de contenido, escritor
+# sustituido, raíz aislada y compuerta de versión. Con protocolo_minimo=3 en
+# el Worker, un Motor anterior (que no respeta nada de eso) no obtiene lease.
+PROTOCOLO = 3
 EXCLUIDOS_PRIMER_NIVEL = frozenset({
     "reportes", "respaldos", "backups", "_respaldos_desarrollo", "historico_pre_infra_s2", "investigacion",
     ".atlas_custodia",
@@ -101,6 +104,11 @@ class EstadoNoVerificado(RuntimeError):
 
 class DiarioNoPersistido(EstadoNoVerificado):
     """El diario del turno no quedó en Cloud: la escritura no debe ocurrir."""
+
+
+class MotorIncompatible(EstadoNoVerificado):
+    """La versión publicada exige un nivel de custodia mayor que el de este
+    Motor (P0.5): no escribe hasta actualizarse."""
 
 
 class EscritorSustituido(DiarioNoPersistido):
@@ -554,6 +562,10 @@ class CustodiaEstado:
         self._escritor_alineando = getattr(lease, "escritor_id", "")
         self.manifiesto = dict(self._cargar_manifiesto(self.version))
         self._exigir_custodia_propia()
+        # P0.5: antes de cualquier escritura (incluida la recuperación del
+        # pendiente propio), la versión publicada debe admitir este Motor.
+        from atlas_core.actualizacion_atlas import exigir_compatibilidad
+        exigir_compatibilidad(self.manifiesto, self.cliente.descargar)
         resumen = {"version": self.version, "restaurados": [], "borrados": [], "cuarentena": [], "pendiente_confirmado": 0,
                    "diarios_abiertos": []}
         self._recuperar_pendiente(lease, resumen)

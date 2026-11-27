@@ -192,3 +192,48 @@ Antes de instalar:
 - Mostrar `diarios_en_revision` en Desktop, que hoy solo está en el log y el resultado del PULL.
 
 NO instalado. No se tocaron CASA, PULL, Drive ni Cloud productiva.
+
+
+## P0.5: actualización automática entre equipos (27/11/2026)
+
+Rama feat/actualizacion-automatica-20261127 sobre 5e3f3b9 (Claude Code, encargo Javier). El Worker no cambia (b28d594) y Desktop no cambia (main.js protegido).
+
+- Versión publicada. Es un descriptor en la custodia Cloud de la empresa, `.atlas_custodia/version/vigente.json`, confirmado bajo lease. Fija:
+  - Motor: rama y commit, que debe estar publicado en origin (mismo criterio que actualizar_equipo_relevo.ps1).
+  - Desktop (opcional): un paquete zip reproducible con app.asar y app.asar.unpacked, subido a R2 y verificado por SHA-256.
+  - `nivel_custodia_minimo`.
+  - Se publica con `python actualizar_atlas.py --publicar --version V --rama R --commit C [--desktop-recursos ...] --nivel-minimo N --raiz-atlas X`. No permite bajar el nivel ya publicado, repetir una versión ni exigir más que el nivel del propio Motor.
+- Al iniciar Atlas corre `scripts/iniciar_atlas.ps1`, que ejecuta `python -B actualizar_atlas.py` y luego abre Desktop con lo que quede instalado. El actualizador (atlas_core/actualizacion_atlas.py):
+  1. Verifica todo antes de tocar nada: Motor sin cambios, Desktop cerrado, commit publicado, paquete íntegro y extraíble.
+  2. Toma el turno local de la raíz, el mismo mecanismo de exclusión del PULL.
+  3. Escribe un diario de actualización y respalda Desktop de forma atómica (`app.asar.antes-<version>`).
+  4. Aplica el Motor (`git reset --keep`) y luego Desktop.
+  5. Comprueba la salud en un proceso nuevo: importa la custodia y los puntos de entrada, exige el nivel publicado y verifica la cabecera del asar.
+  6. Ante cualquier falla vuelve a la versión anterior.
+  - Si el proceso se corta a mitad, el siguiente arranque encuentra el diario, revierte (solo con un respaldo completo y verificado por huella) y reintenta.
+  - Una versión que falla 2 veces se omite hasta que se publique otra.
+- Sin escrituras incompatibles, en dos capas:
+  - (a) En la alineación, un Motor con `NIVEL_CUSTODIA` menor al publicado no escribe (`MOTOR_INCOMPATIBLE`), ni siquiera para confirmar su pendiente.
+  - (b) `PROTOCOLO = 3`: con `protocolo_minimo = 3` en el Worker (D1, paso de instalación), los Motores anteriores, que no respetan diario, contenido ni escritor sustituido, no obtienen lease (`ESCRITOR_PROTOCOLO_OBSOLETO`).
+
+Pruebas:
+- tests/test_actualizacion_atlas.py: 10 pruebas nuevas, con git real de prueba, asar sintético y la compuerta sobre la Cloud simulada.
+- Suite completa del Motor: 45 fallas contra 46 en 48d6096. La diferencia es la intermitente conocida.
+- Validación aislada scripts/validacion_diario_remoto/validar_actualizacion.py: 17/17. Usa el Worker b28d594 real, dos instalaciones reales del Motor (clones git de un origin local con C1, C2 de nivel 2 y C3 rota) y Desktop sintético.
+  - Y, en C1, no puede escribir.
+  - Su inicio cortado a mitad se revierte y se completa en el siguiente inicio.
+  - Y trabaja en C2.
+  - C3 se revierte dos veces y luego se omite; Y sigue trabajando.
+  - Con protocolo_minimo=3, un Motor de protocolo 2 queda fuera.
+- iniciar_atlas.ps1 se probó con configuración de prueba y sin token (SIN_VERIFICAR).
+- Las validaciones P0.1 a P0.4 siguen aprobando: 23/23, 16/16, 14/14 y 16/16.
+
+Antes de instalar (pasos manuales, no hechos):
+- Instalar por primera vez en CASA y OFICINA, porque el actualizador no existe en los Motores actuales.
+- Cambiar el acceso directo de Atlas por iniciar_atlas.ps1.
+- Subir `protocolo_minimo` a 3 en D1 una vez que ambos equipos tengan este Motor.
+- Publicar la primera versión.
+- Revisar que el paquete Desktop incluya todo `resources` necesario (hoy: app.asar y app.asar.unpacked).
+- La salud de Desktop verifica el asar, no abre Electron.
+
+NO instalado. No se tocaron Atlas Viajes instalado, CASA, PULL, Drive ni Cloud productiva.
