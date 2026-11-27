@@ -131,3 +131,36 @@ Pruebas:
 - validar.py (P0.1/P0.2) sigue en 23/23.
 
 NO instalado. No se tocaron CASA, PULL, Drive ni Cloud productiva.
+
+
+## P0.3.1: aislar las escrituras no confirmadas (27/11/2026)
+
+Rama feat/raiz-trabajo-aislada-20261127 sobre 1c307bd (Claude Code, encargo Javier). Solo cambia atlas_core/estado_confirmado.py; el Worker no cambia (b28d594).
+
+- Raíz de trabajo local, fuera de Drive. El Motor de cada equipo escribe en ella: los puntos de entrada (PULL, Desktop, B1, altas) ya reciben la raíz desde la configuración y no cambian. Cada turno la alinea desde Cloud y aparta en cuarentena lo no confirmado.
+- Raíz publicada (Drive). Recibe solo datos confirmados por Cloud:
+  - Después de cada lote confirmado se copia la huella confirmada (desde la raíz de trabajo o, si allí difiere, desde Cloud).
+  - Los reportes, respaldos y backups del turno se publican solo si el turno confirmó.
+  - Si la publicación falla, queda en `publicacion_pendiente.json` y se reintenta al alinear el siguiente turno, con el valor vigente en Cloud.
+- De la raíz publicada solo bajan carpetas de reportes/respaldos/backups que falten en la raíz de trabajo, sin sobrescribir; existen allí solo si su turno confirmó. Nada custodiado fluye de Drive a la raíz de trabajo.
+- Activación opcional por empresa: `raiz_publicada.json` en la carpeta local de la empresa, creada con `python -m atlas_core.estado_confirmado --raiz-atlas <trabajo> --preparar-raiz-trabajo <Drive>`. Ese comando copia Drive a la carpeta local una sola vez y nunca escribe en Drive. Ya activada, un turno sobre la raíz publicada se rechaza (ESTADO_NO_VERIFICADO). Sin el archivo, todo sigue igual que antes.
+- Al volver, un equipo cuyo propio turno fue superado ya no queda detenido por la protección del dataset (26/11). La excepción aplica solo en modo aislado y solo si un diario abierto de ese mismo escritor nombra el dataset. Ese contenido va a cuarentena local y su diario sigue en Cloud. Sin modo aislado, la protección se mantiene.
+
+Pruebas:
+- tests/test_raiz_trabajo_aislada.py: 9 pruebas nuevas.
+- Suite completa del Motor: 46 fallas, igual que 48d6096. Las diferencias son las intermitentes conocidas (test_falso_ok_obra_destino_p1 y test_mobile_historial_por_lote).
+- Validación aislada scripts/validacion_diario_remoto/validar_aislada.py: 14/14, con el Worker real.
+  - Dos escritores, cada uno con raíz de trabajo y su copia de Drive, sincronizada durante la operación interrumpida.
+  - A, sin heartbeat, escribe media fila y un reporte; el lease vence y B lo toma.
+  - B ingesta dos veces sin contaminación ni bloqueo.
+  - Las dos copias de Drive quedan con lo de B y nada de A.
+  - A vuelve, aísla su turno y trabaja.
+- validar.py 23/23 y validar_lease.py 16/16 (modo no aislado) siguen aprobando.
+
+Antes de instalar:
+- Activar en CASA y OFICINA a la vez.
+- Desktop debe leer la raíz publicada o la de trabajo; es decisión de instalación.
+- El primer copiado de Drive es completo.
+- Revisar escritores externos al Motor que escriban en Drive.
+
+NO instalado. No se tocaron CASA, PULL, Drive ni Cloud productiva.

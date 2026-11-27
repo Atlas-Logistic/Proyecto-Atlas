@@ -79,6 +79,8 @@ def main() -> int:
         archivo = open(dataset, "a", encoding="utf-8-sig", newline="")
         archivo.write(linea[: len(linea) // 2])
         archivo.flush()
+        # Dato derivado del turno sin confirmar (no custodiado).
+        escribir(raiz, f"reportes/turno-{guia}/viajes.csv", f"derivado de {guia}\n")
         print("ABIERTO " + json.dumps({"vigente_local": lease.vigente, "escritor_id": lease.escritor_id,
                                        "diario": lease.custodia._diario}), flush=True)
         sys.stdin.readline()  # el orquestador vence el lease y otro equipo lo toma

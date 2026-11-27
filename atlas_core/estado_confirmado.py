@@ -39,6 +39,12 @@ agrega la marca del último estado confirmado:
   lo que el turno espera (lo último que escribió o la marca alineada): un
   contenido ajeno traído por Drive no se pisa ni se adopta. Al confirmar se
   publica la huella custodiada al escribir, no la que haya en la raíz.
+- Raíz de trabajo aislada (P0.3.1, opt-in con ``raiz_publicada.json`` en la
+  carpeta local de la empresa): el Motor escribe en una raíz local fuera de
+  Drive; la raíz publicada (Drive) recibe sólo lo que Cloud confirmó (tras
+  cada lote) y los reportes/respaldos de turnos confirmados. Ningún dato de
+  un turno sin confirmar llega a Drive ni a otro escritor. La raíz publicada
+  no se usa para escribir.
 
 `reportes/`, `respaldos/` y `backups/` quedan fuera: cada escritura crea una
 carpeta con marca de tiempo única, nunca reemplaza contenido previo.
@@ -172,6 +178,40 @@ def identidades_dataset(datos: bytes) -> set[str]:
         return resultado
     except (UnicodeError, csv.Error, ValueError) as error:
         raise EstadoNoVerificado(f"dataset no verificable: {error}") from error
+
+
+ARCHIVO_PUBLICACION = "raiz_publicada.json"
+# Carpetas no custodiadas que el Motor sí lee entre equipos (reporte vigente,
+# respaldos de acciones): se publican al confirmar y se traen si faltan.
+PUBLICABLES_NO_CUSTODIADOS = ("reportes", "respaldos", "backups")
+
+
+def ruta_configuracion_publicacion() -> Path:
+    from atlas_core.aislamiento_empresas import base_local
+    return base_local() / ARCHIVO_PUBLICACION
+
+
+def configuracion_publicacion() -> dict | None:
+    """P0.3.1. ``{"raiz_trabajo", "raiz_publicada"}`` de la empresa del
+    proceso, o None (modo anterior: se escribe en la raíz que se reciba)."""
+    datos = _leer_json(ruta_configuracion_publicacion(), None)
+    if not isinstance(datos, dict):
+        return None
+    trabajo, publicada = datos.get("raiz_trabajo"), datos.get("raiz_publicada")
+    if not (isinstance(trabajo, str) and isinstance(publicada, str) and trabajo and publicada):
+        return None
+    return {"raiz_trabajo": trabajo, "raiz_publicada": publicada}
+
+
+def _misma_ruta(a, b) -> bool:
+    return os.path.normcase(os.path.abspath(os.fspath(a))).rstrip("\\/") == os.path.normcase(os.path.abspath(os.fspath(b))).rstrip("\\/")
+
+
+def _publicable_no_custodiado(rel: str) -> bool:
+    partes = rel.split("/")
+    nombre = partes[-1].lower()
+    return (len(partes) >= 2 and partes[0] in PUBLICABLES_NO_CUSTODIADOS and not nombre.endswith(".tmp")
+            and not partes[-1].startswith(".atlas_lock_"))
 
 
 def ruta_local() -> Path:
@@ -364,6 +404,16 @@ class CustodiaEstado:
         self.borrado_sin_ruta = False
         self.resumen: dict = {}
         self.ajenos_descartados: list[str] = []
+        # P0.3.1: raíz de trabajo local (fuera de Drive) y raíz publicada.
+        configuracion = configuracion_publicacion()
+        self.publicada: Path | None = None
+        self._raiz_es_publicada = False
+        if configuracion:
+            if _misma_ruta(configuracion["raiz_trabajo"], self.raiz):
+                self.publicada = Path(configuracion["raiz_publicada"])
+            elif _misma_ruta(configuracion["raiz_publicada"], self.raiz):
+                self._raiz_es_publicada = True
+        self.publicables: set[str] = set()
         self._lease = None
         self._diario: str | None = None
         self._diario_abierto_en = ""
@@ -430,6 +480,12 @@ class CustodiaEstado:
         rel = RUTA_DATASET
         if rel not in distintos or not distintos[rel]:
             return
+        if self.publicada is not None and self._dataset_de_turno_propio(rel):
+            # P0.3.1: la raíz de trabajo no la toca Drive; un dataset local no
+            # confirmado sólo puede venir de un turno propio superado, cuyo
+            # diario sigue abierto en Cloud. Va a cuarentena (no se pierde).
+            log.warning("Estado confirmado: dataset de un turno propio no confirmado va a cuarentena")
+            return
         if distintos[rel] in self._contenidos_custodiados(rel):
             # El dataset local es exactamente el que escribió un turno caído
             # (Drive lo trajo) y su contenido ya está en Cloud, nombrado por
@@ -444,6 +500,19 @@ class CustodiaEstado:
             raise EstadoNoVerificado("dataset Cloud no coincide con su huella")
         if identidades_dataset(self._abs(rel).read_bytes()) - identidades_dataset(remoto):
             raise EstadoNoVerificado("alineacion eliminaria documentos locales; requiere recuperacion")
+
+    def _dataset_de_turno_propio(self, rel: str) -> bool:
+        escritor = getattr(self, "_escritor_alineando", "")
+        prefijo = f"{CARPETA_DIARIOS}/{escritor}/"
+        for diario_rel, sha in self.manifiesto.items():
+            if not escritor or not sha or not diario_rel.startswith(prefijo):
+                continue
+            try:
+                if rel in interpretar_diario(diario_rel, self.cliente.descargar(sha), sha)["rutas"]:
+                    return True
+            except Exception:  # noqa: BLE001 - un diario ilegible no habilita nada
+                continue
+        return False
 
     def _contenidos_custodiados(self, rel: str) -> set[str]:
         """Huellas que los diarios abiertos (formato 2) custodian para ``rel``."""
@@ -475,7 +544,11 @@ class CustodiaEstado:
 
     def alinear(self, lease) -> dict:
         """Antes de escribir: copia local == marca Cloud, o EstadoNoVerificado."""
+        if self._raiz_es_publicada:
+            raise EstadoNoVerificado("esta raíz es la publicada (Drive): sólo recibe datos confirmados; "
+                                     "el Motor escribe en la raíz de trabajo")
         self.version = int(lease.marca.get("version") or 0)
+        self._escritor_alineando = getattr(lease, "escritor_id", "")
         self.manifiesto = dict(self._cargar_manifiesto(self.version))
         self._exigir_custodia_propia()
         resumen = {"version": self.version, "restaurados": [], "borrados": [], "cuarentena": [], "pendiente_confirmado": 0,
@@ -517,8 +590,102 @@ class CustodiaEstado:
             residuo = [rel for rel, sha in locales.items() if sha != operacional[rel]]
             if residuo:
                 raise EstadoNoVerificado(f"copia local no coincide con la marca Cloud v{self.version}: {residuo[:5]}")
+        if self.publicada is not None:
+            resumen["traidos_de_publicada"] = self._traer_publicados()
+            resumen["publicacion_reintentada"] = self._reintentar_publicacion()
         self.resumen = resumen
         return resumen
+
+    # ------------------------------------------------ publicación (P0.3.1)
+    @property
+    def _ruta_publicacion_pendiente(self): return self.local / "publicacion_pendiente.json"
+
+    def _escribir_publicada(self, rel: str, datos: bytes | None) -> None:
+        destino = self.publicada.joinpath(*rel.split("/"))
+        if datos is None:
+            destino.unlink(missing_ok=True)
+            return
+        destino.parent.mkdir(parents=True, exist_ok=True)
+        temporal = destino.with_name(f".{destino.name}.atlas_publicar.{os.getpid()}.tmp")
+        temporal.write_bytes(datos)
+        os.replace(temporal, destino)
+
+    def _publicar(self, pares: list[list]) -> list[str]:
+        """Copia a la raíz publicada lo que Cloud YA confirmó: la huella
+        confirmada, desde la raíz de trabajo o, si allí hay otra cosa, desde
+        Cloud. Nunca falla la confirmación: lo no publicado queda pendiente
+        y se reintenta al alinear el próximo turno."""
+        if self.publicada is None:
+            return []
+        fallidas = {}
+        for rel, sha in pares:
+            if es_ruta_custodia(rel):
+                continue
+            try:
+                datos = None
+                if sha is not None:
+                    origen = self._abs(rel)
+                    datos = origen.read_bytes() if origen.is_file() else b""
+                    if hashlib.sha256(datos).hexdigest() != sha:
+                        datos = self.cliente.descargar(sha)
+                        if hashlib.sha256(datos).hexdigest() != sha:
+                            raise EstadoNoVerificado(f"contenido Cloud de {rel} no coincide con su huella")
+                self._escribir_publicada(rel, datos)
+            except Exception as error:  # noqa: BLE001
+                log.warning("Publicación de %s pendiente: %s", rel, error)
+                fallidas[rel] = sha
+        if fallidas:
+            pendiente = _leer_json(self._ruta_publicacion_pendiente, {})
+            pendiente = pendiente if isinstance(pendiente, dict) else {}
+            _escribir_json(self._ruta_publicacion_pendiente, {**pendiente, **fallidas})
+        return sorted(fallidas)
+
+    def _publicar_no_custodiados(self, rels) -> None:
+        for rel in sorted(rels):
+            origen = self._abs(rel)
+            try:
+                if origen.is_file():
+                    self._escribir_publicada(rel, origen.read_bytes())
+            except OSError as error:
+                log.warning("Publicación de %s no realizada: %s", rel, error)
+
+    def _reintentar_publicacion(self) -> int:
+        pendiente = _leer_json(self._ruta_publicacion_pendiente, None)
+        if not isinstance(pendiente, dict) or not pendiente:
+            return 0
+        self._ruta_publicacion_pendiente.unlink(missing_ok=True)
+        # Tras alinear, la raíz de trabajo es la marca vigente: se publica el
+        # valor confirmado actual de cada ruta (puede ser más nuevo).
+        actuales = operacionales(self.manifiesto)
+        pares = [[rel, actuales.get(rel)] for rel in pendiente if isinstance(rel, str) and rel in actuales]
+        self._publicar(pares)
+        return len(pares)
+
+    def _traer_publicados(self) -> int:
+        """Reportes/respaldos de turnos confirmados en otros equipos (sólo
+        llegan a la raíz publicada si su turno confirmó): se traen las
+        carpetas que falten, sin sobrescribir nada."""
+        traidos = 0
+        for carpeta in PUBLICABLES_NO_CUSTODIADOS:
+            base = self.publicada / carpeta
+            try:
+                entradas = list(base.iterdir()) if base.is_dir() else []
+            except OSError:
+                continue
+            for entrada in entradas:
+                destino = self.raiz / carpeta / entrada.name
+                if destino.exists() or entrada.name.lower().endswith(".tmp"):
+                    continue
+                try:
+                    if entrada.is_dir():
+                        shutil.copytree(entrada, destino)
+                    else:
+                        destino.parent.mkdir(parents=True, exist_ok=True)
+                        shutil.copy2(entrada, destino)
+                    traidos += 1
+                except OSError as error:
+                    log.warning("No se trajo %s desde la raíz publicada: %s", entrada, error)
+        return traidos
 
     def _restaurar(self, rel: str, sha: str) -> None:
         datos = self.cliente.descargar(sha)
@@ -572,6 +739,7 @@ class CustodiaEstado:
         self.pendientes = set()
         self._cierra = set()
         self._recuperacion = {}
+        self.publicables = set()
         _activas.append(self)
 
     def detener(self) -> None:
@@ -596,6 +764,9 @@ class CustodiaEstado:
             rel = self._rel(ruta)
             if rel is not None and rastreable(rel):
                 entradas.append((rel, efecto))
+            elif rel is not None and self.publicada is not None and _publicable_no_custodiado(rel) and efecto != BORRADO:
+                # Reportes/respaldos del turno: se publican sólo si confirma.
+                self.publicables.add(rel)
         if not entradas:
             return
         with self._cerrojo:
@@ -739,6 +910,9 @@ class CustodiaEstado:
         self._ruta_pendiente.unlink(missing_ok=True)
         self.modificadas = set()
         self.contenido, self.pendientes = {}, set()
+        # El turno confirmó: también se publican sus reportes y respaldos.
+        publicables, self.publicables = self.publicables, set()
+        self._publicar_no_custodiados(publicables)
         return {"version": self.version, "confirmados": len(confirmadas), "ajenos_descartados": self.ajenos_descartados}
 
     # ------------------------------------------------- recuperación (P0.2)
@@ -919,6 +1093,8 @@ class CustodiaEstado:
             for rel, sha in lote:
                 self.manifiesto[rel] = sha
             _escribir_json(self._ruta_manifiesto, {"version": self.version, "archivos": self.manifiesto})
+            # P0.3.1: sólo después de que Cloud confirmó el lote.
+            self._publicar(lote)
         return cambios
 
     def _exigir_raiz_disponible(self) -> None:
@@ -944,6 +1120,27 @@ class CustodiaEstado:
     def sembrar(self, lease) -> dict:
         """Activación: publica la línea base desde el equipo con el estado vigente."""
         return {"version": None, "confirmados": len(self._confirmar_rutas(lease, self.rutas_semilla())), "version_final": self.version}
+
+
+def preparar_raiz_trabajo(raiz_publicada, raiz_trabajo) -> dict:
+    """P0.3.1: la raíz de trabajo es una copia local, fuera de Drive, de la
+    raíz publicada; desde aquí el Motor de este equipo escribe sólo en ella y
+    la publicada recibe únicamente lo que Cloud confirma. No escribe en la
+    publicada. La primera alineación deja la copia igual a la marca Cloud."""
+    publicada, trabajo = Path(os.path.abspath(raiz_publicada)), Path(os.path.abspath(raiz_trabajo))
+    if _misma_ruta(publicada, trabajo) or os.path.normcase(str(trabajo)).startswith(os.path.normcase(str(publicada)) + os.sep) \
+            or os.path.normcase(str(publicada)).startswith(os.path.normcase(str(trabajo)) + os.sep):
+        raise EstadoNoVerificado("la raíz de trabajo y la publicada deben ser carpetas separadas")
+    if not publicada.is_dir():
+        raise EstadoNoVerificado(f"raíz publicada inexistente: {publicada}")
+    copiada = False
+    if not trabajo.exists() or not any(trabajo.iterdir()):
+        shutil.copytree(publicada, trabajo, dirs_exist_ok=True,
+                        ignore=shutil.ignore_patterns("*.tmp", ".atlas_lock_*", "desktop.ini", "~$*"))
+        copiada = True
+    _escribir_json(ruta_configuracion_publicacion(), {"raiz_trabajo": str(trabajo), "raiz_publicada": str(publicada)})
+    return {"raiz_trabajo": str(trabajo), "raiz_publicada": str(publicada), "copiada": copiada,
+            "configuracion": str(ruta_configuracion_publicacion())}
 
 
 def verificar_sin_escribir(raiz, cliente: ClienteEstado, *, carpeta_local: Path | None = None) -> dict:
@@ -991,9 +1188,14 @@ def main(argv=None) -> int:
     accion.add_argument("--recuperar-turno", metavar="DIARIO",
                         help="Bajo lease: recupera el turno caído de otro escritor desde Cloud (vista previa salvo --aplicar)")
     parser.add_argument("--aplicar", action="store_true", help="Con --recuperar-turno: aplica y confirma la recuperación")
+    accion.add_argument("--preparar-raiz-trabajo", metavar="RAIZ_PUBLICADA",
+                        help="P0.3.1, sin lease: crea --raiz-atlas como raíz de trabajo local desde la raíz publicada (Drive)")
     args = parser.parse_args(argv)
     if args.aplicar and not args.recuperar_turno:
         parser.error("--aplicar sólo acompaña a --recuperar-turno")
+    if args.preparar_raiz_trabajo:
+        print(json.dumps(preparar_raiz_trabajo(args.preparar_raiz_trabajo, args.raiz_atlas), ensure_ascii=False))
+        return 0
     lease = lease_desde_entorno(raiz=args.raiz_atlas)
     if lease is None:
         parser.error("Falta ATLAS_CLOUD_MOTOR_TOKEN")
