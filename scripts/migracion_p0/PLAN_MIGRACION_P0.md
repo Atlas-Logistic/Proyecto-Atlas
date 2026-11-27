@@ -15,6 +15,31 @@ Rama `fix/p0-integral-20261127`. Incluye P0.1 a P0.6: diario remoto, recuperaci�
 
 La tarea programada del PULL no cambia: sigue recibiendo G:, y el Motor la redirige a la raíz de trabajo.
 
+## Instalador por equipo (recomendado)
+
+`instalar_equipo.ps1 -Equipo CASA|OFICINA -Commit <P0> -Rama fix/p0-integral-20261127 [-EscritorEsperado <id>] [-Aplicar]` ejecuta los pasos 1 y 2 de la secuencia en un solo comando. En orden:
+
+1. Identifica el equipo (host, MachineGuid, `escritor_id`). Con `-EscritorEsperado` exige la coincidencia.
+2. Respalda y guarda en stash los cambios locales sin commit del Motor, por ejemplo notas, con una copia en `LOCALAPPDATA\Atlasespaldo-p0-cambios-locales-<fecha>`.
+3. Cierra solo el Atlas Viajes instalado.
+4. Repite el preflight hasta que no haya un ciclo en curso.
+5. Migra con `migrar_equipo.ps1`.
+6. Verifica el siguiente ciclo PULL y la custodia.
+
+Los accesos directos productivos ("Atlas Viajes.lnk" del escritorio y del menú Inicio) pasan a ejecutar `iniciar_atlas.ps1` si existe. Si no existe, abren el exe como antes, porque el del escritorio puede sincronizarse por OneDrive a un equipo aún no migrado.
+
+### OFICINA (pendiente)
+
+Mismo commit que CASA, en OFICINA y con el PULL de OFICINA sin correr:
+
+```
+git -C C:\Atlas\Proyecto-Atlas fetch origin fix/p0-integral-20261127
+git -C C:\Atlas\Proyecto-Atlas worktree add C:\Atlas\migracion-p0 <commit P0>
+powershell -NoProfile -ExecutionPolicy Bypass -File C:\Atlas\migracion-p0\scripts\migracion_p0\instalar_equipo.ps1 -Equipo OFICINA -Commit <commit P0> -Rama fix/p0-integral-20261127 -EscritorEsperado pc-13570755-<resto>
+(revisar la simulación) ... mismo comando con -Aplicar
+git -C C:\Atlas\Proyecto-Atlas worktree remove C:\Atlas\migracion-p0
+```
+
 ## Secuencia
 
 Ambos equipos se tratan igual. El orden importa solo para el protocolo 3.

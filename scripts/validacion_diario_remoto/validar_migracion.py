@@ -67,16 +67,20 @@ def main() -> int:
         git(v.MUNDO, "clone", "-q", "--shared", str(origen), str(motor))
         git(motor, "checkout", "-q", "-B", "casa/instalado", ANTERIOR)
         subprocess.run(["cmd", "/c", "mklink", "/J", str(motor / ".venv"), str(VENV)], capture_output=True, check=True)
+        notas = (motor / "COORDINACION.md").read_bytes() + b"\nNOTA LOCAL SIN COMMIT (como CASA)\n"
+        (motor / "COORDINACION.md").write_bytes(notas)
         (desktop / "resources").mkdir(parents=True)
         shutil.copy2(DESKTOP_BASE / "resources" / "app.asar", desktop / "resources" / "app.asar")
         (local / "Atlas").mkdir(parents=True)
         (local / "Atlas" / "desktop_operacion.json").write_text(json.dumps({
             "habilitada": True, "autorizada": True, "raiz": str(drive), "proyecto": str(motor), "modo_escritor": "lease_cloud"}),
             encoding="utf-8")
-        lnk = casa / "Atlas Viajes.lnk"
-        subprocess.run(["powershell", "-NoProfile", "-Command",
-                        f"$s=(New-Object -ComObject WScript.Shell).CreateShortcut('{lnk}'); $s.TargetPath='{desktop / 'Atlas Viajes.exe'}'; $s.Save()"],
-                       check=True, capture_output=True)
+        lnk, lnk2 = casa / "Atlas Viajes.lnk", casa / "Inicio" / "Atlas Viajes.lnk"
+        lnk2.parent.mkdir()
+        for acceso in (lnk, lnk2):
+            subprocess.run(["powershell", "-NoProfile", "-Command",
+                            f"$s=(New-Object -ComObject WScript.Shell).CreateShortcut('{acceso}'); $s.TargetPath='{desktop / 'Atlas Viajes.exe'}'; $s.Save()"],
+                           check=True, capture_output=True)
         mundo_mbt.construir(drive, ["900001", "900002"])
         env = v.entorno(worker, local)
         env.update(PYTHONPATH=str(motor), ATLAS_EXCLUSION_RAICES=str(drive), ATLAS_OCR_PROVIDER="rapidocr",
@@ -99,27 +103,42 @@ def main() -> int:
         comunes = ["-Motor", str(motor), "-Raiz", str(drive), "-RaizTrabajo", str(trabajo), "-LocalAppData", str(local)]
         codigo, salida = ps("preflight.ps1", env, *comunes, "-CommitEsperado", ANTERIOR, "-DesktopRecursos", str(desktop / "resources"),
                             "-Python", python)
-        v.registrar("preflight: LISTO para migrar", codigo == 0 and "LISTO para migrar" in salida, salida[-600:])
+        v.registrar("preflight detecta los cambios locales sin commit", codigo != 0 and "cambios sin commit" in salida, salida[-600:])
         migrar = [*comunes, "-Commit", nuevo, "-Rama", RAMA, "-Equipo", "CASA", "-DesktopDir", str(desktop),
-                  "-AccesoDirecto", str(lnk), "-Python", python, "-SinTareas"]
+                  "-AccesoDirecto", f"{lnk};{lnk2}", "-Python", python, "-SinTareas"]
         codigo, salida = ps("migrar_equipo.ps1", env, *migrar)
         v.registrar("migración simulada: nada cambia", codigo == 0 and git(motor, "rev-parse", "HEAD") == ANTERIOR
                     and not (local / "Atlas" / "raiz_publicada.json").exists() and not trabajo.exists(), salida[-600:])
 
         # 3. Migración aplicada.
-        codigo, salida = ps("migrar_equipo.ps1", env, *migrar, "-Aplicar")
-        v.registrar("migración aplicada (código 0)", codigo == 0, salida[-1500:])
+        instalar = ["-Equipo", "CASA", "-Commit", nuevo, "-Rama", RAMA, "-RaizTrabajo", str(trabajo), "-LocalAppData", str(local),
+                    "-DesktopDir", str(desktop), "-AccesoDirecto", f"{lnk};{lnk2}", "-Python", python, "-SinTareas",
+                    "-EscritorEsperado", "pc-no-es-este"]
+        codigo, salida = ps("instalar_equipo.ps1", env, *instalar, "-Aplicar")
+        v.registrar("instalador con escritor equivocado: no hace nada", codigo != 0 and "equipo equivocado" in salida
+                    and git(motor, "rev-parse", "HEAD") == ANTERIOR, salida[-400:])
+        instalar = instalar[:-2]
+        codigo, salida = ps("instalar_equipo.ps1", env, *instalar)
+        v.registrar("instalador en simulación: nada cambia", codigo == 0 and git(motor, "rev-parse", "HEAD") == ANTERIOR
+                    and b"NOTA LOCAL" in (motor / "COORDINACION.md").read_bytes(), salida[-400:])
+        codigo, salida = ps("instalar_equipo.ps1", env, *instalar, "-Aplicar")
+        v.registrar("instalación aplicada con instalar_equipo.ps1 (código 0)", codigo == 0, salida[-1500:])
+        cambios = json.loads((local / "Atlas" / "migracion_p0_cambios_locales.json").read_text(encoding="utf-8-sig"))
+        v.registrar("notas locales sin commit respaldadas y en stash, no perdidas",
+                    (Path(cambios["copia"]) / "COORDINACION.md").read_bytes() == notas
+                    and cambios["stash"] in git(motor, "stash", "list"))
         estado = json.loads((local / "Atlas" / "migracion_p0_estado.json").read_text(encoding="utf-8-sig"))
         v.registrar("respaldo remoto del Motor anterior en origin", git(origen, "rev-parse", estado["rama_respaldo"]) == ANTERIOR)
         v.registrar("respaldos locales: configuración, app.asar y acceso directo",
                     (Path(estado["respaldo_dir"]) / "desktop_operacion.json").is_file() and Path(estado["asar_respaldo"]).is_file()
-                    and Path(estado["acceso_directo_respaldo"]).is_file())
+                    and all(Path(c).is_file() for c in estado["accesos_directos_respaldo"]) and len(estado["accesos_directos_respaldo"]) == 2)
         v.registrar("Motor P0 instalado por fast-forward", git(motor, "rev-parse", "HEAD") == nuevo)
         cfg = json.loads((local / "Atlas" / "raiz_publicada.json").read_text(encoding="utf-8"))
         v.registrar("raíz de trabajo preparada; Drive pasa a ser la publicada",
                     Path(cfg["raiz_trabajo"]) == trabajo and Path(cfg["raiz_publicada"]) == drive and (trabajo / v.DATASET).is_file())
-        destino = acceso_directo(lnk)
-        v.registrar("acceso directo de Atlas -> iniciar_atlas.ps1", "iniciar_atlas.ps1" in destino, destino)
+        destinos = [acceso_directo(a) for a in (lnk, lnk2)]
+        v.registrar("ambos accesos directos -> iniciar_atlas.ps1, con vuelta al exe si no existe",
+                    all("iniciar_atlas.ps1" in d and "Atlas Viajes.exe" in d for d in destinos), destinos)
 
         # 4. Motor P0 trabaja: ingesta real y publicación en la Drive.
         vp.jpeg = lambda _m: mundo_mbt.imagen_guia("900101")
@@ -160,7 +179,9 @@ def main() -> int:
         v.registrar("reversión aplicada (código 0)", codigo == 0, salida[-1500:])
         v.registrar("Motor anterior restaurado y raíz de trabajo desactivada", git(motor, "rev-parse", "HEAD") == ANTERIOR
                     and not (local / "Atlas" / "raiz_publicada.json").exists())
-        v.registrar("acceso directo original restaurado", "Atlas Viajes.exe" in acceso_directo(lnk), acceso_directo(lnk))
+        restaurados = [acceso_directo(a) for a in (lnk, lnk2)]
+        v.registrar("accesos directos originales restaurados",
+                    all(d.startswith(str(desktop / "Atlas Viajes.exe")) and "iniciar_atlas" not in d for d in restaurados), restaurados)
         worker.avanzar(60)
         codigo, salida = motor_py("-m", "atlas_core.estado_confirmado", "--raiz-atlas", str(drive), "--verificar")
         verificacion = json.loads(salida.strip().splitlines()[-1]) if codigo == 0 else {}

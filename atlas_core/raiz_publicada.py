@@ -62,6 +62,24 @@ def operativa(raiz):
     return raiz
 
 
+NO_REDIRIGIR = frozenset({"ATLAS_EXCLUSION_RAICES"})
+
+
+def bajo_trabajo(valor: str, publicada: str, trabajo: str) -> str | None:
+    """La misma ruta bajo la raíz de trabajo si ``valor`` es la publicada o
+    está dentro de ella; si no, None."""
+    try:
+        ruta = os.path.normcase(os.path.abspath(valor)).rstrip("\\/")
+        base = os.path.normcase(os.path.abspath(publicada)).rstrip("\\/")
+    except (TypeError, ValueError):
+        return None
+    if ruta == base:
+        return trabajo
+    if ruta.startswith(base + os.sep):
+        return os.path.join(trabajo, os.path.relpath(os.path.abspath(valor), os.path.abspath(publicada)))
+    return None
+
+
 def redirigir_proceso() -> bool:
     """En el arranque: ``ATLAS_DATA_DIR`` y los argumentos que nombran la raíz
     publicada pasan a la de trabajo. Devuelve True si cambió algo."""
@@ -70,9 +88,16 @@ def redirigir_proceso() -> bool:
         return False
     publicada, trabajo = c["raiz_publicada"], c["raiz_trabajo"]
     cambio = False
-    if os.environ.get(VARIABLE_DATOS) and misma_ruta(os.environ[VARIABLE_DATOS], publicada):
-        os.environ[VARIABLE_DATOS] = trabajo
-        cambio = True
+    # Toda variable ATLAS_* que nombra la raíz publicada o algo dentro de ella
+    # (ATLAS_DATA_DIR, ATLAS_CATALOGOS_DIR del lanzador del PULL...). Las
+    # raíces protegidas por la guardia se dejan tal cual.
+    for nombre, valor in list(os.environ.items()):
+        if not nombre.upper().startswith("ATLAS_") or nombre.upper() in NO_REDIRIGIR or not valor:
+            continue
+        nuevo = bajo_trabajo(valor, publicada, trabajo)
+        if nuevo is not None:
+            os.environ[nombre] = nuevo
+            cambio = True
     for i, argumento in enumerate(sys.argv[1:], start=1):
         if not isinstance(argumento, str) or not argumento:
             continue

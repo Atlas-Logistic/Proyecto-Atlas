@@ -280,3 +280,16 @@ Migración coordinada (scripts/migracion_p0, ver PLAN_MIGRACION_P0.md): prefligh
 Pruebas: tests/test_p0_integral_regresiones.py con 6 pruebas; la de R2 falla sin la corrección. Suite completa: 46 fallas contra 46 en 48d6096. Las diferencias son intermitentes de reloj: test_falso_ok_obra_destino_p1, y test_trazabilidad_ocr::test_traza_no_cambia_campos_finales_extraidos, que falla 2 de 10 veces tanto en la base como en la rama. Las validaciones P0.1 a P0.5 aprueban.
 
 No se tocaron Atlas Viajes instalado (solo se copió), CASA, PULL, Drive ni Cloud productiva.
+
+
+## Instalación P0: corrección R4 e instalador por equipo (27/11/2026)
+
+Sobre 3456d77. Lo detectó el reconocimiento previo a la migración productiva de CASA.
+
+- R4 (P0.3.1/P0.6): el lanzador productivo del PULL (`scripts/pull_pc_nuevo.ps1`) exporta `ATLAS_CATALOGOS_DIR` sobre la raíz configurada (G:), y la redirección solo cubría `ATLAS_DATA_DIR`. El PULL habría usado los catálogos de Drive, y sus escrituras de catálogos chocarían con la guardia o quedarían fuera de la custodia.
+  - Corrección: `raiz_publicada.redirigir_proceso` redirige toda variable `ATLAS_*` que nombra la raíz publicada o algo dentro de ella, salvo `ATLAS_EXCLUSION_RAICES`.
+  - La prueba en test_p0_integral_regresiones.py falla sin la corrección.
+  - La validación integral ahora corre el PULL con el lanzador real pull_pc_nuevo.ps1: 36/36.
+- `scripts/migracion_p0/instalar_equipo.ps1`: instalador por equipo (identidad, respaldo y stash de cambios locales, cierre de Desktop, preflight con espera, migración y verificación).
+- Accesos directos múltiples, que vuelven al exe si `iniciar_atlas.ps1` no existe.
+- Ensayo validar_migracion.py: 23/23, incluye el árbol sucio como en CASA y dos accesos directos. Pruebas focales del P0: 381/381.

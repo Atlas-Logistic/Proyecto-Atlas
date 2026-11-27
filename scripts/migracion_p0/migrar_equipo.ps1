@@ -12,7 +12,7 @@ param(
     [Parameter(Mandatory)][string]$Equipo,            # CASA | OFICINA (nombre del respaldo)
     [string]$LocalAppData = $env:LOCALAPPDATA,
     [string]$DesktopDir = (Join-Path $env:LOCALAPPDATA 'Programs\Atlas Viajes'),
-    [string]$AccesoDirecto = '',                      # .lnk de Atlas a redirigir a iniciar_atlas.ps1 (vacio: no se toca)
+    [string]$AccesoDirecto = '',                      # .lnk de Atlas a redirigir (varios separados por ';'; vacio: no se toca)
     [string]$Python = '',
     [switch]$SinTareas,                               # pruebas: no tocar tareas programadas
     [switch]$Aplicar
@@ -28,11 +28,13 @@ $antes = Git $Motor rev-parse HEAD
 $respaldoDir = Join-Path $LocalAppData "Atlas\respaldo-p0-$fecha"
 $ramaRespaldo = "respaldo/antes-p0-$($Equipo.ToLower())-$fecha"
 $asar = Join-Path $DesktopDir 'resources\app.asar'
+$accesos = @($AccesoDirecto -split ';' | Where-Object { $_.Trim() } | ForEach-Object { $_.Trim() })
+$i = 0
+$respaldosAccesos = @($accesos | ForEach-Object { $i++; Join-Path $respaldoDir ("acceso$i-" + (Split-Path -Leaf $_)) })
 $nuevoEstado = [ordered]@{
     equipo = $Equipo; fecha = $fecha; motor = $Motor; motor_antes = $antes; commit_nuevo = $Commit; rama = $Rama
     rama_respaldo = $ramaRespaldo; respaldo_dir = $respaldoDir; raiz_publicada = $Raiz; raiz_trabajo = $RaizTrabajo
-    asar_respaldo = "$asar.antes-p0-$fecha"; acceso_directo = $AccesoDirecto
-    acceso_directo_respaldo = $(if ($AccesoDirecto) { Join-Path $respaldoDir (Split-Path -Leaf $AccesoDirecto) } else { '' })
+    asar_respaldo = "$asar.antes-p0-$fecha"; accesos_directos = $accesos; accesos_directos_respaldo = $respaldosAccesos
 }
 Anotar "Migracion P0 de $Equipo ($(if ($Aplicar) {'APLICAR'} else {'SIMULACION'})): Motor $antes -> $Commit"
 
@@ -46,9 +48,11 @@ Ejecutar $Aplicar "respaldo de la configuracion local en $respaldoDir" {
 Ejecutar $Aplicar "respaldo de Desktop ($($nuevoEstado.asar_respaldo))" {
     if (Test-Path -LiteralPath $asar) { Copy-Item -LiteralPath $asar -Destination $nuevoEstado.asar_respaldo }
 }
-if ($AccesoDirecto) {
-    Ejecutar $Aplicar "respaldo del acceso directo $AccesoDirecto" {
-        if (Test-Path -LiteralPath $AccesoDirecto) { Copy-Item -LiteralPath $AccesoDirecto -Destination $nuevoEstado.acceso_directo_respaldo }
+for ($j = 0; $j -lt $accesos.Count; $j++) {
+    $origen, $copia = $accesos[$j], $respaldosAccesos[$j]
+    Ejecutar $Aplicar "respaldo del acceso directo $origen" {
+        New-Item -ItemType Directory -Path $respaldoDir -Force | Out-Null
+        if (Test-Path -LiteralPath $origen) { Copy-Item -LiteralPath $origen -Destination $copia }
     }
 }
 if ($Aplicar) { Escribir-Json $rutaEstado $nuevoEstado; Anotar "Estado de migracion: $rutaEstado" }
@@ -91,12 +95,17 @@ try {
 }
 
 # ---------------------------------------------------------------- Inicio
-if ($AccesoDirecto) {
-    Ejecutar $Aplicar "acceso directo $AccesoDirecto -> scripts\iniciar_atlas.ps1 (actualizacion automatica al iniciar)" {
+foreach ($acceso in $accesos) {
+    Ejecutar $Aplicar "acceso directo $acceso -> scripts\iniciar_atlas.ps1 (actualizacion automatica al iniciar)" {
+        # Un acceso directo del escritorio puede sincronizarse (OneDrive) a un
+        # equipo aun no migrado: sin iniciar_atlas.ps1 abre Atlas como antes.
+        $iniciar = Join-Path $Motor 'scripts\iniciar_atlas.ps1'
+        $exe = '$env:LOCALAPPDATA\Programs\Atlas Viajes\Atlas Viajes.exe'
+        $comando = "if (Test-Path -LiteralPath '$iniciar') { & '$iniciar' } else { Start-Process -FilePath `"$exe`" }"
         $shell = New-Object -ComObject WScript.Shell
-        $lnk = $shell.CreateShortcut($AccesoDirecto)
+        $lnk = $shell.CreateShortcut($acceso)
         $lnk.TargetPath = (Join-Path $env:WINDIR 'System32\WindowsPowerShell\v1.0\powershell.exe')
-        $lnk.Arguments = "-NoProfile -WindowStyle Hidden -ExecutionPolicy Bypass -File `"$(Join-Path $Motor 'scripts\iniciar_atlas.ps1')`""
+        $lnk.Arguments = "-NoProfile -WindowStyle Hidden -ExecutionPolicy Bypass -Command `"$($comando.Replace('"', '\"'))`""
         $lnk.IconLocation = (Join-Path $DesktopDir 'Atlas Viajes.exe')
         $lnk.WorkingDirectory = $Motor
         $lnk.Save()

@@ -44,10 +44,13 @@ try {
     Ejecutar $Aplicar "desactivar la raiz de trabajo (raiz_publicada.json -> .revertido): el Motor vuelve a $($e.raiz_publicada)" {
         if (Test-Path -LiteralPath $config) { Move-Item -LiteralPath $config -Destination "$config.revertido-$(Get-Date -Format yyyyMMdd-HHmmss)" }
     }
-    if ($e.acceso_directo -and $e.acceso_directo_respaldo) {
-        Ejecutar $Aplicar "restaurar el acceso directo $($e.acceso_directo)" {
-            if (Test-Path -LiteralPath $e.acceso_directo_respaldo) { Copy-Item -LiteralPath $e.acceso_directo_respaldo -Destination $e.acceso_directo -Force }
-            else { Remove-Item -LiteralPath $e.acceso_directo -ErrorAction SilentlyContinue }
+    $accesos = @($e.accesos_directos)
+    $copias = @($e.accesos_directos_respaldo)
+    for ($j = 0; $j -lt $accesos.Count; $j++) {
+        $destino, $copia = $accesos[$j], $copias[$j]
+        Ejecutar $Aplicar "restaurar el acceso directo $destino" {
+            if (Test-Path -LiteralPath $copia) { Copy-Item -LiteralPath $copia -Destination $destino -Force }
+            else { Remove-Item -LiteralPath $destino -ErrorAction SilentlyContinue }
         }
     }
     $asar = Join-Path (Split-Path -Parent $e.asar_respaldo) 'app.asar'

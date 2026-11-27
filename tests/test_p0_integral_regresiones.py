@@ -57,6 +57,22 @@ class RaizPublicadaEnProcesos(unittest.TestCase):
         self.assertEqual(rp.operativa(str(self.publicada)), str(self.trabajo))
         self.assertEqual(rp.operativa(Path("C:/otra")), Path("C:/otra"))
 
+    def test_variables_del_lanzador_del_pull_tambien_se_redirigen(self):
+        # pull_pc_nuevo.ps1 exporta ATLAS_DATA_DIR y ATLAS_CATALOGOS_DIR sobre la raíz configurada (Drive).
+        (self.trabajo / "catalogos_privados").mkdir()
+        entorno = {"ATLAS_DATA_DIR": str(self.publicada), "ATLAS_CATALOGOS_DIR": str(self.publicada / "catalogos_privados"),
+                   "ATLAS_EXCLUSION_RAICES": str(self.publicada), "ATLAS_OTRA": r"C:\otra\ruta", "OTRA_VARIABLE": str(self.publicada)}
+        with patch.object(sys, "argv", ["sincronizar_mobile_cloud.py"]), patch.dict(os.environ, entorno):
+            self.assertTrue(rp.redirigir_proceso())
+            self.assertEqual(os.environ["ATLAS_DATA_DIR"], str(self.trabajo))
+            self.assertEqual(Path(os.environ["ATLAS_CATALOGOS_DIR"]), self.trabajo / "catalogos_privados")
+            self.assertEqual(os.environ["ATLAS_EXCLUSION_RAICES"], str(self.publicada))  # la guardia sigue en Drive
+            self.assertEqual(os.environ["ATLAS_OTRA"], r"C:\otra\ruta")
+            self.assertEqual(os.environ["OTRA_VARIABLE"], str(self.publicada))
+            from atlas_core.fuente_catalogos import resolver_fuente_catalogos
+            self.assertEqual(Path(resolver_fuente_catalogos(None)).resolve(),
+                             (self.trabajo / "catalogos_privados").resolve())
+
     def test_sin_configuracion_nada_cambia(self):
         self.cfg.unlink()
         with patch.object(sys, "argv", ["x", str(self.publicada)]):

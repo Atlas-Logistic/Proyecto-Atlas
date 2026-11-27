@@ -153,8 +153,33 @@ class Instalacion:
         return self.py("-m", "atlas_core.estado_confirmado", "--raiz-atlas", str(self.L), "--preparar-raiz-trabajo", str(self.D))
 
     def pull(self):
-        # Como la tarea programada: con la raíz configurada (la publicada) -> se redirige a la de trabajo.
-        return self.py("sincronizar_mobile_cloud.py", "--raiz-atlas", str(self.D))
+        """Como la tarea programada: el lanzador REAL scripts/pull_pc_nuevo.ps1, que exporta
+        ATLAS_DATA_DIR y ATLAS_CATALOGOS_DIR sobre la raíz configurada (la publicada)."""
+        from datetime import datetime, timedelta, timezone
+        autorizacion = self.local / "Atlas" / "pull_autorizacion.json"
+        autorizacion.write_text(json.dumps({"autor": "Javier", "exclusividad_verificada": True, "modo": "temporal",
+                                            "habilitada": True, "revocada": False,
+                                            "vence_utc": (datetime.now(timezone.utc) + timedelta(hours=2)).isoformat()}),
+                                encoding="utf-8")
+        registro = self.local / "Atlas" / "logs" / "mobile_pull_cloud.log"
+        registro.unlink(missing_ok=True)
+        env = {k: val for k, val in self.env.items() if k not in ("ATLAS_DATA_DIR", "ATLAS_CATALOGOS_DIR", "PYTHONPATH")}
+        r = subprocess.run(["powershell", "-NoProfile", "-ExecutionPolicy", "Bypass", "-File",
+                            str(self.motor / "scripts" / "pull_pc_nuevo.ps1"), "-Config", str(self.config_operacion),
+                            "-Autorizacion", str(autorizacion)], env=env, capture_output=True, text=True,
+                           encoding="utf-8", errors="replace", timeout=1800)
+        crudo = registro.read_bytes() if registro.is_file() else b""
+        # PowerShell 5.1: la redirección *> del lanzador escribe UTF-16.
+        texto = crudo.decode("utf-16") if crudo[:2] in (b"\xff\xfe", b"\xfe\xff") else crudo.decode("utf-8", "replace")
+        texto = texto.lstrip("﻿")
+        datos = None
+        inicio = texto.find("{")
+        if inicio >= 0:
+            try:
+                datos = json.JSONDecoder().raw_decode(texto[inicio:])[0]
+            except ValueError:
+                datos = None
+        return r.returncode, datos, (r.stdout + r.stderr + texto)[-3000:]
 
     def iniciar_atlas(self):
         """Lo que hace scripts/iniciar_atlas.ps1 antes de abrir Desktop."""
