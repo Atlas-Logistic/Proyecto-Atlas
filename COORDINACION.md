@@ -293,3 +293,29 @@ Sobre 3456d77. Lo detectó el reconocimiento previo a la migración productiva d
 - `scripts/migracion_p0/instalar_equipo.ps1`: instalador por equipo (identidad, respaldo y stash de cambios locales, cierre de Desktop, preflight con espera, migración y verificación).
 - Accesos directos múltiples, que vuelven al exe si `iniciar_atlas.ps1` no existe.
 - Ensayo validar_migracion.py: 23/23, incluye el árbol sucio como en CASA y dos accesos directos. Pruebas focales del P0: 381/381.
+
+
+## Migración productiva P0: CASA (27/11/2026)
+
+CASA = JAVO, MachineGuid 0fb5d7fa-4e1a-44ed-b103-2b8f9e189150, escritor pc-b7804417-42c3-4be3-b8b1-9ea3db3ec36b. Motor instalado **8d699c1** en C:\Atlas\Proyecto-Atlas (rama casa/asociacion-manual-mobile-20261126 avanzada por fast-forward).
+
+- Respaldos:
+  - origin/respaldo/antes-p0-casa-20261127-133053 = 48d6096;
+  - LOCALAPPDATA\Atlas\respaldo-p0-20261127-133053 (configuración y accesos directos);
+  - app.asar.antes-p0-20261127-133053;
+  - notas de Codex: stash «antes-p0-casa-20261127-133038» y copia en respaldo-p0-cambios-locales-20261127-133038.
+- Raíz de trabajo C:\AtlasTrabajo\Atlas; G: pasa a ser la raíz publicada (raiz_publicada.json). Accesos directos del escritorio y del menú Inicio apuntan a iniciar_atlas.ps1, con vuelta al exe.
+- Defectos del P0 encontrados en producción y corregidos antes o durante la instalación (decisión de Javier):
+  - ATLAS_CATALOGOS_DIR del lanzador sin redirigir (1d208ca);
+  - conteo de tareas y procesos de un elemento en PowerShell 5.1 (3390845);
+  - valores relativos resueltos contra la carpeta actual: el token se corrompía con la carpeta actual en G: (8d699c1).
+- Javier reabrió Desktop durante la migración e ingresó 2 guías (492336, 492337). Ese ingreso pasó por el camino P0 y quedó confirmado y publicado.
+- Verificación:
+  - ciclos PULL con código 0 en 8d699c1 (13:54 y 13:56), con la raíz redirigida;
+  - custodia v827: 1381 archivos, 0 distintos, sin diarios ni publicación pendiente;
+  - G: idéntico a Cloud en 1381 rutas, y los 17 archivos cambiados en G: desde la migración están confirmados;
+  - consulta B1 de solo lectura sobre G: correcta, con el dataset intacto;
+  - iniciar_atlas.ps1 responde SIN_VERSION_PUBLICADA;
+  - recepción Mobile: ciclos con consulta de pendientes correcta; no hubo envíos reales en la ventana.
+- NO activados, por decisión de Javier: protocolo 3 y primera versión publicada. OFICINA sin migrar: ver scripts/migracion_p0/OFICINA_PENDIENTE.md, mismo commit 8d699c1.
+- Notas de Codex reaplicadas sin commit en el Motor instalado, lo que bloquea la actualización automática y revertir_equipo.ps1 hasta que se hagan commit o se muevan.
