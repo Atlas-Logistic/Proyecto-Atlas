@@ -1,0 +1,12 @@
+{
+  "descripcion": "Desktop P1.1+P1.2 (ficha B1 integral y edicion): app.asar 2914483 -> 3f23a1a (feat/edicion-ficha-b1-20261127)",
+  "desktop_commit_entrada": "2914483",
+  "desktop_commit_salida": "3f23a1a5a847c67868869568140ba2d2602f18d6",
+  "asar_entrada_sha256": "e2c7e61b106a8e244e7649db9dd6de636871a60909de5f534f8b3c2728030c05",
+  "asar_salida_sha256": "38dbcede8673402f8bbac20f7e30b7f364314cd3f547a1cd35a4a31642b0a599",
+  "archivos": {
+    "src/atlas_viajes.html": "bf9f4cb453eae8b89bfe53ce1915b79ff1c2e93605305de0b0dc89900ef98fb4",
+    "src/b1_ficha_consulta.js": "139ee9d1e2bc0fc5f0684d93d88a92acb400a73df7290a15898315b8eb49b276",
+    "src/exportacion_mbt.js": "b277d9a7d1a000574665dcb0c7f4e13ff2c19b83a0b9d66b5ec2b549c63b119a"
+  }
+}
