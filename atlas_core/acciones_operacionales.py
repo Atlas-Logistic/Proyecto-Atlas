@@ -2318,11 +2318,9 @@ def _plan_documento_destino_operacional(ctx: _Contexto, p: dict) -> Plan:
     from atlas_core.destino_operacional import proyectar_destino
     from atlas_core.direccion_equivalente import comuna_oficial
     from atlas_core.credibilidad_campos import evaluar_credibilidad_direccion, NivelCredibilidad
-    direccion, comuna = str(p["direccion"]).strip(), str(p["comuna"]).strip()
+    direccion, comuna = str(p.get("direccion") or "").strip(), str(p["comuna"]).strip()
     if not comuna_oficial(comuna):
         raise ErrorAccionOperacional("PARAMETRO_INVALIDO", "Indica una comuna oficial explicita.")
-    if evaluar_credibilidad_direccion(direccion).nivel != NivelCredibilidad.CONFIABLE:
-        raise ErrorAccionOperacional("PARAMETRO_INVALIDO", "Indica una direccion completa y sin ambiguedad.")
     fila = _fila_documento(ctx, str(p["numero_guia"]), str(p.get("archivo", "")))
     archivo, guia = str(fila.get("archivo", "")).strip(), str(fila.get("numero_guia", "")).strip()
     if not archivo:
@@ -2331,6 +2329,18 @@ def _plan_documento_destino_operacional(ctx: _Contexto, p: dict) -> Plan:
     actual = proyectar_destino(fila, ledger)
     anterior = {"direccion": str(actual.get("direccion_entrega") or fila.get("despachar_a_crudo") or ""),
                 "comuna": str(actual.get("localidad_entrega") or "")}
+    if not direccion:
+        # Sólo la comuna (ficha B1 o «la comuna de la guía N es X»): se
+        # conserva la dirección vigente; sin dirección no hay destino que fijar.
+        direccion = str(actual.get("direccion_entrega") or "").strip()
+        if not direccion:
+            raise ErrorAccionOperacional("PARAMETRO_INVALIDO",
+                                         "La guía no tiene dirección de entrega; indica también la dirección.")
+    # La exigencia de dirección completa aplica a la que aporta la persona,
+    # no a la vigente que se conserva al corregir sólo la comuna.
+    if (direccion != anterior["direccion"]
+            and evaluar_credibilidad_direccion(direccion).nivel != NivelCredibilidad.CONFIABLE):
+        raise ErrorAccionOperacional("PARAMETRO_INVALIDO", "Indica una direccion completa y sin ambiguedad.")
     propuesto = {"direccion": direccion, "comuna": comuna_oficial(comuna)}
     return Plan(entidad={"tipo": "DOCUMENTO", "id": archivo, "numero_guia": guia,
                          "numero_transporte": _transporte(fila), "campo": "DESTINO_OPERACIONAL"},
@@ -2813,7 +2823,12 @@ def _plan_documento_corregir_numero_guia(ctx: _Contexto, p: dict) -> Plan:
     if digito_inicial_omitido and not str(p.get("archivo", "")).strip():
         raise ErrorAccionOperacional("PARAMETRO_INVALIDO", "con digito inicial ausente hay que indicar archivo")
     marcador_absorbido = actual in {marcador + nuevo for marcador in _MARCADORES_FOLIO_ABSORBIDOS}
-    if not marcador_absorbido and actual != GUIA_AUSENTE_DOCUMENTAL and not digito_inicial_omitido:
+    # Folio mal leído en general: sólo con el documento exacto y la persona
+    # declarando que lo comparó con el original (ficha B1 o frase explícita).
+    correccion_general = (bool(p.get("confirmado_contra_original")) and bool(str(p.get("archivo", "")).strip())
+                          and bool(re.fullmatch(r"[0-9]{3,12}", actual)) and actual != nuevo)
+    if (not marcador_absorbido and actual != GUIA_AUSENTE_DOCUMENTAL and not digito_inicial_omitido
+            and not correccion_general):
         raise ErrorAccionOperacional(
             "PRECONDICION_FALLIDA",
             "solo se admite folio ausente, un digito inicial omitido o marcador inicial interpretado como 8 o 9")
@@ -3978,7 +3993,7 @@ ACCIONES: dict[str, DefinicionAccion] = {d.nombre: d for d in (
                      _plan_documento_corregir_chofer, _aplicar_documento_corregir_chofer),
     DefinicionAccion("DOCUMENTO_CORREGIR_DESTINO_OPERACIONAL", OPERACIONAL_REVERSIBLE,
                      "Fija el destino operacional de una guia sin alterar su documento.",
-                     {"numero_guia": _P("texto", True, max_largo=20), "conservar_estado": _P("bool"), "direccion": _P("texto", True, max_largo=200),
+                     {"numero_guia": _P("texto", True, max_largo=20), "conservar_estado": _P("bool"), "direccion": _P("texto", max_largo=200),
                       "comuna": _P("texto", True, max_largo=80),
                       "archivo": _P("archivo_documento", max_largo=260), "referencia": _REF},
                      _plan_documento_destino_operacional, _aplicar_documento_destino_operacional),
@@ -4004,7 +4019,8 @@ ACCIONES: dict[str, DefinicionAccion] = {d.nombre: d for d in (
     DefinicionAccion("DOCUMENTO_CORREGIR_NUMERO_GUIA", OPERACIONAL_REVERSIBLE,
                      "Corrige un folio ausente, con digito inicial omitido o marcador inicial interpretado como 8 o 9.",
                      {"numero_guia": _P("texto", True, max_largo=20), "numero_guia_corregido": _P("guia", True),
-                      "archivo": _P("archivo_documento", max_largo=260), "referencia": _REF},
+                      "archivo": _P("archivo_documento", max_largo=260), "confirmado_contra_original": _P("bool"),
+                      "referencia": _REF},
                      _plan_documento_corregir_numero_guia, _aplicar_documento_corregir_numero_guia),
     DefinicionAccion("MOBILE_RECALCULAR_ESTADO", OPERACIONAL_REVERSIBLE,
                      "Recalcula sin OCR el estado del envío Mobile de una guía con su fila vigente.",

@@ -71,7 +71,8 @@ def test_transporte_con_dos_guias_conflicto_y_ausentes_explicitos():
               evidencias_documentos=json.dumps([a, b]))
     r = construir_ficha("TRANSPORTE", "0000372894", filas=[a, b], viajes=[v])
     assert r["estado"] == "FICHA" and r["solo_lectura"] is True
-    assert "preview" not in r and r["ficha"]["edicion"]["disponible"] is False
+    # P1.2: la ficha ofrece edición, pero la consulta misma nunca trae preview.
+    assert "preview" not in r and r["ficha"]["edicion"]["disponible"] is True
     guias = r["ficha"]["guias"]
     assert [g["documento"]["numero_guia"] for g in guias] == ["492295", "492296"]
     assert guias[0]["original"]["archivo"] == "mobile/a/original.jpg"
@@ -82,7 +83,9 @@ def test_transporte_con_dos_guias_conflicto_y_ausentes_explicitos():
     comuna = campo(guias[1]["campos"], "localidad_entrega")
     assert comuna["estado"] == "OK" and comuna["valor"] == "QUILICURA"
     assert [x["fuente"] for x in comuna["valores"]] == ["REPORTE_DESKTOP"]
-    assert campo(guias[1]["campos"], "direccion_entrega")["estado"] == "AUSENTE"
+    # Sin dirección en la extracción: el destino de su entrega en el reporte, con su fuente.
+    direccion = campo(guias[1]["campos"], "direccion_entrega")
+    assert direccion["valor"] == "CERRO SAN LUIS 9890" and [x["fuente"] for x in direccion["valores"]] == ["REPORTE_DESKTOP"]
     # Consolidado: la hora de entrada difiere entre guías -> conflicto con origen.
     consolidado = r["ficha"]["viajes"][0]
     entrada = campo(consolidado["campos"], "hora_entrada_aza")
@@ -191,3 +194,15 @@ def test_operador_atender_devuelve_ficha_sin_tocar_la_conversacion(entorno):  # 
     r = OperadorB1(entorno["raiz"]).atender("conv-1", "Datos de la guía 492295")
     assert r["estado"] == "FICHA" and "preview" not in r
     assert {p: p.read_bytes() for p in entorno["raiz"].rglob("*") if p.is_file()} == antes
+
+
+def test_direccion_con_comuna_al_final_no_es_conflicto():
+    a = fila("a", "1", direccion_entrega="MAESTRA LIDIA TORRES 92 SANTIAGO RECOLETA")
+    v = viaje("9", [a], entregas=json.dumps([{"localidad_entrega": "RECOLETA", "destino_operacional": "MAESTRA LIDIA TORRES 92",
+                                              "numeros_guia": ["1"]}]))
+    r = construir_ficha("GUIA", "1", filas=[a], viajes=[v])
+    assert campo(r["ficha"]["guias"][0]["campos"], "direccion_entrega")["estado"] == "OK"
+    b = fila("b", "2", direccion_entrega="MAESTRA LIDIA TORRES 93 SANTIAGO RECOLETA")
+    v2 = viaje("8", [b], entregas=json.dumps([{"destino_operacional": "MAESTRA LIDIA TORRES 92", "numeros_guia": ["2"]}]))
+    r2 = construir_ficha("GUIA", "2", filas=[b], viajes=[v2])
+    assert campo(r2["ficha"]["guias"][0]["campos"], "direccion_entrega")["estado"] == "CONFLICTO"

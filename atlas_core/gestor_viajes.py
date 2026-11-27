@@ -1006,6 +1006,11 @@ class Viaje:
                 "descripcion_material": d.material_publicable,
                 "despachar_a_crudo": valor_publicable(d.despachar_a_crudo, evaluar_credibilidad_direccion),
                 "peso_kg": d.peso_kg,
+                # Destino confirmado por una persona (ficha B1, Revisión o
+                # «el destino de la guía N es …»): Desktop, Excel y PDF lo
+                # muestran por documento en lugar de la lectura impresa.
+                **({"direccion_operacional": d.direccion_entrega, "comuna_operacional": d.localidad_entrega}
+                   if d.destino_operacional_confirmado else {}),
             }
             for d in self.documentos
         ]

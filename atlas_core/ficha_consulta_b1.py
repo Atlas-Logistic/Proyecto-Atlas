@@ -51,7 +51,7 @@ CAMPOS_GUIA = (
     ("localidad_entrega", "Comuna de entrega", "Cliente y entrega", True),
     ("region_entrega", "Región", "Cliente y entrega", False),
     ("descripcion_material", "Materiales", "Carga", True),
-    ("tipo_carga", "Tipo de carga", "Carga", True),
+    ("tipo_carga", "Tipo de carga", "Carga", False),
     ("peso_kg", "Peso", "Carga", True),
     ("chofer", "Chofer", "Transporte", True),
     ("rut_chofer", "RUT chofer", "Transporte", False),
@@ -125,7 +125,23 @@ def _limpio(valor: object) -> str:
     return "" if ausente(valor) else " ".join(str(valor).split())
 
 
+def _sin_comuna_final(direccion: str) -> str:
+    """«MAESTRA LIDIA TORRES 92 SANTIAGO RECOLETA» y «MAESTRA LIDIA TORRES 92»
+    son la misma dirección: se quitan al final una comuna oficial y/o SANTIAGO."""
+    from atlas_core.direccion_equivalente import comuna_oficial
+    palabras = _normalizar(direccion).split()
+    for _ in range(2):
+        for largo in range(min(4, len(palabras) - 1), 0, -1):
+            cola = " ".join(palabras[-largo:])
+            if cola == "SANTIAGO" or comuna_oficial(cola):
+                palabras = palabras[:-largo]
+                break
+    return " ".join(palabras)
+
+
 def _clave_comparable(campo: str, valor: str) -> str:
+    if campo == "direccion_entrega":
+        return _sin_comuna_final(valor)
     if campo in {"peso_kg", "permanencia_minutos"}:
         try:
             return str(round(float(valor.replace(",", "."))))
@@ -205,12 +221,17 @@ def _ficha_guia(fila: dict[str, str], viaje: dict[str, str] | None, viaje_indice
     numero_guia = _limpio(fila.get("numero_guia"))
     reporte = _documento_reporte(viaje, archivo)
     entrega = _entrega_de(viaje, numero_guia)
+    # El destino de la guía en el reporte es el de su entrega (con las
+    # decisiones de destino ya proyectadas); la evidencia por documento
+    # conserva la lectura previa.
     desde_entrega = {"localidad_entrega": entrega.get("localidad_entrega"),
-                     "region_entrega": entrega.get("region_entrega")}
+                     "region_entrega": entrega.get("region_entrega"),
+                     "direccion_entrega": entrega.get("destino_operacional")}
     campos = []
     for campo, etiqueta, grupo, editable in CAMPOS_GUIA:
         fuentes = [(FUENTE_EXTRACCION, _limpio(fila.get(campo)))]
-        valor_reporte = _limpio(reporte.get(campo)) or _limpio(desde_entrega.get(campo))
+        valor_reporte = (_limpio(desde_entrega.get(campo)) or _limpio(reporte.get(campo))
+                         if campo in desde_entrega else _limpio(reporte.get(campo)))
         fuentes.append((FUENTE_REPORTE, valor_reporte))
         campos.append(_campo_con_fuentes(campo, etiqueta, grupo, "GUIA", fuentes, editable=editable))
     return {
@@ -294,8 +315,13 @@ def _revisiones_por_archivo(decisiones: list[dict]) -> dict[str, int]:
 
 
 def construir_ficha(tipo: str, numero: str, *, filas: list[dict[str, str]], viajes: list[dict[str, str]] | None,
-                    decisiones: list[dict] | None = None) -> dict:
+                    decisiones: list[dict] | None = None, ledger: dict | None = None) -> dict:
     """Respuesta B1 completa para una consulta de ficha. Nunca escribe."""
+    if ledger is not None:
+        # Valor vigente de cada guía: la extracción con las decisiones de
+        # destino ya confirmadas (lo mismo que publica el reporte).
+        from atlas_core.destino_operacional import proyectar_destino
+        filas = [proyectar_destino(f, ledger) for f in filas]
     viajes_lista = viajes or []
     por_archivo = {str(f.get("archivo") or ""): f for f in filas}
     revisiones = _revisiones_por_archivo(decisiones or [])
@@ -408,8 +434,11 @@ def construir_ficha(tipo: str, numero: str, *, filas: list[dict[str, str]], viaj
         "ficha": {
             "version": VERSION_FICHA, "consulta": {"tipo": tipo, "numero": numero},
             "guias": guias, "viajes": fichas_viaje, "avisos": avisos,
-            # Contrato para la futura edición integral: aún no hay acciones.
-            "edicion": {"disponible": False, "campos_editables": [c for c, _e, _g, editable in CAMPOS_GUIA if editable]},
+            # Edición integral: Desktop envía los cambios al canal B1
+            # (`atlas_core.edicion_ficha_b1`); las opciones las agrega
+            # `responder_ficha`, que conoce los catálogos.
+            "edicion": {"disponible": True, "campos_editables": [c for c, _e, _g, editable in CAMPOS_GUIA if editable],
+                        "opciones": {}},
         },
     }
 
@@ -429,7 +458,10 @@ def responder_ficha(ctx, texto: str) -> dict | None:
     except (OSError, ValueError, csv.Error):
         viajes = None
     respuesta = construir_ficha(pedido[0], pedido[1], filas=instantanea["filas"], viajes=viajes,
-                                decisiones=instantanea["decisiones"])
+                                decisiones=instantanea["decisiones"], ledger=instantanea["ledger"])
+    if respuesta.get("ficha"):
+        from atlas_core.edicion_ficha_b1 import opciones_edicion
+        respuesta["ficha"]["edicion"]["opciones"] = opciones_edicion(ctx)
     if viajes is None and respuesta.get("ficha"):
         respuesta["ficha"]["avisos"].insert(0, "No pude leer el reporte vigente: solo se muestran datos de la extracción.")
     return respuesta

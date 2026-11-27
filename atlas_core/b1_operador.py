@@ -689,6 +689,48 @@ def _formas_campo_guia(dato: str) -> list[re.Pattern]:
 
 _TRANSPORTE_GUIA = _formas_campo_guia(_TRANSPORTE_DOC)
 _PLANTA_GUIA = _formas_campo_guia(_PLANTA_DOC)
+# Campos que la ficha B1 edita y que también se corrigen con las mismas formas
+# naturales: horas AZA y comuna de entrega (conserva la dirección vigente).
+# Las patentes no: «la patente de la rampla de la guía N es X» es ambigua con
+# el error documental AZA y sigue sin interpretarse (se editan en la ficha).
+_CAMPOS_NATURALES_GUIA = (
+    ("hora_entrada_aza", _formas_campo_guia(
+        r"(?:LA\s+)?HORA\s+DE\s+(?:ENTRADA|INGRESO|LLEGADA)(?:\s+(?:A\s+)?(?:LA\s+)?PLANTA)?")),
+    ("hora_salida_aza", _formas_campo_guia(
+        r"(?:LA\s+)?HORA\s+DE\s+(?:SALIDA|DESPACHO)(?:\s+(?:DE\s+)?(?:LA\s+)?PLANTA)?")),
+    ("localidad_entrega", _formas_campo_guia(r"(?:LA\s+)?COMUNA(?:\s+DE\s+(?:ENTREGA|DESTINO))?")),
+)
+# Folio leído de otra forma, sólo en forma afirmativa y con el folio completo:
+# «el número (correcto) de la guía N es NNNNNN». «Corrige el número de guía N
+# a M» conserva su significado restringido (marcador 8/9, dígito omitido).
+_FOLIO_NATURAL = re.compile(r"^(?:EL\s+)?(?:NUMERO|FOLIO)(?:\s+(?:CORRECTO|REAL))?\s+DE\s+(?:LA\s+)?" + _GUIA
+                            + r"\s+ES\s+(?:EL\s+)?(?:N[°O]?\s*)?(?P<folio>[1-9][0-9]{5})$")
+
+
+def _hora_declarada(valor: str) -> str:
+    m = re.fullmatch(r"(\d{1,2})\s*[:.H]\s*(\d{2})(?:\s*(?:HRS?|HORAS))?\.?", valor.strip())
+    return f"{int(m.group(1)):02d}:{m.group(2)}" if m else valor.strip()
+
+
+def _intencion_campo_natural(texto: str, plano: str) -> Intencion | None:
+    referencia = " ".join(str(texto).split())[:500]
+    for campo, patrones in _CAMPOS_NATURALES_GUIA:
+        for patron in patrones:
+            m = patron.match(plano)
+            if not m:
+                continue
+            guia, valor = m.group("guia"), m.group("v").strip(" ,:.")
+            if campo in {"hora_entrada_aza", "hora_salida_aza"}:
+                return Intencion("DOCUMENTO_CORREGIR_CAMPO", {"numero_guia": guia, "campo": campo,
+                                                              "valor": _hora_declarada(valor), "referencia": referencia})
+            return Intencion("DOCUMENTO_CORREGIR_DESTINO_OPERACIONAL",
+                             {"numero_guia": guia, "comuna": valor, "referencia": referencia})
+    m = _FOLIO_NATURAL.match(plano)
+    if m and m.group("folio") != m.group("guia"):
+        return Intencion("DOCUMENTO_CORREGIR_NUMERO_GUIA", {
+            "numero_guia": m.group("guia"), "numero_guia_corregido": m.group("folio"),
+            "confirmado_contra_original": True, "referencia": referencia})
+    return None
 # Confirmación administrativa específica de una discrepancia de RUT: nunca
 # basta un "sí" cuando el RUT impreso contradice al chofer propuesto.
 _CONFIRMAR_DISCREPANCIA = re.compile(r"^CONFIRMO\s+(?:LA\s+)?DISCREPANCIA(?:\s+(?:DE(?:L)?\s+)?RUT)?$")
@@ -1122,6 +1164,9 @@ def interpretar_determinista(texto: str) -> Intencion | None:
                     "numero_guia": m.group("guia"), "campo": "numero_transporte",
                     "valor": re.sub(r"[\s.\-]", "", original[m.start("v"):m.end("v")]).strip(" ,:"),
                     "referencia": " ".join(str(texto).split())[:500]})
+        natural = _intencion_campo_natural(texto, plano)
+        if natural is not None:
+            return natural
         for patron in _PLANTA_GUIA:
             m = patron.match(plano)
             if m:
@@ -2377,6 +2422,11 @@ class OperadorB1:
         respuesta_revision = consultar_revisiones(self.capa._ctx, texto)
         if respuesta_revision is not None:
             return respuesta_revision
+        from atlas_core.edicion_ficha_b1 import es_lote_ficha
+        if es_lote_ficha(texto):
+            # Cambios de la ficha: siempre una corrección (operador o rechazo).
+            return ({"estado": "REQUIERE_OPERADOR"} if derivar_operacionales else
+                    {"estado": "RECHAZADA", "mensaje": "SOLO CONSULTA: las acciones operacionales están deshabilitadas."})
         from atlas_core.ficha_consulta_b1 import responder_ficha
         ficha = responder_ficha(self.capa._ctx, texto)
         if ficha is not None:
@@ -2415,6 +2465,10 @@ class OperadorB1:
         try:
             with bloqueo_sesion(self._actual, "b1_operador_conversaciones"):
                 estado = self._leer()
+                from atlas_core.edicion_ficha_b1 import es_lote_ficha, previsualizar_lote
+                if es_lote_ficha(texto):
+                    self._olvidar_investigacion(estado, conversacion_id)
+                    return previsualizar_lote(self, estado, conversacion_id, texto, actor=ACTOR_B1, origen=ORIGEN_B1)
                 decision_id, texto = separar_contexto_revision(texto)
                 # El ofrecimiento de registrar una obra vale sólo para el mensaje
                 # inmediatamente siguiente, en la misma conversación y tarjeta.
@@ -3509,6 +3563,12 @@ class OperadorB1:
             return {"estado": "SIN_PREVIEW_PENDIENTE", "mensaje": "No hay ninguna operación pendiente de confirmar."}
         if pendiente.get("accion") == ACCION_CHOFER_OPERACIONAL:
             return self._confirmar_chofer_operacional(estado, conversacion_id, pendiente, discrepancia_rut)
+        if pendiente.get("accion") == "FICHA_EDITAR":
+            if discrepancia_rut:
+                return {"estado": "ACLARACION_REQUERIDA", "candidatos": [],
+                        "mensaje": "Los cambios de la ficha no tienen una discrepancia de RUT que confirmar; responde «sí» o «no»."}
+            from atlas_core.edicion_ficha_b1 import confirmar_lote
+            return confirmar_lote(self, estado, conversacion_id, pendiente, actor=ACTOR_B1, origen=ORIGEN_B1)
         if discrepancia_rut:
             return {"estado": "ACLARACION_REQUERIDA", "candidatos": [],
                     "mensaje": "No hay una discrepancia de RUT pendiente de confirmar; responde «sí» o «no»."}
