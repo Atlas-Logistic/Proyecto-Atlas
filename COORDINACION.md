@@ -370,3 +370,12 @@ CASA = JAVO, MachineGuid 0fb5d7fa-4e1a-44ed-b103-2b8f9e189150, escritor pc-b7804
   - recepción Mobile: ciclos con consulta de pendientes correcta; no hubo envíos reales en la ventana.
 - NO activados, por decisión de Javier: protocolo 3 y primera versión publicada. OFICINA sin migrar: ver scripts/migracion_p0/OFICINA_PENDIENTE.md, mismo commit 8d699c1.
 - Notas de Codex reaplicadas sin commit en el Motor instalado, lo que bloquea la actualización automática y revertir_equipo.ps1 hasta que se hagan commit o se muevan.
+
+
+## Notas pendientes reconciliadas (27/11/2026)
+
+Las notas de Codex que estaban sin commit en el Motor instalado de CASA (sobre 48d6096) quedaron integradas tal cual en este archivo, seguidas de las secciones P0 (commit d805990).
+- Original exacto: origin/respaldo/notas-codex-coordinacion-20261127 (20b753b), idéntico al stash antes-p0-casa-20261127-133038, salvo finales de línea.
+- CASA avanzó de 8d699c1 a d805990 (solo documentación) con el PULL pausado y quedó sin cambios versionados.
+- La actualización automática y revertir_equipo.ps1 ya no se bloquean; la reversión simulada recorre todos sus pasos.
+- OFICINA debe instalar d805990 (scripts/migracion_p0/OFICINA_PENDIENTE.md). Su código e instalador son los de 8d699c1, ensayados y usados en CASA.
